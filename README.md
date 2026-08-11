@@ -14,16 +14,51 @@ Two deliverables:
 
 ---
 
+3. **`web/`** — a standalone page that runs the whole model in the browser and
+   re-pulls from IBKR on demand.
+
+---
+
 ## Quick start
 
 ```bash
 pip install pandas numpy
 python3 scripts/build_market_data.py     # regenerate data/ from the IBKR pull
 python3 -m screener.run_screen           # score, gate, size, report
+python3 scripts/build_page.py            # bundle the page -> web/screener.html
+
 python3 tests/test_scoring.py            # 12 correctness assertions
+node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
 Outputs land in `output/screen_results.csv` and `output/screen_report.md`.
+
+---
+
+## The page
+
+`web/screener.html` is a single self-contained file that carries the **entire
+scoring engine ported to JavaScript** plus an embedded snapshot of the IBKR data.
+Open it and the model runs — ranking, factor heatmap, gates and indicative
+sizing, all computed in the browser, nothing precomputed.
+
+**Press "Correr modelo" and, when an IBKR connector is reachable, the page
+re-pulls live snapshots, price history and account positions, then re-scores the
+full cross-section in place.** Without a connector it runs on the embedded
+snapshot and says so — the page never silently shows stale numbers as live ones.
+
+The JS port is not trusted on faith. `tests/verify_js_engine.js` extracts the
+engine straight out of the built HTML, runs it, and `tests/compare_engines.py`
+diffs every recommendation, composite z, 0–100 score, indicative weight, all
+seven block scores and gate counts against the Python engine at `1e-6`. A port
+that silently diverges would be worse than no port at all: the page would show
+confident numbers that disagree with this repo's own results.
+
+Design notes: the ranking, heatmap and score bars use a blue↔orange diverging
+pair (`#0369A1`/`#C2410C` light, `#2E9BD6`/`#D97706` dark) with slate as the
+neutral midpoint — validated for colorblind separation rather than eyeballed
+(worst adjacent pair ΔE 20.1 protan). Recommendations are never encoded by color
+alone; every pill carries its label.
 
 ---
 
@@ -159,8 +194,16 @@ screener/
   portfolio.py               Portfolio-fit metrics against the live IBKR book
   report.py                  CSV / markdown / console output
   run_screen.py              CLI entry point
-scripts/build_market_data.py Captured IBKR pull -> data/*.json
-tests/test_scoring.py        12 assertions, mostly on metric direction
+web/
+  template.html              The page: JS port of the engine, styling, IBKR live-refresh
+  screener.html              Built artifact (template + embedded data) — open this
+scripts/
+  build_market_data.py       Captured IBKR pull -> data/*.json
+  build_page.py              template.html + data -> web/screener.html
+tests/
+  test_scoring.py            12 assertions, mostly on metric direction
+  verify_js_engine.js        Extracts and runs the engine out of the built page
+  compare_engines.py         Diffs JS output against Python at 1e-6
 data/                        market_data.json, portfolio_ibkr.json
 output/                      screen_results.csv, screen_report.md
 ```

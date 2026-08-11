@@ -1,0 +1,994 @@
+<title>Screening Desk</title>
+<style>
+/* ============================ tokens ============================ */
+:root{
+  --ground:#FBFBFA; --surface:#FFFFFF; --surface-2:#F4F5F7; --surface-3:#ECEEF1;
+  --line:#E1E5E9; --line-strong:#C8CFD6;
+  --ink:#14181D; --ink-2:#3C454F; --muted:#6A737E;
+  --pos:#0369A1; --pos-rgb:3,105,161;
+  --neg:#C2410C; --neg-rgb:194,65,12;
+  --neu:#64748B; --neu-rgb:100,116,139;
+  --shadow:0 1px 2px rgba(20,24,29,.05),0 4px 14px rgba(20,24,29,.05);
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1317; --surface:#161B21; --surface-2:#1D242B; --surface-3:#252D35;
+    --line:#293138; --line-strong:#3A444E;
+    --ink:#E9EDF1; --ink-2:#B3BCC5; --muted:#87919C;
+    --pos:#2E9BD6; --pos-rgb:46,155,214;
+    --neg:#D97706; --neg-rgb:217,119,6;
+    --neu:#87919C; --neu-rgb:135,145,156;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1317; --surface:#161B21; --surface-2:#1D242B; --surface-3:#252D35;
+  --line:#293138; --line-strong:#3A444E;
+  --ink:#E9EDF1; --ink-2:#B3BCC5; --muted:#87919C;
+  --pos:#2E9BD6; --pos-rgb:46,155,214;
+  --neg:#D97706; --neg-rgb:217,119,6;
+  --neu:#87919C; --neu-rgb:135,145,156;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
+}
+
+/* ============================ base ============================ */
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:15px; line-height:1.55;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1240px;margin:0 auto;padding:0 24px}
+.prose{max-width:68ch}
+h1,h2,h3{text-wrap:balance;margin:0}
+h1{font-size:clamp(26px,3.4vw,38px);font-weight:760;letter-spacing:-.024em;line-height:1.1}
+h2{font-size:19px;font-weight:680;letter-spacing:-.012em}
+h3{font-size:15px;font-weight:660;letter-spacing:-.006em}
+p{margin:0}
+a{color:var(--pos)}
+:focus-visible{outline:2px solid var(--pos);outline-offset:2px;border-radius:3px}
+.eyebrow{
+  font-family:var(--mono);font-size:10.5px;font-weight:600;
+  letter-spacing:.13em;text-transform:uppercase;color:var(--muted);
+}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+/* ============================ run bar ============================ */
+.runbar{
+  position:sticky;top:0;z-index:40;background:var(--surface);
+  border-bottom:1px solid var(--line);
+}
+.runbar-in{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:11px 0}
+.brand{display:flex;align-items:baseline;gap:9px;margin-right:auto}
+.brand b{font-size:14px;font-weight:700;letter-spacing:-.01em}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--neu);flex:none}
+.dot.live{background:var(--pos)}
+.dot.err{background:var(--neg)}
+.status{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+button{font:inherit;cursor:pointer}
+.btn{
+  display:inline-flex;align-items:center;gap:7px;
+  font-family:var(--mono);font-size:12px;font-weight:600;letter-spacing:.02em;
+  padding:7px 14px;border-radius:6px;border:1px solid var(--line-strong);
+  background:var(--surface-2);color:var(--ink);transition:background .13s,border-color .13s;
+}
+.btn:hover:not(:disabled){background:var(--surface-3);border-color:var(--muted)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--ink);color:var(--ground);border-color:var(--ink)}
+.btn.primary:hover:not(:disabled){opacity:.87;background:var(--ink)}
+.spin{
+  width:11px;height:11px;border:2px solid currentColor;border-right-color:transparent;
+  border-radius:50%;animation:sp .7s linear infinite;flex:none
+}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation-duration:2.4s}*{transition:none!important}}
+
+/* ============================ header ============================ */
+header.hero{padding:38px 0 26px;border-bottom:1px solid var(--line)}
+.hero-meta{
+  display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:15px;
+  font-family:var(--mono);font-size:11.5px;color:var(--muted)
+}
+.hero-meta b{color:var(--ink-2);font-weight:600}
+
+/* ============================ stat rail ============================ */
+.rail{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:9px;overflow:hidden;margin:26px 0}
+.tile{background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:5px}
+.tile .v{font-family:var(--mono);font-size:25px;font-weight:600;letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+.tile .s{font-size:11.5px;color:var(--muted);line-height:1.35}
+.tile.pos .v{color:var(--pos)} .tile.neg .v{color:var(--neg)} .tile.neu .v{color:var(--neu)}
+
+/* ============================ section ============================ */
+section{padding:34px 0;border-bottom:1px solid var(--line)}
+section:last-of-type{border-bottom:0}
+.sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:5px}
+.sec-sub{color:var(--muted);font-size:13.5px;margin-bottom:18px;max-width:70ch}
+
+/* ============================ table ============================ */
+table{border-collapse:collapse;width:100%;font-size:13px}
+thead th{
+  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--muted);text-align:right;padding:0 9px 8px;white-space:nowrap;
+  border-bottom:1px solid var(--line-strong);background:var(--ground)
+}
+thead th:first-child,thead th.l{text-align:left}
+tbody td{padding:8px 9px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;
+  font-family:var(--mono);font-variant-numeric:tabular-nums}
+tbody td.l{text-align:left}
+tbody tr:hover{background:var(--surface-2)}
+.tkr{font-weight:680;letter-spacing:-.005em}
+.type{font-size:10px;color:var(--muted);letter-spacing:.06em}
+.rank{color:var(--muted);font-size:11.5px}
+
+.pill{
+  display:inline-block;font-family:var(--mono);font-size:10px;font-weight:650;
+  letter-spacing:.06em;padding:3px 8px;border-radius:4px;white-space:nowrap
+}
+.pill.OW{background:rgba(var(--pos-rgb),.13);color:var(--pos);box-shadow:inset 0 0 0 1px rgba(var(--pos-rgb),.28)}
+.pill.MW{background:rgba(var(--neu-rgb),.13);color:var(--neu);box-shadow:inset 0 0 0 1px rgba(var(--neu-rgb),.28)}
+.pill.UW{background:rgba(var(--neg-rgb),.13);color:var(--neg);box-shadow:inset 0 0 0 1px rgba(var(--neg-rgb),.28)}
+.gateflag{color:var(--neg);font-weight:700;margin-left:5px;cursor:help}
+
+/* score bar: magnitude, anchored left, 4px rounded data-end */
+.sc{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.sc-t{width:26px;text-align:right}
+.sc-b{width:52px;height:7px;background:var(--surface-3);border-radius:4px;overflow:hidden;flex:none}
+.sc-f{display:block;height:100%;border-radius:4px;background:var(--neu)}
+.sc-f.OW{background:var(--pos)} .sc-f.UW{background:var(--neg)}
+
+.z.p{color:var(--pos)} .z.n{color:var(--neg)}
+
+/* ============================ heatmap ============================ */
+.hm td.c{text-align:center;font-size:11.5px;position:relative;border-right:2px solid var(--ground)}
+.hm td.c .val{position:relative;z-index:1}
+.cell-bg{position:absolute;inset:1px;border-radius:3px;background:rgba(var(--neu-rgb),var(--a,0))}
+.cell-bg.p{background:rgba(var(--pos-rgb),var(--a,0))}
+.cell-bg.n{background:rgba(var(--neg-rgb),var(--a,0))}
+.legend{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-bottom:14px;flex-wrap:wrap}
+.ramp{display:flex;height:9px;width:132px;border-radius:3px;overflow:hidden}
+.ramp i{flex:1}
+
+/* ============================ gates / notes ============================ */
+.gate{
+  display:grid;grid-template-columns:78px 1fr;gap:14px;padding:13px 0;border-bottom:1px solid var(--line);
+  align-items:start
+}
+.gate:last-child{border-bottom:0}
+.gate .g-t{font-family:var(--mono);font-weight:700;font-size:13px}
+.gate .g-m{font-size:13px;color:var(--ink-2)}
+.gate .g-x{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:3px}
+
+.note{
+  border-left:2px solid var(--line-strong);padding:2px 0 2px 15px;margin:16px 0;
+  font-size:13.5px;color:var(--ink-2)
+}
+.note b{color:var(--ink)}
+.warnbox{
+  background:var(--surface-2);border:1px solid var(--line);border-left:3px solid var(--neg);
+  border-radius:0 7px 7px 0;padding:15px 17px;margin:18px 0;font-size:13.5px;color:var(--ink-2)
+}
+.warnbox b{color:var(--ink)}
+.mono-list{font-family:var(--mono);font-size:12px;color:var(--ink-2);line-height:1.85}
+
+/* ============================ live panel ============================ */
+.live{background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:16px 18px;margin:20px 0}
+.live h3{margin-bottom:6px}
+.live p{font-size:13.5px;color:var(--ink-2)}
+.prog{height:5px;background:var(--surface-3);border-radius:3px;overflow:hidden;margin-top:12px}
+.prog i{display:block;height:100%;background:var(--pos);border-radius:3px;transition:width .2s;width:0}
+.log{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:9px;min-height:16px}
+
+/* ============================ tooltip ============================ */
+#tip{
+  position:fixed;z-index:80;pointer-events:none;opacity:0;transition:opacity .1s;
+  background:var(--ink);color:var(--ground);font-family:var(--mono);font-size:11px;line-height:1.5;
+  padding:7px 10px;border-radius:5px;max-width:290px;box-shadow:var(--shadow)
+}
+#tip.on{opacity:1}
+#tip b{color:var(--ground)}
+
+footer{padding:30px 0 46px;color:var(--muted);font-family:var(--mono);font-size:11px}
+@media(max-width:720px){
+  .wrap{padding:0 15px}
+  .gate{grid-template-columns:1fr;gap:4px}
+}
+</style>
+
+<div class="runbar">
+  <div class="wrap runbar-in">
+    <div class="brand"><span class="dot" id="dot"></span><b>Screening Desk</b></div>
+    <div class="status" id="status">Cargando…</div>
+    <button class="btn" id="btn-theme" type="button" title="Cambiar tema">Tema</button>
+    <button class="btn" id="btn-csv" type="button">Descargar CSV</button>
+    <button class="btn primary" id="btn-run" type="button" disabled>Correr modelo</button>
+  </div>
+</div>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="eyebrow" style="margin-bottom:11px">Screening cuantitativo · Acciones y ETFs de EE.UU.</div>
+    <h1>Overweight, Market Weight o Underweight<br>para cada nombre del universo</h1>
+    <div class="hero-meta">
+      <span>Datos <b id="m-asof">—</b></span>
+      <span>Universo <b id="m-n">—</b></span>
+      <span>Benchmark <b id="m-bm">—</b></span>
+      <span>Tasa libre de riesgo <b id="m-rf">—</b></span>
+      <span>NLV <b id="m-nlv">—</b></span>
+    </div>
+  </header>
+
+  <div class="rail" id="rail"></div>
+
+  <div id="live-panel"></div>
+
+  <section>
+    <div class="sec-head"><h2>Ranking</h2><span class="eyebrow" id="rank-count"></span></div>
+    <p class="sec-sub">Score compuesto 0–100 sobre el corte transversal. La columna <b>Rec</b> ya
+      incorpora los gates de riesgo — un <span class="num">⚑</span> indica que un gate modificó o
+      confirmó la postura. Pasa el cursor sobre cualquier fila para el detalle.</p>
+    <div class="scroll"><table id="tbl-rank"></table></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Bloques de factores</h2><span class="eyebrow">z-score por bloque</span></div>
+    <p class="sec-sub">Dónde se gana o se pierde cada score. Positivo (azul) es mejor en todos los
+      bloques — la dirección ya está aplicada, así que un z alto en «Volatilidad» significa
+      <em>menos</em> riesgo, no más.</p>
+    <div class="legend">
+      <span>−2σ</span>
+      <span class="ramp" id="ramp"></span>
+      <span>+2σ</span>
+      <span style="margin-left:8px">Gris = sin datos suficientes</span>
+    </div>
+    <div class="scroll"><table class="hm" id="tbl-hm"></table></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Gates de riesgo activados</h2><span class="eyebrow">solo bajan, nunca suben</span></div>
+    <p class="sec-sub">Un score alto es condición necesaria pero no suficiente para un Overweight.
+      Estos gates codifican las restricciones que un risk manager impone encima del modelo de factores.</p>
+    <div id="gates"></div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Metodología</h2><span class="eyebrow">7 bloques ponderados</span></div>
+    <div class="scroll"><table id="tbl-meth"></table></div>
+    <div class="prose">
+      <div class="note">
+        <b>Winsorize 5/95 → z-score → orientar por dirección → compuesto ponderado.</b>
+        Volatilidad, drawdown y beta se puntúan <b>relativo al cohorte</b> (ETF vs acción individual):
+        sin eso, todo ETF encabezaría el bloque de riesgo por construcción y el screen degeneraría en
+        «prefiere lo diversificado». Los pesos se <b>renormalizan</b> sobre la data disponible en vez de
+        imputar ceros — un cero afirma silenciosamente «promedio», que es una afirmación fáctica sobre
+        un activo que no mediste.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head"><h2>Lo que este modelo NO mide</h2><span class="eyebrow">leer antes de usar</span></div>
+    <div class="prose">
+      <div class="warnbox">
+        <b>No hay data fundamental.</b> Ni P/E, ni EV/EBITDA, ni ROIC, ni márgenes, ni FCF, ni
+        apalancamiento. IBKR expone precio, volatilidad, liquidez y dividend yield — pero cero estados
+        financieros. En concreto: <b>Value, Quality y Growth están sin medir.</b> El bloque «Valuación
+        proxy» (10%) corre con dividend yield, spread IV−HV y posición en el rango de 52 semanas. Son
+        señales reales, pero no sustituyen saber cuánto gana un negocio. Un nombre puede quedar #1 aquí
+        y estar caro en toda métrica fundamental — el modelo no tiene cómo verlo.
+      </div>
+      <div class="mono-list" id="limits"></div>
+    </div>
+  </section>
+
+  <footer>
+    <div id="foot-src">—</div>
+    <div style="margin-top:5px">Los pesos indicativos son indicativos. Este screen rankea; no asigna.
+      El sizing final es una decisión de construcción de portafolio.</div>
+  </footer>
+</div>
+
+<div id="tip"></div>
+
+<script>
+"use strict";
+const DATA = {"market":{"as_of":"2026-08-11T20:00:00Z","benchmark":"SPY","risk_free_rate":0.0425,"data_source":"Interactive Brokers (MCP: get_price_snapshot, get_price_history)","history_desc":"weekly bars, 1 year (53 observations)","instruments":[{"ticker":"SPY","conid":756733,"name":"SPDR S&P 500 ETF TRUST","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"US Large Cap Blend","snapshot":{"last":{"price":770.15},"misc-statistics":{"high_52w":776.84,"low_52w":627.596},"dividend-yield":{"yield_pct":0.97},"implied-vol-underlying":{"annual_iv":0.1244624},"historical-vol":{"annual_pct":0.1274898},"implied-volatility-percentile":{"high_52w":0.1752988},"avg-90d-usd-volume":{"volume":40880763633}},"history":{"close":[643.44,645.31,645.05,647.24,657.41,663.7,661.82,669.21,653.02,664.39,677.25,682.06,670.97,671.93,659.03,683.39,685.69,681.76,680.59,690.31,683.17,694.07,691.66,689.23,691.97,690.62,681.75,689.43,685.99,672.38,662.29,648.57,634.09,655.83,679.46,710.14,713.94,720.65,737.62,739.17,745.64,756.48,737.55,741.75,746.74,728.99,744.78,754.95,743.29,738.93,747.03,773.26,770.36],"volume":[158779157,226268288,182088305,196369926,222759030,259061977,253433701,237169307,286014045,285704221,205420423,229742562,287903074,287855966,440223537,196822654,222992769,287901427,365120513,152547395,199646806,280488418,296292413,282252143,278346231,380115860,330779167,240321934,286507324,359218498,339498148,339890270,370288849,299117366,216063502,199232742,171292496,147810054,160894912,163401207,159342345,114108097,173650910,231852574,155412818,179912621,130545329,145924949,150348084,136665571,180196573,166707423,44426084]}},{"ticker":"QQQ","conid":320227571,"name":"INVESCO QQQ TRUST SERIES 1","asset_type":"ETF","exchange":"NASDAQ","country_code":"US","sector":"US Large Cap Growth","snapshot":{"last":{"price":718.12},"misc-statistics":{"high_52w":748.65,"low_52w":555.6},"dividend-yield":{"yield_pct":0.42},"implied-vol-underlying":{"annual_iv":0.1911255},"historical-vol":{"annual_pct":0.2352523},"implied-volatility-percentile":{"high_52w":0.3904383},"avg-90d-usd-volume":{"volume":31683682541}},"history":{"close":[577.34,571.97,570.4,576.06,586.66,599.35,595.97,603.18,589.5,603.93,617.1,629.07,609.74,608.86,590.07,619.25,625.48,613.62,617.05,623.89,613.12,626.65,621.26,622.72,621.87,609.65,601.92,608.81,607.29,599.75,593.72,582.06,562.58,584.98,611.07,648.85,663.88,674.15,711.23,708.93,717.54,738.31,705.06,721.34,740.62,706.52,712.6,725.51,695.33,684.23,687.99,723.03,718.45],"volume":[108511320,173561789,133603049,162944407,160952900,177837775,196549342,150909817,180868042,166872100,140577052,175134344,217617536,216151468,325631234,137708968,188893624,211954384,219200926,98426969,125793021,180914675,202932971,193950697,201209125,286865279,251720848,208418123,264331209,337559170,279109581,231301929,281432543,231858393,157097204,156117712,131865857,118647977,128698852,135910771,143323871,95618982,158626675,228997564,114952766,149090587,115477358,114028541,121283636,111423889,168369073,130277755,36680611]}},{"ticker":"IWM","conid":9579970,"name":"ISHARES RUSSELL 2000 ETF","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"US Small Cap Blend","snapshot":{"last":{"price":300.91},"misc-statistics":{"high_52w":303.05,"low_52w":219.385},"dividend-yield":{"yield_pct":0.89},"implied-vol-underlying":{"annual_iv":0.1717671},"historical-vol":{"annual_pct":0.1596007},"implied-volatility-percentile":{"high_52w":0.0199203},"avg-90d-usd-volume":{"volume":7565533119}},"history":{"close":[227.13,234.83,235.17,237.77,238.34,242.98,241.34,245.83,237.79,243.41,249.43,246.23,241.61,237.48,235.6,248.75,250.77,253.85,250.79,251.42,248.78,260.23,265.76,264.81,259.65,265.02,262.96,264.61,261.41,250.89,246.59,242.22,243.1,251.29,261.3,275.78,276.65,279.28,284.17,277.6,285.12,290.43,281.65,292.95,295.59,299.83,297.58,295.99,294.04,291.17,291.2,301.56,300.99],"volume":[109433373,111959033,94936863,106064561,136494719,165167012,117041047,106487549,123848792,141350219,107270479,138855203,137464984,162230218,278345461,97576525,134764535,131880768,112099865,61028782,90159816,131595441,113215264,115375428,126689670,140881524,114529317,84591166,110683832,161793934,174609430,147275517,152326219,117157281,88337552,85671030,85270952,83783485,87793696,85727018,105550714,69854487,94660801,131471334,77571834,93789159,64178730,67977126,75244829,69243547,95023440,71085128,23315367]}},{"ticker":"VTWO","conid":79020263,"name":"VANGUARD RUSSELL 2000 ETF","asset_type":"ETF","exchange":"NASDAQ","country_code":"US","sector":"US Small Cap Blend","snapshot":{"last":{"price":121.63},"misc-statistics":{"high_52w":122.48,"low_52w":88.5117},"dividend-yield":{"yield_pct":1.08},"implied-vol-underlying":{"annual_iv":0.1741628},"historical-vol":{"annual_pct":0.1572449},"implied-volatility-percentile":{"high_52w":0.0239044},"avg-90d-usd-volume":{}},"history":{"close":[91.85,94.97,95.13,96.14,96.41,98.55,97.57,99.37,96.13,98.4,100.83,99.54,97.68,95.99,95.25,100.58,101.39,102.65,101.77,101.62,100.54,105.17,107.39,107.02,104.92,107.1,106.26,106.96,105.72,101.4,99.65,98.09,98.19,101.52,105.57,111.43,111.79,112.84,114.84,112.21,115.2,117.33,113.83,118.38,119.36,120.28,120.23,119.63,118.89,117.71,117.73,121.85,121.67],"volume":[7351759,12916147,6940527,6609050,8335173,9694076,7656198,9317118,13051995,15416396,10776425,12066723,12529895,10993425,12552052,5009058,7948424,9561496,11486132,6445608,10972428,18032962,21983972,18718540,18383343,19831369,16448828,13570046,11933974,23494691,29920408,18046917,20784970,11998071,10120471,11047660,10259582,8378523,9690163,7519090,8572400,4909707,6548867,12425382,7568761,7198394,5337772,4575692,10955771,4483723,6743389,3962384,1335527]}},{"ticker":"SMH","conid":229725622,"name":"VANECK SEMICONDUCTOR ETF","asset_type":"ETF","exchange":"NASDAQ","country_code":"US","sector":"Semiconductors","snapshot":{"last":{"price":572.89},"misc-statistics":{"high_52w":671.83,"low_52w":281.15},"dividend-yield":{"yield_pct":0.2},"implied-vol-underlying":{"annual_iv":0.3944354},"historical-vol":{"annual_pct":0.553633},"implied-volatility-percentile":{"high_52w":0.5856574},"avg-90d-usd-volume":{"volume":6698306650}},"history":{"close":[295.65,293.64,290.29,293.28,304.32,315.71,321.82,336.68,325.34,342.83,351.14,363.02,348.12,344.98,326.13,352.28,364.42,354.12,356.23,365.86,373.3,389.22,400.39,400.09,403.46,401.65,407.72,415.03,406.37,380.56,387.33,384.74,374.25,392.32,436.88,464.16,506.44,509.82,566.54,556.34,576.32,598.93,569.69,619.96,659.88,611.61,592.29,611.03,556.53,561.19,540.53,582.7,572.93],"volume":[19752953,22380141,21029812,24660607,24300946,28603236,25807847,20000342,28373368,23055804,18818717,18571611,34908590,35492251,46466438,20408496,17015839,25692181,28942992,9827816,15295279,29113563,24449038,20754810,27355303,45614798,23986907,17733850,33109619,41447088,39615478,37258666,38048606,33735808,26698896,26408192,28006389,31221384,38465191,43799338,34341833,25611956,43683043,50803054,30369897,42953829,36955437,35076943,41020950,29448435,57545819,24510223,7891020]}},{"ticker":"GLD","conid":51529211,"name":"SPDR GOLD SHARES","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"Precious Metals","snapshot":{"last":{"price":401.07},"misc-statistics":{"high_52w":509.66,"low_52w":305.2},"dividend-yield":{"yield_pct":0.0},"implied-vol-underlying":{"annual_iv":0.2340777},"historical-vol":{"annual_pct":0.2328012},"implied-volatility-percentile":{"high_52w":0.6015936},"avg-90d-usd-volume":{"volume":2955628974}},"history":{"close":[307.43,310.58,318.07,331.05,335.42,339.18,346.74,357.64,369.12,388.99,377.52,368.12,368.31,375.96,374.27,387.88,386.44,395.44,399.02,416.74,398.28,414.47,421.29,458,444.95,455.46,462.62,468.62,483.75,473.51,460.84,413.38,414.7,429.41,437.13,445.93,433.25,423.18,433.77,417.29,413.82,417.12,396.24,386.54,387.12,373.63,378.13,377.01,368.41,371.9,371.54,398.47,400.96],"volume":[18670237,20825918,28586090,46243754,47248680,45900388,43209751,48819135,80145593,103858743,94879253,55342897,32326690,52678981,38477888,26761642,32611638,39942081,39453492,32793607,36900477,39560674,66559663,73281091,191441247,91387106,46830606,32426948,48082489,51199110,36326274,59153994,68286865,38012948,24301058,23809002,21867881,21157831,20512501,19420742,18636240,16627546,20501777,34757053,27610982,26535368,16811894,17520967,22211777,16968920,22606754,32115149,12241663]}},{"ticker":"DBA","conid":319355717,"name":"INVESCO DB AGRICULTURE FUND","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"Agriculture Commodities","snapshot":{"last":{"price":27.6},"misc-statistics":{"high_52w":28.835,"low_52w":25.42},"dividend-yield":{"yield_pct":3.28},"implied-vol-underlying":{"annual_iv":0.1426835},"historical-vol":{"annual_pct":0.1120947},"implied-volatility-percentile":{"high_52w":0.3784861},"avg-90d-usd-volume":{"volume":30580386}},"history":{"close":[27.06,27.59,27.77,27.16,27.5,26.97,26.98,26.67,26.32,26.54,26.59,26.37,26.2,26.09,25.88,26.42,26.52,26.52,26.2,25.66,25.56,25.78,25.6,25.74,25.66,25.77,25.79,26.03,26.02,26.71,26.75,26.85,27.17,27.16,26.89,26.92,27.39,28.11,27.97,27.83,27.56,27.25,26.4,26.24,26.63,26.8,26.74,27.77,27.84,28.24,27.51,27.62,27.59],"volume":[1435679,1041880,857985,666166,676916,1162570,925731,1131538,857293,771206,863428,951063,806525,756063,1249450,572151,582093,925351,603967,936740,1255665,1233786,1349656,739264,1174868,1269242,849643,1604955,1183090,5493865,11544305,9640283,10225086,8110652,7487629,7910351,5434231,9050484,9328428,8385869,5397213,4154526,9060590,4356234,3873516,6252769,3806971,4842381,4464433,2899867,4147694,3375351,763718]}},{"ticker":"TLT","conid":15547841,"name":"ISHARES 20+ YEAR TREASURY BD","asset_type":"ETF","exchange":"NASDAQ","country_code":"US","sector":"Long Duration Treasuries","snapshot":{"last":{"price":82.2},"misc-statistics":{"high_52w":89.1872,"low_52w":81.89},"dividend-yield":{"yield_pct":4.76},"implied-vol-underlying":{"annual_iv":0.1110379},"historical-vol":{"annual_pct":0.0743022},"implied-volatility-percentile":{"high_52w":0.6135458},"avg-90d-usd-volume":{"volume":2278674746}},"history":{"close":[86.4,87.05,86.6,88.56,89.95,89.02,88.9,89.38,90.62,91.2,91.47,90.29,89.57,88.87,89.5,90.21,88.17,87.34,87.55,87.74,87.03,87.93,87.8,87.93,87.13,87.54,89.72,89.41,90.82,88.46,86.54,85.83,85.64,86.79,86.49,87.07,86.71,85.61,86.08,83.66,84.68,85.76,85.06,85.77,86.75,87.36,85.51,84.47,84.52,83.25,82.25,82.76,82.19],"volume":[104716008,120650402,128377800,153992419,166712977,141024747,111943246,118944173,117760564,128849606,104666547,137844838,132576770,106450257,120060740,110226945,122735629,137402273,123897105,79586975,100820863,152601010,156870210,151360487,162561773,148073540,158351004,122355303,136901736,218023804,203115423,190078362,196556518,114281181,73632656,64746573,70786020,87040105,84637229,103423993,120577089,79150105,79165110,87427028,77222513,95156032,72172215,75466114,73998454,75616043,139247322,138224943,39312027]}},{"ticker":"XLE","conid":4215217,"name":"SS ENERGY SELECT SECTOR","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"Energy","snapshot":{"last":{"price":60.9},"misc-statistics":{"high_52w":63.46,"low_52w":41.1018},"dividend-yield":{"yield_pct":2.52},"implied-vol-underlying":{"annual_iv":0.2490884},"historical-vol":{"annual_pct":0.2592339},"implied-volatility-percentile":{"high_52w":0.5697211},"avg-90d-usd-volume":{"volume":2047448364}},"history":{"close":[42.78,44.07,45.195,43.68,44.3,44.26,45.995,44.455,42.61,42.99,44.035,44.065,44.77,46.01,44.71,45.225,45.92,45.51,44.13,44.2,45.65,46.67,47.69,49.19,51.05,53.25,54.35,54.88,55.92,56.57,57.7,59.31,62.56,59.25,56.94,55.02,56.87,58.85,55.7,59.44,59.49,56.29,57.67,57.55,53.77,53.84,53.22,55.08,57.68,59.62,59.55,57.5,60.93],"volume":[93918884,107899812,96042330,111689246,126633128,117626874,138637384,139016582,105068810,87020192,111735414,88353200,112305742,130002182,147671508,81756994,111763387,112792650,156869488,61393021,83378681,262030459,214811204,188258257,237893045,287773633,217038261,189591468,195594548,452199594,308719536,228859329,235675453,263955081,207114148,226192926,154181317,158010299,167262777,121489154,176514729,138620084,137318857,155273818,137727633,119047857,91418359,127509571,139983664,122340424,119712628,121590717,48330489]}},{"ticker":"XLV","conid":4215205,"name":"SS HEALTH CARE SELECT SECTOR","asset_type":"ETF","exchange":"ARCA","country_code":"US","sector":"Health Care","snapshot":{"last":{"price":167.84},"misc-statistics":{"high_52w":168.53,"low_52w":128.495},"dividend-yield":{"yield_pct":1.5},"implied-vol-underlying":{"annual_iv":0.1502485},"historical-vol":{"annual_pct":0.1955803},"implied-volatility-percentile":{"high_52w":0.3585657},"avg-90d-usd-volume":{"volume":1785675724}},"history":{"close":[136.21,138.17,137.43,137.9,138.11,137.29,135.5,144.82,142.11,143.27,146.03,144.25,146.14,151.83,154.61,157.65,153.26,154.06,154.94,156.05,155.51,157.31,155.74,157.48,154.74,157.71,157.67,156.82,160.2,152.7,149.79,145.33,143.26,146.81,147.31,148.8,144.18,145.16,143.49,145.1,149.89,149.47,153.01,153.81,149.4,160.34,163.74,160.84,161.09,162.57,162.55,165.68,168.01],"volume":[50548867,56115000,40765463,44301396,59212325,48259184,39260913,69123497,40737016,29973688,30102632,34058694,48785834,62166581,89169198,43610200,50089926,46297214,36707085,14800530,17493768,55198686,46200080,33952146,39530034,63245351,46526059,37033130,50166630,67583773,62594504,53756168,65763459,42906054,26917882,28205499,26607154,35617656,32520993,33200487,32337561,26475347,44172236,40118548,27421130,38165150,32669537,39961792,35393703,22286392,38092660,44091917,10074508]}},{"ticker":"AAPL","conid":265598,"name":"APPLE INC","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Information Technology","snapshot":{"last":{"price":304.28},"misc-statistics":{"high_52w":344.57,"low_52w":223.142},"dividend-yield":{"yield_pct":0.43},"implied-vol-underlying":{"annual_iv":0.2124045},"historical-vol":{"annual_pct":0.3722318},"implied-volatility-percentile":{"high_52w":0.1115538},"avg-90d-usd-volume":{"volume":17355859104}},"history":{"close":[231.59,227.76,232.14,239.69,234.07,245.5,255.46,258.02,245.27,252.29,262.82,270.37,268.47,272.41,271.49,278.85,278.78,278.28,273.67,273.4,271.01,259.37,255.53,248.04,259.48,278.12,255.78,264.58,264.18,257.46,250.12,247.99,248.8,255.92,260.48,270.23,271.06,280.14,293.32,300.23,308.82,312.06,307.34,291.13,298.01,283.78,308.63,315.32,333.74,333.02,308.91,313.33,304.91],"volume":[132365536,108138692,98470086,123977970,187498065,179433645,181810815,120585862,117090163,103145359,146821518,148532454,117328931,117037924,118496999,76049663,112008210,87330895,128254722,59080198,55084115,129243141,111290332,114185600,152023874,179137010,133115041,81523424,100634417,96652330,83366099,86439552,92543085,70110280,100713364,117505998,105068350,135535260,145764399,126109362,109505762,101035735,147093321,184454895,105027814,230406220,150534179,122666813,168593280,130586229,217064277,161775593,48678561]}},{"ticker":"MSFT","conid":272093,"name":"MICROSOFT CORP","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Information Technology","snapshot":{"last":{"price":503.62},"misc-statistics":{"high_52w":551.46,"low_52w":349.2},"dividend-yield":{"yield_pct":0.7},"implied-vol-underlying":{"annual_iv":0.2618132},"historical-vol":{"annual_pct":0.4863409},"implied-volatility-percentile":{"high_52w":0.3306773},"avg-90d-usd-volume":{"volume":20815909708}},"history":{"close":[520.17,507.23,506.69,495,509.9,517.93,511.46,517.35,510.96,513.58,523.61,517.81,496.82,510.18,472.12,492.01,483.16,478.53,485.92,487.71,472.94,479.28,459.86,465.95,430.29,401.14,401.32,397.23,392.74,408.96,395.55,381.87,356.77,373.46,370.87,422.79,424.62,414.44,415.12,421.92,418.57,450.24,416.67,390.74,379.4,372.97,390.49,385.1,393.82,381.7,464.72,499.99,503.52],"volume":[37683807,52335936,38306299,38100780,42040488,45547366,33321213,37032213,37901511,30458800,32789911,70114678,64733895,56245371,72954465,49105650,59843278,60569884,61474998,24086005,33142960,57569184,72982108,76301301,171746366,164046024,121075964,71468344,116067610,101616034,82685142,83894233,110301301,85290262,77907010,132327582,94335488,115538964,86867271,96217025,82676797,90243961,112103367,104241563,87303153,165860050,108235764,81165141,98225582,82718716,171969181,123604847,29164575]}},{"ticker":"NVDA","conid":4815747,"name":"NVIDIA CORP","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Information Technology","snapshot":{"last":{"price":217.5},"misc-statistics":{"high_52w":236.54,"low_52w":164.043},"dividend-yield":{"yield_pct":0.13},"implied-vol-underlying":{"annual_iv":0.3839923},"historical-vol":{"annual_pct":0.401752},"implied-volatility-percentile":{"high_52w":0.4063745},"avg-90d-usd-volume":{"volume":32732241007}},"history":{"close":[180.45,177.99,174.18,167.02,177.82,176.67,178.19,187.62,183.16,183.22,186.26,202.49,188.15,190.17,178.88,177,182.41,175.02,180.99,190.53,188.85,184.86,186.23,187.67,191.13,185.41,182.81,189.82,177.19,177.82,180.25,172.7,167.52,177.39,188.63,201.68,208.27,198.45,215.2,225.32,215.33,211.14,205.1,205.19,210.69,192.53,194.83,210.96,202.81,206.84,200.75,223.96,217.45],"volume":[420931650,605672295,714470169,513736826,563784003,592382533,660985060,589145916,581104087,597362259,439401209,717372798,639288323,597772238,810199974,531306850,537321255,573009684,590506001,347522193,325849282,545758090,537018398,468763585,510666606,631433534,535399659,422333253,784846844,615624240,545747159,631369571,573479896,463462072,453816284,514498064,451580220,562974077,474246052,527937223,501512647,383985238,562858206,429997198,301767666,369526879,304030981,394638960,362490782,330624035,394803771,378031103,129886309]}},{"ticker":"AMZN","conid":3691937,"name":"AMAZON.COM INC","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Consumer Discretionary","snapshot":{"last":{"price":272.09},"misc-statistics":{"high_52w":287.2,"low_52w":196.0},"dividend-yield":{"yield_pct":0.0},"implied-vol-underlying":{"annual_iv":0.2855829},"historical-vol":{"annual_pct":0.5011217},"implied-volatility-percentile":{"high_52w":0.2350598},"avg-90d-usd-volume":{"volume":13790796643}},"history":{"close":[231.03,228.84,229,232.33,228.15,231.48,219.78,219.51,216.37,213.04,224.21,244.22,244.41,234.69,220.69,233.22,229.53,226.19,227.35,232.52,226.5,247.38,239.12,239.16,239.3,210.32,198.79,210.11,210,213.21,207.67,205.37,199.34,209.77,238.38,250.56,263.99,268.26,272.68,264.14,266.32,270.64,246.03,238.55,244.39,232.69,242.67,245.34,247.23,232.11,271.58,274.48,272.31],"volume":[111404338,93913712,66002276,100419417,123987736,119969154,152299399,124466866,145815847,123207472,110914711,225673434,150853654,89222530,171622164,76164236,111974592,84718580,107405489,49676955,66258741,125133213,111572204,90443707,114895954,240098779,234042071,139812517,131214079,151055287,115617094,118651978,124179898,92744779,131327935,145494747,119376912,174397495,117344291,101823879,97594178,87121697,128376617,113376899,99547872,193223807,132418492,91156761,104180521,96029733,182323370,146675271,32068458]}},{"ticker":"META","conid":107113386,"name":"META PLATFORMS INC-CLASS A","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Communication Services","snapshot":{"last":{"price":598.86},"misc-statistics":{"high_52w":794.422,"low_52w":520.26},"dividend-yield":{"yield_pct":0.35},"implied-vol-underlying":{"annual_iv":0.3442652},"historical-vol":{"annual_pct":0.5759589},"implied-volatility-percentile":{"high_52w":0.5378486},"avg-90d-usd-volume":{"volume":10936546209}},"history":{"close":[785.23,754.79,738.7,752.45,755.59,778.38,743.75,710.56,705.3,716.91,738.36,648.35,621.71,609.46,594.25,647.95,673.42,644.23,658.77,663.29,650.41,653.06,620.25,658.76,716.5,661.46,639.77,655.66,648.18,644.86,613.71,593.66,525.72,574.46,629.86,688.55,675.03,608.75,609.63,614.23,610.26,632.51,593,566.98,577.22,550.25,582.9,669.21,646.01,595.19,556.71,592.1,599.04],"volume":[21147050,29816098,14692591,17449839,19740440,28387316,21601594,32666334,34788717,20276553,19372099,93893902,79687256,61000244,66748983,43075787,48907343,38603092,43482126,21101608,22747925,35801791,43758961,45223800,81544533,49705977,42642452,30508342,29590929,31222259,36257378,38460156,65852509,58393830,55761245,39980322,32552825,69921904,48748153,40038728,35913420,41994014,73439479,43502102,40573793,39889982,59263266,70979407,56570822,33056038,63760105,48056507,16100158]}},{"ticker":"GOOGL","conid":208813719,"name":"ALPHABET INC-CL A","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Communication Services","snapshot":{"last":{"price":343.72},"misc-statistics":{"high_52w":408.61,"low_52w":196.146},"dividend-yield":{"yield_pct":0.25},"implied-vol-underlying":{"annual_iv":0.261747},"historical-vol":{"annual_pct":0.38516},"implied-volatility-percentile":{"high_52w":0.0318725},"avg-90d-usd-volume":{"volume":11378677749}},"history":{"close":[203.9,206.09,212.91,235,240.8,254.72,246.54,245.35,236.57,253.3,259.92,281.19,278.83,276.41,299.66,320.18,321.27,309.29,307.16,313.51,315.15,328.57,330,327.93,338,322.86,305.72,314.98,311.76,298.52,302.28,301,274.34,295.77,317.24,341.68,344.4,385.69,400.8,396.78,382.97,380.34,368.53,359.68,368.03,337.39,359.91,357.18,346.77,319.74,356.13,354.3,343.76],"volume":[70236707,76536650,75738893,138833691,85304297,112049931,70721010,75809513,66618537,61936851,81537259,112789409,78029979,63257239,165152383,126654772,77686650,78576114,80955655,35218187,41086748,77638426,80728537,58606221,66278032,141961990,110640475,73219564,74414860,71880637,57924600,55661730,84404419,60616058,56854857,55082764,50336010,104164591,75943271,73166301,80555800,54602289,115400760,85507387,61500531,122693309,66143985,65221521,78726240,110734915,103170423,106098365,28473493]}},{"ticker":"AVGO","conid":313130367,"name":"BROADCOM INC","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Information Technology","snapshot":{"last":{"price":415.85},"misc-statistics":{"high_52w":495.0,"low_52w":280.259},"dividend-yield":{"yield_pct":0.6},"implied-vol-underlying":{"annual_iv":0.4984415},"historical-vol":{"annual_pct":0.4960879},"implied-volatility-percentile":{"high_52w":0.6454183},"avg-90d-usd-volume":{"volume":10810441748}},"history":{"close":[306.34,294,297.39,334.89,359.87,344.94,334.53,338.37,324.63,349.33,354.13,369.63,349.43,342.46,340.2,402.96,390.24,359.93,340.36,352.13,347.62,344.97,351.71,320.05,331.3,332.92,325.17,332.65,319.55,330.48,322.16,310.51,300.68,314.55,371.55,406.54,422.76,421.28,430,425.19,414.14,446.77,385.73,382.07,411.35,365.02,360.45,399.97,370.82,381.92,389.28,427.76,415.96],"volume":[36149992,47072966,46375946,83014747,99195191,63453601,46727914,41004108,45864857,63244239,33426411,51528733,52962268,46050400,70507976,72257011,57199567,129594812,203595071,52441346,44003690,77293732,70025816,74810597,74613411,108988463,66914009,39234137,69388962,109072905,87963282,80197280,67099015,53066382,80587281,65090225,59015340,51110377,59137535,52736181,48550924,46181362,146139991,94101963,68562857,68740503,50272255,68994824,52138977,39980165,55524013,48180678,13764463]}},{"ticker":"TSLA","conid":76792991,"name":"TESLA INC","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Consumer Discretionary","snapshot":{"last":{"price":332.81},"misc-statistics":{"high_52w":498.83,"low_52w":297.38},"dividend-yield":{"yield_pct":0.0},"implied-vol-underlying":{"annual_iv":0.3797638},"historical-vol":{"annual_pct":0.5026742},"implied-volatility-percentile":{"high_52w":0.0},"avg-90d-usd-volume":{"volume":14705373822}},"history":{"close":[330.56,340.01,333.87,350.84,395.94,426.07,440.4,429.83,413.49,439.31,433.72,456.56,429.52,404.35,391.09,430.17,455,458.96,481.2,475.19,438.07,445.01,437.5,449.06,430.41,411.11,417.44,411.82,402.51,396.73,391.2,367.96,361.83,360.59,348.95,400.62,376.3,390.82,428.35,422.24,426.01,435.79,391,406.43,400.49,379.71,393.45,407.76,380.84,313.03,311.21,328.58,332.81],"volume":[208559059,256516046,264063746,223957047,325096576,356470791,318749963,345372013,286028464,265342325,278460661,276851439,350554587,323738301,370312336,203910022,262572075,272957071,380797336,195459691,199328860,261379089,219203662,194613663,226137337,241581838,215224272,168549619,222000820,229347635,242059439,223442591,232318017,203574031,262633583,293492336,244607357,217581189,207805763,231521700,173833145,124235286,163685499,197685283,132942289,147129083,156974894,145001882,108942173,189598898,140700708,115928598,35771697]}},{"ticker":"MU","conid":9939,"name":"MICRON TECHNOLOGY INC","asset_type":"STOCK","exchange":"NASDAQ","country_code":"US","sector":"Information Technology","snapshot":{"last":{"price":868.14},"misc-statistics":{"high_52w":1255.0,"low_52w":113.289},"dividend-yield":{"yield_pct":0.06},"implied-vol-underlying":{"annual_iv":0.6530455},"historical-vol":{"annual_pct":1.0044706},"implied-volatility-percentile":{"high_52w":0.3705179},"avg-90d-usd-volume":{"volume":44380278389}},"history":{"close":[120.87,117.68,119.01,131.37,157.23,162.73,157.27,187.83,181.6,202.38,219.02,223.77,237.92,246.83,207.37,236.48,237.22,241.14,265.92,284.79,315.42,345.09,362.75,399.65,414.88,394.69,411.66,428.17,412.37,370.3,426.13,422.9,357.22,366.24,420.59,455.07,496.72,542.21,746.81,724.66,751,971,864.01,981.61,1133.99,1132.33,975.56,979.3,848.95,920.95,823.03,877.57,868.52],"volume":[49633340,50095143,45540402,44929893,98971724,73115401,103333808,92977989,80442809,73696084,64407270,53702076,81857171,81319133,117761149,42817248,59737339,62405405,109357154,55995180,72454659,121225628,82551879,120293175,124624882,131068353,122410735,72706803,92487662,96602253,107798421,156012062,155311153,176685916,130417180,125191818,116811158,127081997,199793341,202474788,178281575,172105653,173372090,194434047,123211883,189738018,136642029,128827258,150598110,131033808,190562218,119201106,38068166]}},{"ticker":"JPM","conid":1520593,"name":"JPMORGAN CHASE & CO","asset_type":"STOCK","exchange":"NYSE","country_code":"US","sector":"Financials","snapshot":{"last":{"price":362.0},"misc-statistics":{"high_52w":363.0,"low_52w":277.68},"dividend-yield":{"yield_pct":1.67},"implied-vol-underlying":{"annual_iv":0.1986012},"historical-vol":{"annual_pct":0.2392225},"implied-volatility-percentile":{"high_52w":0.0039841},"avg-90d-usd-volume":{"volume":3315444601}},"history":{"close":[290.49,296.24,301.42,294.38,306.91,314.78,316.06,310.03,300.89,297.56,300.44,311.12,314.21,303.61,298.02,313.08,315.04,318.52,317.21,327.91,325.48,329.19,312.47,297.72,305.89,322.4,302.55,310.79,300.3,289.48,283.44,286.56,282.84,294.6,309.87,310.29,308.28,312.47,302.1,297.81,306.38,299.31,312.37,320.72,325.22,329.05,334.47,336.47,341.1,353.21,351.79,357.52,362.04],"volume":[15340842,15480857,13927799,13867951,17052095,20099870,14404798,16074375,14824171,28755394,15902340,14929470,21037538,20137964,22484608,17051329,19833718,38354337,24567971,11270854,11244639,22045610,45658591,27943334,33240265,31195212,27986140,17387829,31442776,30124116,28995004,24781090,25276102,19258276,18915999,26362167,17042829,15885601,18902495,20864216,19362189,20279737,23309959,19935704,24070502,21305715,13916586,17056857,27471526,15305370,19650035,15415588,4606808]}},{"ticker":"LLY","conid":9160,"name":"ELI LILLY & CO","asset_type":"STOCK","exchange":"NYSE","country_code":"US","sector":"Health Care","snapshot":{"last":{"price":1213.09},"misc-statistics":{"high_52w":1249.34,"low_52w":626.146},"dividend-yield":{"yield_pct":0.52},"implied-vol-underlying":{"annual_iv":0.3115138},"historical-vol":{"annual_pct":0.4218158},"implied-volatility-percentile":{"high_52w":0.2231076},"avg-90d-usd-volume":{"volume":3684925077}},"history":{"close":[701.23,711.68,732.58,727.21,755.39,751.99,724.54,839.87,833.49,802.83,825.45,862.86,924.37,1025.28,1059.7,1075.47,1010.31,1027.51,1071.44,1077.75,1080.36,1063.56,1038.4,1064.29,1037.15,1058.18,1040,1009.52,1051.99,990.33,985.08,906.7,878.24,935.58,939.47,927.03,883.96,963.33,948.45,1004.92,1065,1105,1131.42,1133,1098.57,1208.12,1213.91,1188.58,1179.11,1196.03,1148.84,1185.71,1214.7],"volume":[14796336,9847974,8649964,4355521,5450951,6971011,6391329,13407108,5689683,4870277,4351359,8305674,18774833,13986016,9585872,7495329,8083873,9228586,11264861,3307297,3189759,9642468,7406223,5986173,7126530,15863388,8213006,5780848,8372196,7186733,4765911,9127679,6041799,8138911,5577443,7270022,8335497,12065994,7527981,7329521,7294605,7320013,8393250,8977957,6054429,9838237,6465971,6344061,6364437,5057415,6179587,10347857,2510420]}}]},"portfolio":{"as_of":"2026-08-11T20:00:00Z","net_liquidation":15844164.41,"total_cash":3111284.83,"gross_position_value":7741578.26,"leverage":0.49,"positions":[{"ticker":"SPY","market_value":2619734.03,"quantity":3400,"asset_class":"STK"},{"ticker":"GLD","market_value":2003150.02,"quantity":5000,"asset_class":"STK"},{"ticker":"AAPL","market_value":608750.0,"quantity":2000,"asset_class":"STK"},{"ticker":"META","market_value":600710.02,"quantity":1000,"asset_class":"STK"},{"ticker":"MU","market_value":431165.01,"quantity":500,"asset_class":"STK"},{"ticker":"AMZN","market_value":273339.29,"quantity":1000,"asset_class":"STK"},{"ticker":"DBA","market_value":220759.99,"quantity":8000,"asset_class":"STK"},{"ticker":"VTWO","market_value":-486559.998,"quantity":-4000,"asset_class":"STK"},{"ticker":"USTBILL","market_value":5957652.74,"quantity":6000,"asset_class":"BILL"},{"ticker":"DOMREP38","market_value":145689.78,"quantity":150,"asset_class":"BOND"},{"ticker":"QQQ_PUT_JUN27_580","market_value":348560.41,"quantity":200,"asset_class":"OPT"}]}};
+
+/* ================================================================
+   Motor de scoring — port 1:1 de screener/ (Python)
+   ================================================================ */
+const PPY = 52, ZCLIP = 3, WLO = 5, WHI = 95;
+
+const BLOCKS = [
+  {key:"momentum", label:"Momentum", weight:.22, metrics:[
+    {k:"mom_12_1",d:1,w:.35}, {k:"mom_6m",d:1,w:.20}, {k:"mom_3m",d:1,w:.15},
+    {k:"pct_from_52w_high",d:1,w:.15}, {k:"above_40w_ma",d:1,w:.10}, {k:"ma_slope_13w",d:1,w:.05}]},
+  {key:"risk_adjusted", label:"Retorno ajustado", weight:.18, metrics:[
+    {k:"sharpe_1y",d:1,w:.30}, {k:"sortino_1y",d:1,w:.30},
+    {k:"calmar_1y",d:1,w:.25}, {k:"pct_positive_periods",d:1,w:.15}]},
+  {key:"risk", label:"Volatilidad", weight:.15, metrics:[
+    {k:"volatility_1y",d:-1,w:.30,peer:1}, {k:"max_drawdown",d:-1,w:.30,peer:1},
+    {k:"downside_deviation",d:-1,w:.20,peer:1}, {k:"ulcer_index",d:-1,w:.20,peer:1}]},
+  {key:"market_sensitivity", label:"Sensib. mercado", weight:.12, metrics:[
+    {k:"capture_spread",d:1,w:.40}, {k:"alpha_annual",d:1,w:.35},
+    {k:"idio_vol_share",d:1,w:.15}, {k:"beta_1y",d:-1,w:.10,peer:1}]},
+  {key:"liquidity", label:"Liquidez", weight:.10, metrics:[
+    {k:"adv_usd_log",d:1,w:.50}, {k:"days_to_liquidate",d:-1,w:.35}, {k:"turnover_stability",d:1,w:.15}]},
+  {key:"valuation_carry", label:"Valuación proxy", weight:.10, metrics:[
+    {k:"dividend_yield",d:1,w:.30}, {k:"iv_hv_spread",d:-1,w:.30},
+    {k:"iv_percentile",d:-1,w:.20}, {k:"range_position",d:-1,w:.20}]},
+  {key:"portfolio_fit", label:"Encaje portafolio", weight:.13, metrics:[
+    {k:"corr_to_portfolio",d:-1,w:.40}, {k:"diversification_benefit",d:1,w:.35},
+    {k:"existing_overlap",d:-1,w:.25}]},
+];
+const BLOCK_WHY = {
+  momentum:"Momentum transversal 12M−1M (se salta el mes de reversión), 6M, 3M, distancia al máximo de 52 semanas y posición/pendiente de la media de 40 semanas.",
+  risk_adjusted:"Sharpe, Sortino y Calmar más el hit rate. El retorno bruto no es el objetivo; el retorno por unidad de riesgo sí.",
+  risk:"Volatilidad realizada, max drawdown, desviación a la baja e índice Ulcer. Es el freno a la tendencia del momentum a cargarse de beta.",
+  market_sensitivity:"Captura arriba/abajo, alfa de Jensen, participación de vol idiosincrática y beta. El beta cuesta 3bp en un fondo índice; lo que justifica riesgo idiosincrático es el alfa.",
+  liquidity:"ADV en dólares, días para liquidar al 20% de participación y estabilidad del volumen. Un screen que ignora capacidad produce ideas que el portafolio no puede implementar.",
+  valuation_carry:"Dividend yield, spread entre vol implícita y realizada, percentil de IV y posición en el rango de 52 semanas. Proxies de mercado, NO fundamentales.",
+  portfolio_fit:"Correlación con tu libro actual, beneficio marginal de diversificación y solapamiento con posiciones existentes. Esto es lo que separa un screen de una decisión de portafolio.",
+};
+
+const GATES = {
+  maxDD:-.45, beta:1.30, corr:.85, existingW:.05,
+  maxDays:3.0, volCeiling:.60, dupCorr:.95,
+};
+const ELIG = {minPrice:5, minAdv:20e6, minBars:30, participation:.20, maxDays:3.0};
+const SIZING = {targetVol:.20, base:.030, ow:1.75, mw:1.00, uw:.35, min:.005, max:.080};
+const BANDS = {ow:.50, uw:-.50, minBlocks:5};
+
+/* ---------- primitivas ---------- */
+const fin = v => v!==null && v!==undefined && Number.isFinite(v);
+const mean = a => a.reduce((s,x)=>s+x,0)/a.length;
+function sd(a){ if(a.length<2) return NaN; const m=mean(a);
+  return Math.sqrt(a.reduce((s,x)=>s+(x-m)*(x-m),0)/(a.length-1)); }
+function pctile(sorted,q){ // numpy 'linear'
+  const n=sorted.length; if(!n) return NaN; if(n===1) return sorted[0];
+  const idx=(n-1)*q/100, lo=Math.floor(idx), hi=Math.ceil(idx);
+  return lo===hi ? sorted[lo] : sorted[lo]+(idx-lo)*(sorted[hi]-sorted[lo]);
+}
+function rets(p){ const o=[]; for(let i=1;i<p.length;i++){ const pr=p[i-1];
+  if(pr!==0){ const r=(p[i]-pr)/pr; if(Number.isFinite(r)) o.push(r);} } return o; }
+function align(a,b){ const n=Math.min(a.length,b.length); return n?[a.slice(-n),b.slice(-n)]:[[],[]]; }
+
+/* formateo — usado por los mensajes de los gates y por el render */
+const pf=(v,d=1)=>fin(v)?(v*100).toFixed(d)+"%":"—";
+const pfs=(v,d=1)=>fin(v)?(v>=0?"+":"")+(v*100).toFixed(d)+"%":"—";
+const nf=(v,d=2)=>fin(v)?v.toFixed(d):"—";
+const nfs=(v,d=2)=>fin(v)?(v>=0?"+":"")+v.toFixed(d):"—";
+
+/* ---------- métricas ---------- */
+function totalReturn(p,lb,skip=0){ if(p.length<lb+skip+1) return null;
+  const e=p.length-1-skip, s=e-lb; if(s<0||p[s]===0) return null; return p[e]/p[s]-1; }
+function pctAboveMA(p,w){ if(p.length<w) return null;
+  const ma=mean(p.slice(-w)); return ma===0?null:p[p.length-1]/ma-1; }
+function maSlope(p,w,lb){ if(p.length<w+lb) return null;
+  const now=mean(p.slice(-w)), then=mean(p.slice(p.length-w-lb,p.length-lb));
+  return then===0?null:now/then-1; }
+function annVol(r){ return r.length<3?null:sd(r)*Math.sqrt(PPY); }
+function annRet(p){ if(p.length<2||p[0]<=0) return null;
+  const y=(p.length-1)/PPY; if(y<=0) return null; const g=p[p.length-1]/p[0];
+  return g<=0?null:Math.pow(g,1/y)-1; }
+function downDev(r,mar=0){ if(r.length<3) return null;
+  const d=r.filter(x=>x<mar).map(x=>x-mar); if(!d.length) return 0;
+  return Math.sqrt(mean(d.map(x=>x*x)))*Math.sqrt(PPY); }
+function maxDD(p){ if(p.length<2) return null; let peak=-Infinity,w=0;
+  for(const x of p){ if(x>peak) peak=x; if(peak!==0){ const dd=x/peak-1; if(dd<w) w=dd; } } return w; }
+function ulcer(p){ if(p.length<2) return null; let peak=-Infinity; const sq=[];
+  for(const x of p){ if(x>peak) peak=x; if(peak!==0) sq.push(Math.pow((x/peak-1)*100,2)); }
+  return sq.length?Math.sqrt(mean(sq)):null; }
+function sharpe(r,rf){ if(r.length<3) return null; const s=sd(r); if(!s) return null;
+  return (mean(r)-rf/PPY)/s*Math.sqrt(PPY); }
+function sortino(r,rf){ if(r.length<3) return null; const dd=downDev(r,rf/PPY);
+  if(dd===null||dd===0) return null; return (mean(r)-rf/PPY)*PPY/dd; }
+function calmar(p){ const a=annRet(p),m=maxDD(p);
+  return (a===null||m===null||m===0)?null:a/Math.abs(m); }
+function pctPos(r){ return r.length<3?null:r.filter(x=>x>0).length/r.length; }
+function corr(a,b){ const [x,y]=align(a,b); if(x.length<12) return null;
+  const sx=sd(x),sy=sd(y); if(!sx||!sy) return null;
+  const mx=mean(x),my=mean(y); let c=0; for(let i=0;i<x.length;i++) c+=(x[i]-mx)*(y[i]-my);
+  const v=c/(x.length-1)/(sx*sy); return Number.isFinite(v)?v:null; }
+function betaAlpha(r,bm,rf){ const [x,m]=align(r,bm); if(x.length<12) return [null,null,null];
+  const q=rf/PPY, xe=x.map(v=>v-q), me=m.map(v=>v-q);
+  const vm=sd(me)*sd(me); if(!vm) return [null,null,null];
+  const mx=mean(xe),mm=mean(me); let cv=0;
+  for(let i=0;i<xe.length;i++) cv+=(xe[i]-mx)*(me[i]-mm);
+  cv/=(xe.length-1);
+  const beta=cv/vm, aP=mx-beta*mm, aA=Math.pow(1+aP,PPY)-1;
+  const c=corr(x,m); return [beta,aA,c===null?null:c*c]; }
+function capture(r,bm){ const [x,m]=align(r,bm); if(x.length<12) return [null,null];
+  const up=[],dn=[],upM=[],dnM=[];
+  for(let i=0;i<m.length;i++){ if(m[i]>0){up.push(x[i]);upM.push(m[i]);}
+    else if(m[i]<0){dn.push(x[i]);dnM.push(m[i]);} }
+  const u=(up.length>=3&&mean(upM)!==0)?mean(up)/mean(upM):null;
+  const d=(dn.length>=3&&mean(dnM)!==0)?mean(dn)/mean(dnM):null;
+  return [u,d]; }
+
+const sg=(s,f,k)=>{ if(!s) return null; const n=s[f]??s[f.replace(/_/g,"-")];
+  if(n===null||n===undefined) return null;
+  if(typeof n==="object"){ const v=n[k]; return fin(v)?v:null; } return fin(n)?n:null; };
+
+function advUsd(it){ const d=sg(it.snapshot,"avg_90d_usd_volume","volume");
+  if(d!==null&&d>0) return d;
+  const v=it.history.volume||[], c=it.history.close||[];
+  if(!v.length||!c.length) return null;
+  const rec=[...(v.length>=13?v.slice(-13):v)].sort((a,b)=>a-b);
+  return (pctile(rec,50)/5)*c[c.length-1]; }
+function turnStab(it){ const v=it.history.volume||[]; if(v.length<8) return null;
+  const m=mean(v), s=sd(v); return (!m||!s)?null:m/s; }
+function lastPrice(it){ const p=sg(it.snapshot,"last","price");
+  if(p!==null&&p>0) return p; const c=it.history.close||[];
+  return c.length?c[c.length-1]:null; }
+function rangePos(it){ const hi=sg(it.snapshot,"misc_statistics","high_52w"),
+  lo=sg(it.snapshot,"misc_statistics","low_52w"), l=lastPrice(it);
+  if(hi===null||lo===null||l===null||hi<=lo) return null;
+  return Math.max(0,Math.min(1,(l-lo)/(hi-lo))); }
+function pctFromHigh(it){ let hi=sg(it.snapshot,"misc_statistics","high_52w"), l=lastPrice(it);
+  const c=it.history.close||[];
+  if(hi===null||l===null||hi<=0){ if(c.length<2) return null; hi=Math.max(...c); l=c[c.length-1]; }
+  return hi<=0?null:l/hi-1; }
+function ivHv(it){ const iv=sg(it.snapshot,"implied_vol_underlying","annual_iv"),
+  hv=sg(it.snapshot,"historical_vol","annual_pct");
+  return (iv===null||hv===null)?null:iv-hv; }
+function divYield(it){ const y=sg(it.snapshot,"dividend_yield","yield_pct");
+  return y===null?null:y/100; }
+
+function computeMetrics(it,bm,netLiq,rf){
+  const p=it.history.close||[], r=rets(p);
+  const [beta,alpha,r2]=betaAlpha(r,bm,rf);
+  const [uc,dc]=capture(r,bm);
+  const adv=advUsd(it), dd=maxDD(p);
+  const dtl=(adv&&adv>0)?(netLiq*SIZING.base)/(adv*ELIG.participation):null;
+  return {
+    mom_12_1:totalReturn(p,48,4), mom_6m:totalReturn(p,26), mom_3m:totalReturn(p,13),
+    pct_from_52w_high:pctFromHigh(it), above_40w_ma:pctAboveMA(p,40), ma_slope_13w:maSlope(p,40,13),
+    sharpe_1y:sharpe(r,rf), sortino_1y:sortino(r,rf), calmar_1y:calmar(p), pct_positive_periods:pctPos(r),
+    volatility_1y:annVol(r), max_drawdown:dd===null?null:Math.abs(dd),
+    downside_deviation:downDev(r), ulcer_index:ulcer(p),
+    capture_spread:(uc!==null&&dc!==null)?uc-dc:null, alpha_annual:alpha,
+    idio_vol_share:r2===null?null:1-r2, beta_1y:beta,
+    adv_usd_log:(adv&&adv>0)?Math.log10(adv):null, days_to_liquidate:dtl,
+    turnover_stability:turnStab(it),
+    dividend_yield:divYield(it), iv_hv_spread:ivHv(it),
+    iv_percentile:sg(it.snapshot,"implied_volatility_percentile","high_52w"),
+    range_position:rangePos(it),
+  };
+}
+function diagnostics(it,bm,rf){
+  const p=it.history.close||[], r=rets(p);
+  const [beta,alpha]=betaAlpha(r,bm,rf); const [uc,dc]=capture(r,bm);
+  return {last_price:lastPrice(it), bars:p.length,
+    return_1y:totalReturn(p,Math.min(52,Math.max(p.length-1,0))),
+    volatility:annVol(r), max_drawdown:maxDD(p), beta, alpha_annual:alpha,
+    upside_capture:uc, downside_capture:dc, adv_usd:advUsd(it), dividend_yield:divYield(it)}; }
+
+/* ---------- portafolio ---------- */
+function portfolioSeries(positions,histByT){
+  const use={}, exp={};
+  for(const q of positions){ const t=(q.ticker||"").toUpperCase(), mv=+q.market_value||0;
+    if(!t||!mv) continue; const p=histByT[t]; if(!p||p.length<13) continue;
+    const r=rets(p); if(r.length<12) continue; use[t]=r; exp[t]=(exp[t]||0)+mv; }
+  const ks=Object.keys(use); if(!ks.length) return [];
+  const gross=ks.reduce((s,t)=>s+Math.abs(exp[t]),0); if(!gross) return [];
+  const n=Math.min(...ks.map(t=>use[t].length)), out=new Array(n).fill(0);
+  for(const t of ks){ const w=exp[t]/gross, rr=use[t].slice(-n);
+    for(let i=0;i<n;i++) out[i]+=w*rr[i]; }
+  return out;
+}
+function divBenefit(cand,port,alloc=.02){
+  const [c,p]=align(cand,port); if(c.length<12) return null;
+  const base=sd(p); if(!base) return null;
+  const bl=p.map((v,i)=>(1-alloc)*v+alloc*c[i]);
+  return (base-sd(bl))*Math.sqrt(PPY); }
+function existingWeights(positions,nlv){ const o={}; if(nlv<=0) return o;
+  for(const q of positions){ const t=(q.ticker||"").toUpperCase(); if(!t) continue;
+    o[t]=(o[t]||0)+Math.abs(+q.market_value||0)/nlv; } return o; }
+function concentration(positions,nlv){
+  const w=Object.values(existingWeights(positions,nlv)); if(!w.length) return null;
+  const inv=w.reduce((s,x)=>s+x,0), hhi=w.reduce((s,x)=>s+x*x,0);
+  const srt=[...w].sort((a,b)=>b-a);
+  return {positions:w.length, invested:inv, largest:Math.max(...w),
+    top5:srt.slice(0,5).reduce((s,x)=>s+x,0), hhi, effective:hhi>0?1/hhi:0}; }
+
+/* ---------- scoring ---------- */
+function winsorize(vals){ const f=vals.filter(fin); if(f.length<3) return vals.slice();
+  const s=[...f].sort((a,b)=>a-b), lo=pctile(s,WLO), hi=pctile(s,WHI);
+  return vals.map(v=>fin(v)?Math.min(hi,Math.max(lo,v)):v); }
+function zscore(vals){ const out=vals.map(()=>NaN); const idx=[];
+  vals.forEach((v,i)=>{ if(fin(v)) idx.push(i); });
+  if(idx.length<3) return out;
+  const s=idx.map(i=>vals[i]), st=sd(s);
+  if(!st||!Number.isFinite(st)) return out;
+  const m=mean(s);
+  idx.forEach(i=>{ out[i]=Math.max(-ZCLIP,Math.min(ZCLIP,(vals[i]-m)/st)); });
+  return out; }
+function pctRank(vals){ const out=vals.map(()=>NaN); const idx=[];
+  vals.forEach((v,i)=>{ if(fin(v)) idx.push(i); });
+  const n=idx.length; if(!n) return out;
+  const ord=[...idx].sort((a,b)=> vals[a]-vals[b] || a-b );
+  ord.forEach((orig,rank)=>{ out[orig]=(rank/Math.max(n-1,1))*100; });
+  return out; }
+
+function scoreUniverse(rows){
+  if(rows.length<3) throw new Error("Se necesitan al menos 3 instrumentos elegibles.");
+  const types=rows.map(r=>r.asset_type);
+  for(const b of BLOCKS){ for(const m of b.metrics){
+    const raw=rows.map(r=> fin(r.raw[m.k])?r.raw[m.k]:NaN );
+    let z=raw.map(()=>NaN);
+    if(m.peer){
+      for(const co of [...new Set(types)]){
+        const ix=types.map((t,i)=>t===co?i:-1).filter(i=>i>=0);
+        if(ix.length>=3){ const zz=zscore(winsorize(ix.map(i=>raw[i])));
+          ix.forEach((i,j)=>{ z[i]=zz[j]; }); }
+      }
+      const fb=zscore(winsorize(raw));
+      z=z.map((v,i)=> (!fin(v)&&fin(raw[i]))?fb[i]:v );
+    } else { z=zscore(winsorize(raw)); }
+    rows.forEach((r,i)=>{ if(fin(z[i])) r.z[m.k]=z[i]*m.d; });
+  }}
+  for(const r of rows){ let cn=0,cd=0;
+    for(const b of BLOCKS){
+      const tot=b.metrics.reduce((s,m)=>s+m.w,0);
+      let n=0,d=0;
+      for(const m of b.metrics){ const z=r.z[m.k]; if(z===undefined) continue;
+        const w=m.w/tot; n+=w*z; d+=w; }
+      r.cov[b.key]=d;
+      if(d>0){ const bs=n/d; r.blocks[b.key]=bs; cn+=b.weight*bs; cd+=b.weight; }
+    }
+    r.composite=cd>0?cn/cd:NaN;
+  }
+  const comps=rows.map(r=>r.composite);
+  const cz=zscore(comps), cp=pctRank(comps);
+  rows.forEach((r,i)=>{ r.cz=fin(cz[i])?cz[i]:NaN; r.score=fin(cp[i])?cp[i]:NaN;
+    r.preGate=band(r); r.rec=r.preGate; });
+  return rows;
+}
+function band(r){ const pop=Object.values(r.cov).filter(v=>v>0).length;
+  if(pop<BANDS.minBlocks||!fin(r.cz)) return "MW";
+  if(r.cz>=BANDS.ow) return "OW"; if(r.cz<=BANDS.uw) return "UW"; return "MW"; }
+
+const RANK={UW:0,MW:1,OW:2}, UNRANK={0:"UW",1:"MW",2:"OW"};
+const cap=(cur,ceil)=>UNRANK[Math.min(RANK[cur],RANK[ceil])];
+
+function applyGates(rows){
+  for(const r of rows){ const m=r.raw; const g=[];
+    if(!r.eligible){ r.rec="UW"; r.gates=["NO ELEGIBLE: "+r.reasons.join("; ")]; continue; }
+    if(fin(m.above_40w_ma)&&fin(m.mom_12_1)&&m.above_40w_ma<0&&m.mom_12_1<0){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"TENDENCIA",m:"Debajo de la media de 40 semanas con momentum 12M−1M negativo.",
+        x:`40W MA ${pf(m.above_40w_ma,1)} · 12M−1M ${pf(m.mom_12_1,1)}`}); }
+    if(fin(m.max_drawdown)&&fin(m.beta_1y)&&-m.max_drawdown<=GATES.maxDD&&m.beta_1y>GATES.beta){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"RIESGO",m:"Drawdown profundo combinado con beta alto — amplifica exactamente el riesgo que el libro ya carga.",
+        x:`maxDD ${pf(-m.max_drawdown,1)} · beta ${m.beta_1y.toFixed(2)}`}); }
+    if(fin(m.corr_to_portfolio)&&fin(m.existing_overlap)&&
+       m.corr_to_portfolio>GATES.corr&&m.existing_overlap>GATES.existingW){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"CONCENTRACIÓN",m:"Muy correlacionado con tu libro y ya es una posición relevante. Agregarlo compra riesgo que ya tienes.",
+        x:`corr ${m.corr_to_portfolio.toFixed(2)} · peso actual ${pf(m.existing_overlap,1)}`}); }
+    if(fin(m.days_to_liquidate)&&m.days_to_liquidate>ELIG.maxDays){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"CAPACIDAD",m:"No se puede salir dentro del presupuesto de liquidación.",
+        x:`${m.days_to_liquidate.toFixed(1)} días al 20% de participación`}); }
+    if(GATES.volCeiling!==null&&fin(m.volatility_1y)&&m.volatility_1y>GATES.volCeiling){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"VOLATILIDAD",m:"Excede el techo de volatilidad para un Overweight: los estimados de factores pierden fiabilidad con ~52 observaciones, y el sizing inverse-vol colapsa la posición a un peso inmaterial.",
+        x:`vol ${pf(m.volatility_1y,0)} vs techo ${pf(GATES.volCeiling,0)}`}); }
+    r.gates=g;
+  }
+  // redundancia
+  const byT={}; rows.forEach(r=>{ byT[r.ticker]=r; });
+  for(const r of rows){
+    if(!r.dupes.length||r.rec!=="OW") continue;
+    const better=r.dupes.map(t=>byT[t]).filter(p=>p&&(fin(p.cz)?p.cz:-99)>(fin(r.cz)?r.cz:-99));
+    if(better.length){ const best=better.reduce((a,b)=>a.cz>b.cz?a:b);
+      r.rec=cap(r.rec,"MW");
+      r.gates.push({t:"REDUNDANTE",m:`Exposición duplicada a ${best.ticker}. Sobreponderar ambos duplicaría una sola apuesta.`,
+        x:`correlación > ${GATES.dupCorr} · ${best.ticker} puntúa más alto y carga la asignación`}); }
+  }
+  return rows;
+}
+function detectDupes(rows,retsByT){
+  const ok=rows.filter(r=>(retsByT[r.ticker]||[]).length>=12);
+  for(let i=0;i<ok.length;i++) for(let j=i+1;j<ok.length;j++){
+    const c=corr(retsByT[ok[i].ticker],retsByT[ok[j].ticker]);
+    if(c!==null&&c>GATES.dupCorr){ ok[i].dupes.push(ok[j].ticker); ok[j].dupes.push(ok[i].ticker); } }
+}
+function assignWeights(rows){
+  for(const r of rows){ const v=r.raw.volatility_1y;
+    const mult={OW:SIZING.ow,MW:SIZING.mw,UW:SIZING.uw}[r.rec];
+    let w=SIZING.base*mult; if(v&&v>0) w*=SIZING.targetVol/v;
+    r.weight=Math.min(SIZING.max,Math.max(SIZING.min,w)); }
+  return rows;
+}
+
+function runModel(md,pf){
+  const rf=md.risk_free_rate??.0425, bmT=(md.benchmark||"SPY").toUpperCase();
+  const inst=md.instruments||[];
+  const bm=inst.find(i=>(i.ticker||"").toUpperCase()===bmT);
+  if(!bm) throw new Error(`Falta el benchmark ${bmT} en la data.`);
+  const bmR=rets(bm.history.close||[]);
+  if(bmR.length<12) throw new Error(`Historial insuficiente para ${bmT}.`);
+
+  const nlv=+pf.net_liquidation||0, pos=pf.positions||[];
+  const histByT={}, retsByT={};
+  inst.forEach(i=>{ const t=(i.ticker||"").toUpperCase();
+    histByT[t]=i.history.close||[]; retsByT[t]=rets(histByT[t]); });
+  const portR=portfolioSeries(pos,histByT), wByNlv=existingWeights(pos,nlv);
+
+  const rows=[];
+  for(const it of inst){
+    const t=(it.ticker||"").toUpperCase(); if(!t) continue;
+    const raw=computeMetrics(it,bmR,nlv,rf);
+    const r=rets(it.history.close||[]);
+    raw.corr_to_portfolio = portR.length>=12 ? corr(r,portR) : null;
+    raw.diversification_benefit = portR.length>=12 ? divBenefit(r,portR) : null;
+    raw.existing_overlap = wByNlv[t]||0;
+    const dg=diagnostics(it,bmR,rf);
+
+    const reasons=[];
+    if(fin(dg.last_price)&&dg.last_price<ELIG.minPrice) reasons.push(`precio $${dg.last_price.toFixed(2)} bajo el mínimo`);
+    if(fin(dg.adv_usd)&&dg.adv_usd<ELIG.minAdv) reasons.push(`ADV $${(dg.adv_usd/1e6).toFixed(1)}MM bajo el mínimo`);
+    if(dg.bars<ELIG.minBars) reasons.push(`solo ${dg.bars} observaciones`);
+
+    rows.push({ticker:t, name:it.name||t, asset_type:it.asset_type||"STOCK",
+      sector:it.sector||"", raw, dg, z:{}, blocks:{}, cov:{}, dupes:[], gates:[],
+      eligible:reasons.length===0, reasons,
+      composite:NaN, cz:NaN, score:NaN, rec:"MW", preGate:"MW", weight:0});
+  }
+  const elig=rows.filter(r=>r.eligible);
+  if(elig.length<3) throw new Error(`Solo ${elig.length} activos elegibles; se necesitan 3+.`);
+  detectDupes(elig,retsByT);
+  scoreUniverse(elig); applyGates(elig); assignWeights(elig);
+  elig.sort((a,b)=>(fin(b.cz)?b.cz:-99)-(fin(a.cz)?a.cz:-99));
+  return {rows:elig, excluded:rows.filter(r=>!r.eligible),
+    meta:{asOf:md.as_of, benchmark:bmT, rf, nlv, source:md.data_source,
+      hist:md.history_desc, conc:concentration(pos,nlv),
+      portVol:portR.length>=3?sd(portR)*Math.sqrt(PPY):null, n:rows.length}};
+}
+
+/* ================================================================
+   Render
+   ================================================================ */
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const REC_ES={OW:"Overweight",MW:"Market Weight",UW:"Underweight"};
+const usd=v=>fin(v)?"$"+Math.round(v).toLocaleString("en-US"):"—";
+
+let RESULT=null;
+
+function render(res){
+  RESULT=res;
+  const {rows,meta}=res;
+  $("#m-asof").textContent=(meta.asOf||"—").slice(0,10);
+  $("#m-n").textContent=`${rows.length} activos`;
+  $("#m-bm").textContent=meta.benchmark;
+  $("#m-rf").textContent=pf(meta.rf,2);
+  $("#m-nlv").textContent=usd(meta.nlv);
+  $("#foot-src").textContent=`Fuente: ${meta.source||"Interactive Brokers"} · ${meta.hist||""}`;
+
+  const c={OW:0,MW:0,UW:0}; rows.forEach(r=>c[r.rec]++);
+  const k=meta.conc||{};
+  $("#rail").innerHTML=[
+    tile("pos",c.OW,"Overweight",rows.filter(r=>r.rec==="OW").map(r=>r.ticker).join(" · ")||"—"),
+    tile("neu",c.MW,"Market Weight",rows.filter(r=>r.rec==="MW").map(r=>r.ticker).join(" · ")||"—"),
+    tile("neg",c.UW,"Underweight",rows.filter(r=>r.rec==="UW").map(r=>r.ticker).join(" · ")||"—"),
+    tile("",fin(k.effective)?k.effective.toFixed(1):"—","Posiciones efectivas","1/HHI del libro actual"),
+    tile("",pf(k.top5,0),"Concentración top-5","del valor neto de liquidación"),
+    tile("",pf(meta.portVol,1),"Vol del sleeve equity","realizada, anualizada"),
+  ].join("");
+
+  $("#rank-count").textContent=`${c.OW} OW · ${c.MW} MW · ${c.UW} UW`;
+  renderRank(rows); renderHeat(rows); renderGates(rows); renderMeth(); renderLimits(res);
+}
+const tile=(cls,v,l,s)=>`<div class="tile ${cls}"><div class="v">${esc(String(v))}</div>
+  <div class="eyebrow">${esc(l)}</div><div class="s">${esc(s)}</div></div>`;
+
+function renderRank(rows){
+  const h=`<thead><tr><th class="l">#</th><th class="l">Ticker</th><th class="l">Tipo</th>
+    <th class="l">Rec</th><th>Score</th><th>z</th><th>1A</th><th>Vol</th><th>MaxDD</th>
+    <th>Beta</th><th>Sharpe</th><th>Corr libro</th><th>Peso ind.</th></tr></thead>`;
+  const b=rows.map((r,i)=>{
+    const g=r.gates.length?`<span class="gateflag" data-tip="${esc(r.gates.map(x=>x.t+": "+x.m).join(" | "))}">⚑</span>`:"";
+    const w=fin(r.score)?Math.max(3,r.score):3;
+    return `<tr data-tip="${esc(tipFor(r))}">
+      <td class="l rank">${i+1}</td>
+      <td class="l tkr">${esc(r.ticker)}</td>
+      <td class="l type">${r.asset_type==="ETF"?"ETF":"ACC"}</td>
+      <td class="l"><span class="pill ${r.rec}">${REC_ES[r.rec].toUpperCase()}</span>${g}</td>
+      <td><div class="sc"><span class="sc-t">${fin(r.score)?r.score.toFixed(0):"—"}</span>
+        <span class="sc-b"><span class="sc-f ${r.rec}" style="width:${w}%"></span></span></div></td>
+      <td class="z ${r.cz>=0?"p":"n"}">${nfs(r.cz)}</td>
+      <td>${pfs(r.dg.return_1y,1)}</td><td>${pf(r.dg.volatility,1)}</td>
+      <td>${pf(r.dg.max_drawdown,1)}</td><td>${nf(r.dg.beta)}</td>
+      <td>${nf(r.raw.sharpe_1y)}</td><td>${nf(r.raw.corr_to_portfolio)}</td>
+      <td>${pf(r.weight,1)}</td></tr>`;
+  }).join("");
+  $("#tbl-rank").innerHTML=h+`<tbody>${b}</tbody>`;
+}
+function tipFor(r){
+  const parts=[`${r.ticker} — ${r.name}`,`${REC_ES[r.rec]} · score ${fin(r.score)?r.score.toFixed(0):"—"}/100 (z ${nfs(r.cz)})`];
+  if(r.sector) parts.push(`Sector: ${r.sector}`);
+  const top=Object.entries(r.blocks).sort((a,b)=>b[1]-a[1]);
+  if(top.length){ const lb=k=>(BLOCKS.find(b=>b.key===k)||{}).label||k;
+    parts.push(`Mejor: ${lb(top[0][0])} ${nfs(top[0][1])}`);
+    parts.push(`Peor: ${lb(top[top.length-1][0])} ${nfs(top[top.length-1][1])}`); }
+  parts.push(`Alfa ${pfs(r.dg.alpha_annual,1)} · captura ${nf(r.dg.upside_capture)}/${nf(r.dg.downside_capture)}`);
+  parts.push(`ADV ${fin(r.dg.adv_usd)?"$"+(r.dg.adv_usd/1e6).toFixed(0)+"MM":"—"} · div ${pf(r.dg.dividend_yield,2)}`);
+  if(r.preGate!==r.rec) parts.push(`⚑ Bajado de ${REC_ES[r.preGate]} por gate de riesgo`);
+  return parts.join("\n");
+}
+
+function renderHeat(rows){
+  $("#ramp").innerHTML=[-2,-1.2,-.5,0,.5,1.2,2].map(z=>{
+    const {cls,a}=cellStyle(z);
+    return `<i style="background:rgba(var(--${cls==="p"?"pos":cls==="n"?"neg":"neu"}-rgb),${a})"></i>`;}).join("");
+  const h=`<thead><tr><th class="l">Ticker</th><th class="l">Rec</th>${
+    BLOCKS.map(b=>`<th style="text-align:center" data-tip="${esc(b.label+" — peso "+Math.round(b.weight*100)+"%\n\n"+BLOCK_WHY[b.key])}">${esc(b.label)}<br><span style="opacity:.65">${Math.round(b.weight*100)}%</span></th>`).join("")
+  }</tr></thead>`;
+  const b=rows.map(r=>`<tr><td class="l tkr">${esc(r.ticker)}</td>
+    <td class="l"><span class="pill ${r.rec}">${r.rec}</span></td>${
+    BLOCKS.map(bl=>{ const v=r.blocks[bl.key];
+      if(!fin(v)) return `<td class="c" data-tip="${esc(r.ticker+" · "+bl.label+"\nSin datos suficientes — el peso se renormalizó sobre los bloques disponibles.")}"><span class="val" style="color:var(--muted)">—</span></td>`;
+      const {cls,a}=cellStyle(v);
+      return `<td class="c" data-tip="${esc(r.ticker+" · "+bl.label+"\nz = "+nfs(v)+"\n\n"+BLOCK_WHY[bl.key])}">
+        <span class="cell-bg ${cls}" style="--a:${a}"></span><span class="val">${nfs(v)}</span></td>`;
+    }).join("")}</tr>`).join("");
+  $("#tbl-hm").innerHTML=h+`<tbody>${b}</tbody>`;
+}
+function cellStyle(z){ const m=Math.min(Math.abs(z)/2,1), a=(.07+m*.33).toFixed(3);
+  return {cls:Math.abs(z)<.05?"":(z>0?"p":"n"), a:Math.abs(z)<.05?0.05:a}; }
+
+function renderGates(rows){
+  const items=[];
+  for(const r of rows) for(const g of r.gates){
+    if(typeof g==="string"){ items.push({tk:r.ticker,t:"EXCLUIDO",m:g,x:"",moved:false}); continue; }
+    items.push({tk:r.ticker,t:g.t,m:g.m,x:g.x,moved:r.preGate!==r.rec,from:r.preGate,to:r.rec}); }
+  $("#gates").innerHTML = items.length ? items.map(g=>`<div class="gate">
+      <div class="g-t">${esc(g.tk)}</div>
+      <div><div class="g-m"><b style="font-family:var(--mono);font-size:11px;letter-spacing:.06em">${esc(g.t)}</b> — ${esc(g.m)}</div>
+      <div class="g-x">${esc(g.x)}${g.moved?` · postura bajada de ${REC_ES[g.from]} a ${REC_ES[g.to]}`:" · postura sin cambio, gate registrado"}</div></div>
+    </div>`).join("")
+    : `<p class="sec-sub">Ningún gate se activó en esta corrida.</p>`;
+}
+function renderMeth(){
+  $("#tbl-meth").innerHTML=`<thead><tr><th class="l">Bloque</th><th>Peso</th><th class="l">Qué mide</th></tr></thead>
+    <tbody>${BLOCKS.map(b=>`<tr><td class="l tkr">${esc(b.label)}</td>
+      <td>${Math.round(b.weight*100)}%</td>
+      <td class="l" style="font-family:var(--sans);white-space:normal;font-size:12.5px;color:var(--ink-2)">${esc(BLOCK_WHY[b.key])}</td></tr>`).join("")}</tbody>`;
+}
+function renderLimits(res){
+  const n=res.rows.length, ex=res.excluded.length;
+  const items=[
+    `Universo de la corrida: ${n} activos elegibles${ex?` · ${ex} excluidos por filtros duros`:""}.`,
+    `Membresía de índices: snapshot estático. Las listas de constituyentes envejecen solas.`,
+    `~52 observaciones semanales. Beta, alfa y ratios de captura cargan intervalos de confianza amplios — no leas el tercer decimal.`,
+    `Ventana de 1 año únicamente. El corte transversal refleja ese régimen, no un equilibrio estable.`,
+    `Productos apalancados, inversos, de acción única y de ingreso por opciones quedan excluidos por patrón: sus retornos son path-dependientes o truncados por opciones.`,
+  ];
+  $("#limits").innerHTML=items.map(t=>"· "+esc(t)).join("<br>");
+}
+
+/* ---------- tooltip ---------- */
+const tip=$("#tip");
+document.addEventListener("mouseover",e=>{
+  const el=e.target.closest("[data-tip]"); if(!el) return;
+  tip.innerHTML=esc(el.getAttribute("data-tip")).replace(/\n/g,"<br>");
+  tip.classList.add("on"); moveTip(e);
+});
+document.addEventListener("mousemove",e=>{ if(tip.classList.contains("on")) moveTip(e); });
+document.addEventListener("mouseout",e=>{ if(e.target.closest("[data-tip]")) tip.classList.remove("on"); });
+function moveTip(e){ const r=tip.getBoundingClientRect();
+  let x=e.clientX+14, y=e.clientY+16;
+  if(x+r.width>innerWidth-10) x=e.clientX-r.width-14;
+  if(y+r.height>innerHeight-10) y=e.clientY-r.height-16;
+  tip.style.left=Math.max(8,x)+"px"; tip.style.top=Math.max(8,y)+"px"; }
+
+/* ---------- tema ---------- */
+$("#btn-theme").addEventListener("click",()=>{
+  const cur=document.documentElement.getAttribute("data-theme");
+  const dark=cur ? cur==="dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.setAttribute("data-theme",dark?"light":"dark");
+});
+
+/* ---------- CSV ---------- */
+$("#btn-csv").addEventListener("click",async()=>{
+  if(!RESULT) return;
+  const head=["rank","ticker","nombre","tipo","recomendacion","score","z","ret_1a","vol","max_dd",
+    "beta","sharpe","sortino","calmar","alfa_anual","adv_usd","corr_libro","peso_indicativo",
+    ...BLOCKS.map(b=>"bloque_"+b.key),"gates"];
+  const lines=[head.join(",")];
+  RESULT.rows.forEach((r,i)=>{
+    const cells=[i+1,r.ticker,`"${(r.name||"").replace(/"/g,'""')}"`,r.asset_type,REC_ES[r.rec],
+      nf(r.score,1),nf(r.cz,3),nf(r.dg.return_1y,4),nf(r.dg.volatility,4),nf(r.dg.max_drawdown,4),
+      nf(r.dg.beta,3),nf(r.raw.sharpe_1y,3),nf(r.raw.sortino_1y,3),nf(r.raw.calmar_1y,3),
+      nf(r.dg.alpha_annual,4),fin(r.dg.adv_usd)?r.dg.adv_usd.toFixed(0):"",
+      nf(r.raw.corr_to_portfolio,3),nf(r.weight,4),
+      ...BLOCKS.map(b=>nf(r.blocks[b.key],3)),
+      `"${r.gates.map(g=>typeof g==="string"?g:g.t+": "+g.m).join(" | ").replace(/"/g,'""')}"`];
+    lines.push(cells.join(","));
+  });
+  const csv=lines.join("\n");
+  const name=`screening_${(RESULT.meta.asOf||"").slice(0,10)||"run"}.csv`;
+  if(window.claude?.downloads){
+    try{ await window.claude.downloads.save({filename:name,data:csv}); setStatus("CSV guardado.",""); return; }
+    catch(err){ setStatus("Descarga cancelada.",""); return; }
+  }
+  const url=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  const a=document.createElement("a"); a.href=url; a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+
+/* ================================================================
+   Datos en vivo vía conector IBKR
+   ================================================================ */
+const IBKR="Interactive_Brokers_IBKR";
+const SNAP_FIELDS=["last","misc_statistics","avg_90d_usd_volume","dividend_yield",
+  "implied_vol_underlying","historical_vol","implied_volatility_percentile"];
+let LIVE=false;
+
+function setStatus(txt,cls){ $("#status").textContent=txt;
+  $("#dot").className="dot"+(cls?" "+cls:""); }
+
+const ERRCOPY={
+  needs_reauth:{h:"Sesión de IBKR expirada",p:"Reconecta Interactive Brokers en claude.ai → Ajustes → Conectores y vuelve a correr el modelo."},
+  server_not_connected:{h:"IBKR no está conectado",p:"Agrega el conector de Interactive Brokers en claude.ai → Ajustes → Conectores para correr el modelo con datos en vivo."},
+  selection_required:{h:"Hay varias conexiones de IBKR",p:"Elige cuál usar en el diálogo de claude.ai y vuelve a intentar."},
+  server_not_found:{h:"El conector de IBKR ya no existe",p:"Vuelve a agregarlo en claude.ai → Ajustes → Conectores."},
+  server_unavailable:{h:"IBKR no responde",p:"El servidor está temporalmente inalcanzable. Intenta de nuevo en un momento."},
+  not_in_manifest:{h:"Herramienta fuera del manifiesto",p:"Esta página no tiene permiso para esa llamada de IBKR."},
+  blocked_by_policy:{h:"Bloqueado por política",p:"La política de tu organización bloquea esta herramienta de IBKR."},
+  approval_required:{h:"Requiere aprobación",p:"Esta llamada necesita aprobación por política y las aprobaciones por llamada aún no están soportadas en artifacts."},
+  tool_error:{h:"IBKR reportó un error",p:"La herramienta respondió pero falló."},
+  rate_limited:{h:"Demasiadas llamadas",p:"Espera unos segundos y vuelve a intentar."},
+  not_granted:{h:"Sin acceso a conectores",p:"Esta vista no otorgó acceso a conectores."},
+  capability_disabled:{h:"Conectores no disponibles aquí",p:"Esta vista no puede usar conectores."},
+  capability_removed:{h:"Conectores no disponibles aquí",p:"Esta vista no puede usar conectores."},
+  bad_request:{h:"Llamada inválida",p:"Los argumentos enviados a IBKR no fueron aceptados."},
+  cancelled:{h:"Llamada cancelada",p:"La operación se canceló; el resultado es desconocido."},
+  transform_error:{h:"Llamada inválida",p:"No se pudieron preparar los argumentos."},
+};
+const copyFor=c=>ERRCOPY[c]||{h:"No se pudo actualizar",p:"Ocurrió un error inesperado al hablar con IBKR."};
+
+function livePanel(html){ $("#live-panel").innerHTML=html?`<div class="live">${html}</div>`:""; }
+
+async function initLive(){
+  if(!window.claude||window.claude.mcp===undefined){
+    setStatus("Snapshot local","");
+    livePanel(`<h3>Corriendo sobre el snapshot incluido</h3>
+      <p>Esta vista no expone conectores, así que el modelo corre sobre los datos de IBKR
+      embebidos en la página. Todos los cálculos son reales — lo único que no cambia es la
+      fecha de los datos.</p>`);
+    $("#btn-run").disabled=false;
+    $("#btn-run").textContent="Recalcular";
+    return;
+  }
+  try{
+    const {servers}=await window.claude.mcp.listTools();
+    const s=(servers||[]).find(x=>x.server===IBKR);
+    if(!s||!s.tools?.length){
+      LIVE=false; setStatus("IBKR no conectado","");
+      const c=ERRCOPY.server_not_connected;
+      livePanel(`<h3>${c.h}</h3><p>${c.p} Mientras tanto el modelo corre sobre el snapshot embebido.</p>`);
+      $("#btn-run").disabled=false; $("#btn-run").textContent="Recalcular";
+      return;
+    }
+    LIVE=true; setStatus("IBKR conectado","live");
+    livePanel(`<h3>Listo para actualizar</h3>
+      <p>Presiona <b>Correr modelo</b> para volver a pedir precios, volatilidad y posiciones a IBKR
+      y recalcular el ranking completo con datos frescos.</p>`);
+    $("#btn-run").disabled=false;
+  }catch(err){
+    LIVE=false; const c=copyFor(err?.code);
+    setStatus("Snapshot local","");
+    livePanel(`<h3>${c.h}</h3><p>${c.p} Mientras tanto el modelo corre sobre el snapshot embebido.</p>`);
+    $("#btn-run").disabled=false; $("#btn-run").textContent="Recalcular";
+  }
+}
+
+async function call(tool,input,tries=0){
+  try{ return await window.claude.mcp.callTool(IBKR,tool,input,{cache:{refresh:true}}); }
+  catch(err){
+    if(err?.retryable && tries<1){
+      await new Promise(r=>setTimeout(r,(err.retryAfterMs??1200)+Math.random()*400));
+      return call(tool,input,tries+1);
+    }
+    throw err;
+  }
+}
+
+$("#btn-run").addEventListener("click",async()=>{
+  const btn=$("#btn-run");
+  if(!LIVE){ recompute(DATA.market,DATA.portfolio); return; }
+  btn.disabled=true;
+  const orig=btn.innerHTML;
+  btn.innerHTML='<span class="spin"></span>Actualizando…';
+  const inst=DATA.market.instruments;
+  const total=inst.length*2+1;
+  let done=0, failures=[];
+  livePanel(`<h3>Pidiendo datos a IBKR</h3>
+    <p>${inst.length} activos · precios semanales de 1 año y snapshot de mercado.</p>
+    <div class="prog"><i id="pbar"></i></div><div class="log" id="plog"></div>`);
+  const bump=msg=>{ done++; const p=$("#pbar"), l=$("#plog");
+    if(p) p.style.width=Math.round(done/total*100)+"%"; if(l) l.textContent=msg; };
+
+  const md=JSON.parse(JSON.stringify(DATA.market));
+  const pfNew=JSON.parse(JSON.stringify(DATA.portfolio));
+
+  // posiciones
+  try{
+    const res=await call("get_account_positions",{});
+    const p=res.payload??{};
+    const list=Array.isArray(p)?p:(p.positions||[]);
+    if(Array.isArray(list)&&list.length){
+      pfNew.positions=list.filter(q=>+q.position!==0||+q.market_value!==0).map(q=>({
+        ticker:String(q.contract_description||"").split(" ")[0].toUpperCase(),
+        market_value:+q.market_value||0, quantity:+q.position||0,
+        asset_class:q.asset_class||"STK"}));
+      const nl=list.reduce((s,q)=>s+(+q.market_value||0),0);
+      if(nl) pfNew.net_liquidation=Math.max(pfNew.net_liquidation,Math.abs(nl));
+    }
+    bump("Posiciones actualizadas.");
+  }catch(err){ failures.push({what:"posiciones",err}); bump("Posiciones: sin actualizar."); }
+
+  // por activo
+  for(const it of md.instruments){
+    try{
+      const r=await call("get_price_snapshot",
+        {contract_id:it.conid, market_data_names:SNAP_FIELDS});
+      const p=r.payload; if(p&&typeof p==="object") it.snapshot=p;
+      bump(`${it.ticker}: snapshot`);
+    }catch(err){ failures.push({what:it.ticker+" snapshot",err}); bump(`${it.ticker}: snapshot falló`); }
+    try{
+      const r=await call("get_price_history",
+        {contract_id:it.conid, security_type:"STK", step:"ONE_WEEK",
+         period:"ONE_YEAR", outside_rth:false});
+      const p=r.payload;
+      if(p&&Array.isArray(p.close)&&p.close.length>12){
+        it.history={close:p.close.filter(Number.isFinite),
+                    volume:(p.volume||[]).filter(Number.isFinite)};
+      }
+      bump(`${it.ticker}: histórico`);
+    }catch(err){ failures.push({what:it.ticker+" histórico",err}); bump(`${it.ticker}: histórico falló`); }
+  }
+
+  md.as_of=new Date().toISOString();
+  md.data_source="Interactive Brokers (en vivo desde la página)";
+  try{ recompute(md,pfNew); }
+  catch(err){
+    livePanel(`<h3>El modelo no pudo correr con los datos nuevos</h3>
+      <p>${esc(err.message)} Se mantiene el resultado anterior.</p>`);
+    btn.disabled=false; btn.innerHTML=orig; return;
+  }
+
+  if(!failures.length){
+    livePanel(`<h3>Actualizado</h3><p>Ranking recalculado con datos frescos de IBKR
+      (${new Date().toLocaleString("es")}).</p>`);
+    setStatus("Datos en vivo","live");
+  } else {
+    const byCode={}; failures.forEach(f=>{ const c=f.err?.code||"upstream_error";
+      (byCode[c]=byCode[c]||[]).push(f.what); });
+    const blocks=Object.entries(byCode).map(([code,list])=>{ const c=copyFor(code);
+      return `<p style="margin-top:9px"><b>${esc(c.h)}</b> — ${esc(c.p)}<br>
+        <span class="log">Afectó: ${esc(list.slice(0,6).join(", "))}${list.length>6?` +${list.length-6} más`:""}</span></p>`;}).join("");
+    livePanel(`<h3>Actualizado parcialmente</h3>
+      <p>El ranking se recalculó con lo que sí llegó; el resto conserva el dato anterior.</p>${blocks}`);
+    setStatus("Parcialmente en vivo","err");
+  }
+  btn.disabled=false; btn.innerHTML=orig;
+});
+
+function recompute(md,pfd){ const res=runModel(md,pfd); render(res); }
+
+/* ---------- arranque ---------- */
+try{ recompute(DATA.market,DATA.portfolio); }
+catch(err){ document.querySelector(".wrap").insertAdjacentHTML("afterbegin",
+  `<div class="warnbox" style="margin-top:20px"><b>El modelo no pudo correr.</b> ${esc(err.message)}</div>`); }
+initLive();
+</script>
