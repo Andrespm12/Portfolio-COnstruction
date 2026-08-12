@@ -4,34 +4,85 @@ A systematic screen over US-listed equities and ETFs that produces a composite
 score and an **Overweight / Market Weight / Underweight** call for every name,
 scored against a live Interactive Brokers account.
 
-Two deliverables:
+Four deliverables:
 
 1. **[`PROMPT_SCREENING.md`](PROMPT_SCREENING.md)** — the reusable LLM prompt
    encoding the full methodology.
 2. **`screener/`** — the Python implementation of that methodology, which
    computes the metrics, scores the cross-section, applies risk gates and sizes
    positions. Plus an executed run against real IBKR data in `output/`.
-
----
-
 3. **`web/`** — a standalone page that runs the whole model in the browser and
    re-pulls from IBKR on demand.
+4. **`notebooks/`** — a Colab notebook that runs the same engine over a
+   ~600-name universe on live Yahoo Finance data, no broker session required.
 
 ---
 
 ## Quick start
+
+**In the browser, nothing to install:**
+[open the notebook in Colab](https://colab.research.google.com/github/Andrespm12/Portfolio-COnstruction/blob/claude/stock-picking-screening-metrics-b0b2dh/notebooks/screener_colab.ipynb)
+→ *Runtime → Run all*.
+
+**Locally:**
 
 ```bash
 pip install pandas numpy
 python3 scripts/build_market_data.py     # regenerate data/ from the IBKR pull
 python3 -m screener.run_screen           # score, gate, size, report
 python3 scripts/build_page.py            # bundle the page -> web/screener.html
+python3 scripts/build_notebook.py        # bundle the notebook -> notebooks/
 
-python3 tests/test_scoring.py            # 12 correctness assertions
+python3 tests/test_scoring.py            # engine correctness
+python3 tests/test_yahoo_adapter.py      # Yahoo -> payload conversion
+python3 tests/test_tuning.py             # runtime config overrides
+python3 tests/test_notebook.py           # notebook drift + full execution
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
 Outputs land in `output/screen_results.csv` and `output/screen_report.md`.
+
+---
+
+## The notebook
+
+`notebooks/screener_colab.ipynb` runs the **same engine** as this repo — the
+`screener` package is embedded as a gzipped tarball and verified by SHA256 at
+startup — but sources its data from Yahoo Finance instead of IBKR. That trade
+buys two things the IBKR path cannot give: a universe of ~600 names instead of a
+21-name captured snapshot, and prices that are live rather than frozen at
+capture time.
+
+What Yahoo cannot supply is stated rather than faked. `iv_percentile` needs a
+*history* of implied volatility; Yahoo publishes today's option chain only, so
+the metric is **omitted from the payload, not zero-filled** — the scorer
+renormalizes the block over its surviving metrics. `iv_hv_spread` is available
+behind an opt-in flag that costs two requests per ticker. A coverage cell prints
+exactly which metrics went missing, and at what rate, before any ranking is
+shown.
+
+Two price series are carried deliberately: adjusted close feeds every
+return-based metric (a dividend must not read as a price decline), while raw
+close, high and low feed the snapshot, because the `min_price` filter and the
+liquidity block are about the price a share actually trades at. Mixing them
+would corrupt `pct_from_52w_high` and `range_position`, which compare a last
+price against a 52-week band.
+
+Block weights and risk gates are judgement calls, so the notebook can change
+them at runtime via `screener.tuning` — `set_block_weights({'momentum': 0.0})`
+answers "what does this model say without momentum?", and `block_weights(...)`
+scopes a sweep. This is not a one-liner: `scoring` and `report` bind
+`FACTOR_MODEL` at import time, so assigning to `config.FACTOR_MODEL` alone is a
+silent no-op that leaves the scorer on the old weights while the run still
+produces numbers. `tuning` rebinds every holder and `tests/test_tuning.py`
+asserts on scoring *output*, not on the config attribute.
+
+The notebook is a build artifact of `scripts/build_notebook.py`, never
+hand-edited. `tests/test_notebook.py` rebuilds it from current source and fails
+on any drift, checks each embedded module byte-for-byte against the repo, then
+executes every code cell — engine unpack, parameters, coverage, scoring, both
+styled tables, the detail view, export and tuning — with only the network call
+stubbed.
 
 ---
 
@@ -194,14 +245,22 @@ screener/
   portfolio.py               Portfolio-fit metrics against the live IBKR book
   report.py                  CSV / markdown / console output
   run_screen.py              CLI entry point
+  yahoo_adapter.py           Yahoo Finance -> the same payload, for broker-free runs
+  tuning.py                  Runtime weight/gate overrides that actually reach the scorer
 web/
   template.html              The page: JS port of the engine, styling, IBKR live-refresh
   screener.html              Built artifact (template + embedded data) — open this
+notebooks/
+  screener_colab.ipynb       Built artifact (engine + Yahoo pull) — open this in Colab
 scripts/
   build_market_data.py       Captured IBKR pull -> data/*.json
   build_page.py              template.html + data -> web/screener.html
+  build_notebook.py          screener/ -> notebooks/screener_colab.ipynb
 tests/
   test_scoring.py            12 assertions, mostly on metric direction
+  test_yahoo_adapter.py      50 assertions on the Yahoo -> payload conversion
+  test_tuning.py             31 assertions that overrides reach the scorer
+  test_notebook.py           Rebuilds, diffs and executes every notebook cell
   verify_js_engine.js        Extracts and runs the engine out of the built page
   compare_engines.py         Diffs JS output against Python at 1e-6
 data/                        market_data.json, portfolio_ibkr.json
