@@ -181,17 +181,45 @@ def test_cells_execute() -> None:
     if failures:
         return
 
-    check("engine unpacked and checksum verified",
-          "ENGINE_SHA256" in namespace and "FACTOR_MODEL" in namespace)
+    check("engine unpacked and checksum verified", "ENGINE_SHA256" in namespace)
+    check("no stale FACTOR_MODEL is bound before the profile is applied",
+          "FACTOR_MODEL" not in namespace,
+          "a name bound at setup would still hold the 7-block model")
     check("scored results exist",
           len(namespace.get("scored", [])) >= 8,
           f"got {len(namespace.get('scored', []))}")
     check("ranking table was built with one row per scored name",
           len(namespace["tabla"]) == len(namespace["scored"]))
-    check("factor heatmap has a column per block",
-          len(namespace["mapa"].columns) == len(namespace["FACTOR_MODEL"]))
-    check("coverage report was computed",
-          not namespace["_cov"].empty)
+    check("coverage report was computed", not namespace["_cov"].empty)
+
+    # ---- the screen is independent of any book ---------------------------
+    model = namespace["MODELO"]
+    check("the applied model has six blocks, none of them Portfolio Fit",
+          len(model) == 6 and all(b.key != "portfolio_fit" for b in model),
+          f"got {[b.key for b in model]}")
+    check("factor heatmap has a column per surviving block",
+          len(namespace["mapa"].columns) == len(model))
+    check("the run is flagged standalone", namespace["meta"]["standalone"] is True)
+    check("no scored name carries a correlation to a book",
+          all(r.raw_metrics.get("corr_to_portfolio") is None
+              for r in namespace["scored"]))
+    check("no scored name carries an existing-position overlap",
+          all(r.raw_metrics.get("existing_overlap") is None
+              for r in namespace["scored"]))
+
+    # ---- profiles ---------------------------------------------------------
+    check("a profile was resolved and described",
+          namespace["perfil"].key in {"conservador", "moderado", "agresivo"})
+    check("meta records which profile produced the ranking",
+          namespace["meta"]["profile"] == namespace["perfil"].key)
+    comparison = namespace["comparacion"]
+    check("the profile comparison covers all three profiles",
+          {"Conservador", "Moderado", "Agresivo"} <= set(comparison.columns),
+          f"got {list(comparison.columns)}")
+    check("the comparison has a row per scored name",
+          len(comparison) == len(namespace["scored"]))
+    check("comparing profiles left the selected profile in force",
+          namespace["meta"]["profile"] == namespace["perfil"].key)
 
     exported = Path(workdir) / "screen_results.csv"
     report = Path(workdir) / "screen_report.md"
@@ -201,6 +229,29 @@ def test_cells_execute() -> None:
     header = exported.read_text(encoding="utf-8").splitlines()[0]
     check("exported CSV carries the full schema",
           "block_momentum" in header and "indicative_weight" in header)
+    check("exported CSV has no book-relative columns",
+          "corr_to_portfolio" not in header and "existing_overlap" not in header,
+          f"got {header}")
+
+
+def test_no_account_data_in_the_notebook() -> None:
+    """
+    The notebook must not carry positions, balances or any account snapshot.
+    An earlier version embedded the IBKR book as an editable cell.
+    """
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    body = "\n".join("".join(c["source"]) for c in nb["cells"])
+
+    forbidden = ["PORTAFOLIO", "net_liquidation", "market_value",
+                 "asset_class", "portfolio_ibkr", "compute_portfolio_fit"]
+    present = [token for token in forbidden if token in body]
+    check("no account data or book wiring anywhere in the notebook",
+          not present, f"found: {present}")
+
+    check("the notebook uses the standalone runner",
+          "run_standalone" in body)
+    check("the notebook exports without book columns",
+          "standalone=True" in body)
 
 
 def test_tuning_cell_leaves_config_untouched() -> None:
@@ -242,6 +293,7 @@ def main() -> int:
         test_embedded_engine_is_current,
         test_no_outputs_committed,
         test_tuning_cell_leaves_config_untouched,
+        test_no_account_data_in_the_notebook,
         test_cells_execute,
     ]:
         fn()

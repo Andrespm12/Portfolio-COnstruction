@@ -14,7 +14,8 @@ Four deliverables:
 3. **`web/`** — a standalone page that runs the whole model in the browser and
    re-pulls from IBKR on demand.
 4. **`notebooks/`** — a Colab notebook that runs the same engine over a
-   ~600-name universe on live Yahoo Finance data, no broker session required.
+   ~600-name universe on live Yahoo Finance data, with **no account data and no
+   broker session**, under a Conservative / Moderate / Aggressive risk profile.
 
 ---
 
@@ -36,6 +37,7 @@ python3 scripts/build_notebook.py        # bundle the notebook -> notebooks/
 python3 tests/test_scoring.py            # engine correctness
 python3 tests/test_yahoo_adapter.py      # Yahoo -> payload conversion
 python3 tests/test_tuning.py             # runtime config overrides
+python3 tests/test_profiles.py           # risk profiles + account-independence
 python3 tests/test_notebook.py           # notebook drift + full execution
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
@@ -52,6 +54,49 @@ startup — but sources its data from Yahoo Finance instead of IBKR. That trade
 buys two things the IBKR path cannot give: a universe of ~600 names instead of a
 21-name captured snapshot, and prices that are live rather than frozen at
 capture time.
+
+### Independent of any account
+
+The notebook reads no account data. Every name is scored on its own merits, and
+the Portfolio Fit block is **removed from the factor model rather than
+zero-weighted**.
+
+That distinction is load-bearing, not pedantic. Passing an empty book would not
+have been equivalent: with no positions, `compute_portfolio_fit` still returns
+`existing_overlap = 0.0` for every name — a real number, identical across the
+cross-section — which the scorer would z-score and count as a populated block in
+the recommendation-band logic. An empty account would still have shaped the
+composite. Dropping the block is the only way to get a genuinely standalone
+screen, and `tests/test_profiles.py` asserts the metrics are *absent*, not zero.
+
+The account-aware path is untouched: `run()` still takes a book, still computes
+Portfolio Fit, and still matches the JavaScript engine at `1e-6`.
+
+### Risk profiles
+
+`PERFIL` selects **Conservador**, **Moderado** or **Agresivo**, which rewires
+four things together — a profile is not a label on the same ranking:
+
+| | Conservador | Moderado | Agresivo |
+|---|---|---|---|
+| Momentum weight | 12% | 25% | 36% |
+| Volatility & drawdown weight | 28% | 17% | 8% |
+| Overweight threshold | z ≥ +0.80 | z ≥ +0.50 | z ≥ +0.30 |
+| Underweight threshold | z ≤ −0.30 | z ≤ −0.50 | z ≤ −0.70 |
+| Vol ceiling for an Overweight | 30% | 60% | 90% |
+| Beta limit | 1.00 | 1.30 | 1.80 |
+| Max position weight | 5.0% | 8.0% | 12.0% |
+| Min average daily volume | $50MM | $20MM | $10MM |
+
+The bands are asymmetric on purpose: the conservative profile makes an
+Overweight hard to earn and an Underweight easy to trigger, and the aggressive
+one inverts that. The volatility ceiling is loosened but never removed — above
+roughly 90% annualized, Sharpe, beta and alpha estimated from ~52 weekly bars
+are too noisy to rank on regardless of mandate.
+
+A comparison cell runs all three over the same data. A name that holds an
+Overweight in all three is a robust call; one that only survives in Aggressive
+is telling you its score depends on forgiving its volatility.
 
 What Yahoo cannot supply is stated rather than faked. `iv_percentile` needs a
 *history* of implied volatility; Yahoo publishes today's option chain only, so
@@ -246,6 +291,7 @@ screener/
   report.py                  CSV / markdown / console output
   run_screen.py              CLI entry point
   yahoo_adapter.py           Yahoo Finance -> the same payload, for broker-free runs
+  profiles.py                Conservative/Moderate/Aggressive; drops the Portfolio Fit block
   tuning.py                  Runtime weight/gate overrides that actually reach the scorer
 web/
   template.html              The page: JS port of the engine, styling, IBKR live-refresh
@@ -260,6 +306,7 @@ tests/
   test_scoring.py            12 assertions, mostly on metric direction
   test_yahoo_adapter.py      50 assertions on the Yahoo -> payload conversion
   test_tuning.py             31 assertions that overrides reach the scorer
+  test_profiles.py           62 assertions on profiles and account-independence
   test_notebook.py           Rebuilds, diffs and executes every notebook cell
   verify_js_engine.js        Extracts and runs the engine out of the built page
   compare_engines.py         Diffs JS output against Python at 1e-6

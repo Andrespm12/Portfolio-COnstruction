@@ -19,18 +19,28 @@ def _f(value, spec: str = ".2f", dash: str = "n/a") -> str:
     return format(value, spec)
 
 
-def write_csv(rows: list[ScoredInstrument], path: str | Path) -> None:
+def write_csv(rows: list[ScoredInstrument], path: str | Path,
+              standalone: bool = False) -> None:
+    """
+    Write the results table.
+
+    ``standalone=True`` omits the two book-relative columns entirely rather
+    than emitting them empty: an independent screen has no book to correlate
+    against, and a blank column invites the reader to assume the number was
+    merely unavailable.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     block_keys = [b.key for b in FACTOR_MODEL]
+    book_columns = [] if standalone else ["corr_to_portfolio", "existing_overlap"]
     header = (
         ["rank", "ticker", "name", "asset_type", "indices", "recommendation",
          "score_0_100", "composite_z", "indicative_weight"]
         + [f"block_{k}" for k in block_keys]
         + ["last_price", "return_1y", "volatility", "max_drawdown", "beta",
-           "alpha_annual", "sharpe", "sortino", "calmar", "adv_usd",
-           "corr_to_portfolio", "existing_overlap", "gates"]
+           "alpha_annual", "sharpe", "sortino", "calmar", "adv_usd"]
+        + book_columns + ["gates"]
     )
 
     with open(path, "w", newline="", encoding="utf-8") as fh:
@@ -48,10 +58,11 @@ def write_csv(rows: list[ScoredInstrument], path: str | Path) -> None:
                    _f(r.raw_metrics.get("sharpe_1y"), ".3f"),
                    _f(r.raw_metrics.get("sortino_1y"), ".3f"),
                    _f(r.raw_metrics.get("calmar_1y"), ".3f"),
-                   _f(d.get("adv_usd"), ".0f"),
-                   _f(r.raw_metrics.get("corr_to_portfolio"), ".3f"),
-                   _f(r.raw_metrics.get("existing_overlap"), ".4f"),
-                   " | ".join(r.gates_triggered)]
+                   _f(d.get("adv_usd"), ".0f")]
+                + ([] if standalone else
+                   [_f(r.raw_metrics.get("corr_to_portfolio"), ".3f"),
+                    _f(r.raw_metrics.get("existing_overlap"), ".4f")])
+                + [" | ".join(r.gates_triggered)]
             )
 
 
@@ -73,6 +84,11 @@ def build_markdown(rows: list[ScoredInstrument], meta: dict) -> str:
     add(f"**Risk-free rate:** {meta.get('risk_free_rate', 0):.2%}  ")
     add(f"**Data source:** {meta.get('data_source', 'IBKR')}  ")
     add(f"**Price history:** {meta.get('history_desc', 'weekly bars, 1 year')}")
+    if meta.get("standalone"):
+        add(f"  \n**Risk profile:** {meta.get('profile_label', '—')}  ")
+        add(f"**Assumed position size:** ${meta.get('target_position_usd') or 0:,.0f}  ")
+        add("**Book:** none — every name is scored on its own merits, with no "
+            "account data read and no Portfolio Fit block in the model.")
     add("")
 
     ow, mw, uw = _bucket(rows, OVERWEIGHT), _bucket(rows, MARKET_WEIGHT), _bucket(rows, UNDERWEIGHT)
@@ -94,17 +110,24 @@ def build_markdown(rows: list[ScoredInstrument], meta: dict) -> str:
 
     add("## Ranking")
     add("")
-    add("| # | Ticker | Type | Rec | Score | z | 1Y Ret | Vol | MaxDD | Beta | Sharpe | Corr | Wgt |")
+    # In standalone mode there is no book, so correlation-to-book is not a
+    # column that could ever hold a value. Report annualized alpha instead of
+    # printing an empty one.
+    standalone = bool(meta.get("standalone"))
+    last_label = "Alpha" if standalone else "Corr"
+    add(f"| # | Ticker | Type | Rec | Score | z | 1Y Ret | Vol | MaxDD | Beta | "
+        f"Sharpe | {last_label} | Wgt |")
     add("|---:|:---|:---|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for i, r in enumerate(rows, start=1):
         d = r.diagnostics
+        last = (_f(d.get("alpha_annual"), "+.1%") if standalone
+                else _f(r.raw_metrics.get("corr_to_portfolio"), ".2f"))
         add(
             f"| {i} | **{r.ticker}** | {r.asset_type} | {r.recommendation} | "
             f"{_f(r.score_0_100, '.0f')} | {_f(r.composite_z, '+.2f')} | "
             f"{_f(d.get('return_1y'), '+.1%')} | {_f(d.get('volatility'), '.1%')} | "
             f"{_f(d.get('max_drawdown'), '.1%')} | {_f(d.get('beta'), '.2f')} | "
-            f"{_f(r.raw_metrics.get('sharpe_1y'), '.2f')} | "
-            f"{_f(r.raw_metrics.get('corr_to_portfolio'), '.2f')} | "
+            f"{_f(r.raw_metrics.get('sharpe_1y'), '.2f')} | {last} | "
             f"{_f(r.indicative_weight, '.1%')} |"
         )
     add("")
@@ -171,18 +194,25 @@ def console_summary(rows: list[ScoredInstrument], meta: dict) -> str:
     out.append("=" * 108)
     out.append(f"SCREENING RESULTS — {meta.get('n_eligible', 0)} eligible of {meta.get('n_screened', 0)} screened")
     out.append("=" * 108)
+    standalone = bool(meta.get("standalone"))
+    if standalone and meta.get("profile_label"):
+        out.append(f"Perfil: {meta['profile_label']}   "
+                   f"posición asumida ${meta.get('target_position_usd', 0):,.0f}")
+        out.append("-" * 108)
     out.append(f"{'#':>3} {'TICKER':<8} {'TYPE':<6} {'RECOMMENDATION':<15} {'SCORE':>6} "
-               f"{'Z':>7} {'1Y':>8} {'VOL':>7} {'MAXDD':>8} {'BETA':>6} {'SHRP':>6} {'CORR':>6} {'WGT':>6}")
+               f"{'Z':>7} {'1Y':>8} {'VOL':>7} {'MAXDD':>8} {'BETA':>6} {'SHRP':>6} "
+               f"{'ALPHA' if standalone else 'CORR':>6} {'WGT':>6}")
     out.append("-" * 108)
     for i, r in enumerate(rows, start=1):
         d = r.diagnostics
+        last = (_f(d.get("alpha_annual"), "+.1%") if standalone
+                else _f(r.raw_metrics.get("corr_to_portfolio"), ".2f"))
         out.append(
             f"{i:>3} {r.ticker:<8} {r.asset_type:<6} {r.recommendation:<15} "
             f"{_f(r.score_0_100, '.0f'):>6} {_f(r.composite_z, '+.2f'):>7} "
             f"{_f(d.get('return_1y'), '+.1%'):>8} {_f(d.get('volatility'), '.1%'):>7} "
             f"{_f(d.get('max_drawdown'), '.1%'):>8} {_f(d.get('beta'), '.2f'):>6} "
-            f"{_f(r.raw_metrics.get('sharpe_1y'), '.2f'):>6} "
-            f"{_f(r.raw_metrics.get('corr_to_portfolio'), '.2f'):>6} "
+            f"{_f(r.raw_metrics.get('sharpe_1y'), '.2f'):>6} {last:>6} "
             f"{_f(r.indicative_weight, '.1%'):>6}"
         )
     out.append("-" * 108)

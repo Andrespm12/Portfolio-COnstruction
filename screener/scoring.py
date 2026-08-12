@@ -252,7 +252,8 @@ def apply_risk_gates(rows: list[ScoredInstrument]) -> list[ScoredInstrument]:
             if -mdd <= GATES.max_drawdown_limit and beta > GATES.beta_limit:
                 row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
                 gates.append(
-                    f"RISK: {mdd:.0%} max drawdown with {beta:.2f} beta -- amplifies existing book risk"
+                    f"RISK: {mdd:.0%} max drawdown with {beta:.2f} beta -- "
+                    "drawdown depth and market sensitivity compound"
                 )
 
         # Redundancy: already held AND highly correlated to the current book.

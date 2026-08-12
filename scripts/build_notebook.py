@@ -33,6 +33,7 @@ OUT = ROOT / "notebooks" / "screener_colab.ipynb"
 MODULES = (
     "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
+    "profiles.py",
 )
 
 
@@ -78,15 +79,6 @@ def code(*lines: str, form: bool = False) -> dict:
 
 def build_cells() -> list[dict]:
     blob, digest = build_payload()
-    portfolio = json.loads((ROOT / "data" / "portfolio_ibkr.json").read_text())
-    positions = [p for p in portfolio.get("positions", []) if p.get("asset_class") == "STK"]
-
-    position_lines = ",\n".join(
-        f'        {{"ticker": "{p["ticker"]}", "market_value": {p["market_value"]}, '
-        f'"quantity": {p["quantity"]}, "asset_class": "STK"}}'
-        for p in positions
-    )
-
     cells: list[dict] = []
 
     # ---------------------------------------------------------------- intro
@@ -96,11 +88,34 @@ def build_cells() -> list[dict]:
         "Corre el modelo completo del repo sobre datos que se bajan en vivo de "
         "Yahoo Finance. Menú → **Entorno de ejecución → Ejecutar todo**.\n",
         "\n",
-        "El motor es idéntico al de `screener/` en el repo (va embebido más "
-        "abajo, con su SHA256). Lo único que cambia frente a la corrida con "
-        "IBKR es **de dónde salen los datos**.\n",
+        "## Independiente de tu portafolio\n",
         "\n",
-        "### Qué cambia al usar Yahoo en vez de IBKR\n",
+        "Este notebook **no lee ninguna cuenta**. Cada nombre se puntúa por sus "
+        "propios méritos: el bloque *Portfolio Fit* está removido del modelo, "
+        "no puesto en cero.\n",
+        "\n",
+        "La distinción importa. Pasar un libro vacío no habría bastado: con "
+        "cero posiciones, `existing_overlap` sigue devolviendo `0.0` para cada "
+        "nombre — un número real, idéntico en todos — que el motor "
+        "estandarizaría y contaría como bloque poblado. Una cuenta vacía "
+        "seguiría influyendo en el compuesto. Quitar el bloque es la única "
+        "forma de que el screen sea de verdad independiente.\n",
+        "\n",
+        "## Perfil de riesgo\n",
+        "\n",
+        "Eliges **Conservador**, **Moderado** o **Agresivo** en Parámetros, y "
+        "eso reconfigura cuatro cosas a la vez — no es una etiqueta sobre el "
+        "mismo ranking:\n",
+        "\n",
+        "1. **Pesos de los bloques** — qué premia el score compuesto.\n",
+        "2. **Umbrales de recomendación** — cuánto score exige un Overweight y "
+        "qué tan poco basta para un Underweight. Asimétricos a propósito.\n",
+        "3. **Gates de riesgo** — los techos duros que solo pueden degradar "
+        "una recomendación.\n",
+        "4. **Dimensionamiento y elegibilidad** — volatilidad objetivo, tope "
+        "por posición y liquidez mínima para siquiera entrar al ranking.\n",
+        "\n",
+        "## Qué cambia al usar Yahoo en vez de IBKR\n",
         "\n",
         "| | IBKR | Yahoo |\n",
         "|---|---|---|\n",
@@ -147,13 +162,14 @@ def build_cells() -> list[dict]:
         "    sys.path.insert(0, '.')\n",
         "\n",
         "import screener\n",
-        "from screener.config import FACTOR_MODEL, block_weight_total\n",
+        "from screener.profiles import PROFILES\n",
         "\n",
+        "# Deliberadamente NO se importa FACTOR_MODEL aqui. El perfil lo\n",
+        "# reemplaza mas abajo, y un nombre enlazado ahora quedaria obsoleto:\n",
+        "# seguiria apuntando al modelo de 7 bloques con Portfolio Fit incluido.\n",
         "print(f'motor verificado  sha256={digest[:16]}...')\n",
-        "print(f'{len(FACTOR_MODEL)} bloques, pesos suman "
-        "{block_weight_total():.2f}')\n",
-        "for b in FACTOR_MODEL:\n",
-        "    print(f'  {b.weight:5.0%}  {b.label}')\n",
+        "print(f'perfiles disponibles: "
+        "{\", \".join(p.label for p in PROFILES.values())}')\n",
     ))
 
     cells.append(code(
@@ -203,6 +219,15 @@ def build_cells() -> list[dict]:
         'PERIODO = "2y"  # @param ["1y", "2y", "5y"]\n',
         "TASA_LIBRE_RIESGO = 0.0425  # @param {type:\"number\"}\n",
         "\n",
+        "# @markdown ### Perfil de riesgo\n",
+        'PERFIL = "Moderado"  # @param ["Conservador", "Moderado", "Agresivo"]\n',
+        "# @markdown Cambia pesos de bloque, umbrales de recomendación, gates "
+        "de riesgo, dimensionamiento y liquidez mínima — todo a la vez.\n",
+        "TAMANO_POSICION_USD = 500000  # @param {type:\"number\"}\n",
+        "# @markdown Tamaño de posición que asume el bloque de liquidez para "
+        "calcular `days_to_liquidate`. Es un supuesto de dimensionamiento, no "
+        "un dato de tu cuenta.\n",
+        "\n",
         "# @markdown ### Datos opcionales (lentos)\n",
         'CON_VOL_IMPLICITA = False  # @param {type:"boolean"}\n',
         "# @markdown Baja la cadena de opciones para `iv_hv_spread`. ~2 "
@@ -240,40 +265,16 @@ def build_cells() -> list[dict]:
         "\n",
         "print(f'{len(TICKERS)} tickers  |  benchmark {BENCHMARK}  |  "
         "{PERIODO} de historia diaria')\n",
-    ))
-
-    # ------------------------------------------------------------- portfolio
-    cells.append(md(
-        "## 3 · Tu portafolio\n",
         "\n",
-        "Alimenta el bloque **Portfolio Fit** (13% del modelo): correlación "
-        "contra el libro actual, beneficio marginal de diversificación y "
-        "solapamiento con lo que ya tienes.\n",
+        "from screener.profiles import get_profile\n",
         "\n",
-        "Viene precargado con el snapshot de IBKR del repo. Edítalo con tus "
-        "posiciones reales — solo renta variable; efectivo y bonos van en "
-        "`net_liquidation` pero no se correlacionan.\n",
-    ))
-    cells.append(code(
-        "PORTAFOLIO = {\n",
-        f'    "net_liquidation": {portfolio.get("net_liquidation", 0.0)},\n',
-        '    "positions": [\n',
-        *[line + "\n" for line in position_lines.split("\n")],
-        "    ],\n",
-        "}\n",
-        "\n",
-        "# Para correr sin libro (screening puro), descomenta:\n",
-        '# PORTAFOLIO = {"net_liquidation": 1_000_000.0, "positions": []}\n',
-        "\n",
-        "_eq = sum(p['market_value'] for p in PORTAFOLIO['positions'])\n",
-        "print(f\"{len(PORTAFOLIO['positions'])} posiciones de renta variable\")\n",
-        "print(f\"valor neto     ${PORTAFOLIO['net_liquidation']:,.0f}\")\n",
-        "print(f'expuesto       ${_eq:,.0f}  "
-        "({_eq / PORTAFOLIO[\"net_liquidation\"]:.1%} del NLV)')\n",
+        "perfil = get_profile(PERFIL)\n",
+        "print()\n",
+        "print(perfil.describe())\n",
     ))
 
     # ------------------------------------------------------------- download
-    cells.append(md("## 4 · Bajar datos\n"))
+    cells.append(md("## 3 · Bajar datos\n"))
     cells.append(code(
         "import time\n",
         "from screener.yahoo_adapter import fetch_market_data\n",
@@ -303,7 +304,7 @@ def build_cells() -> list[dict]:
 
     # ------------------------------------------------------------- coverage
     cells.append(md(
-        "## 5 · Cobertura de métricas\n",
+        "## 4 · Cobertura de métricas\n",
         "\n",
         "Léela antes del ranking. Una métrica con cobertura baja se está "
         "estandarizando contra una sección transversal chica mientras el resto "
@@ -330,25 +331,38 @@ def build_cells() -> list[dict]:
     ))
 
     # ------------------------------------------------------------------ run
-    cells.append(md("## 6 · Correr el modelo\n"))
+    cells.append(md("## 5 · Correr el modelo\n"))
     cells.append(code(
-        "from screener.run_screen import run\n",
+        "from screener.run_screen import run_standalone\n",
         "from screener.report import console_summary\n",
         "\n",
-        "scored, meta = run(market_data, PORTAFOLIO, rf=TASA_LIBRE_RIESGO)\n",
+        "# Sin libro: ninguna cuenta se lee y el bloque Portfolio Fit no esta\n",
+        "# en el modelo. El perfil reconfigura pesos, umbrales, gates,\n",
+        "# dimensionamiento y elegibilidad de una sola vez.\n",
+        "scored, meta = run_standalone(\n",
+        "    market_data,\n",
+        "    profile=PERFIL,\n",
+        "    position_usd=TAMANO_POSICION_USD,\n",
+        "    rf=TASA_LIBRE_RIESGO,\n",
+        ")\n",
         "print(console_summary(scored, meta))\n",
     ))
 
     # -------------------------------------------------------------- results
     cells.append(md(
-        "## 7 · Ranking\n",
+        "## 6 · Ranking\n",
         "\n",
         "`indicative_weight` es tamaño por volatilidad inversa escalado por "
         "convicción, con topes duros — un punto de partida para dimensionar, "
         "no una orden.\n",
     ))
     cells.append(code(
-        "BLOQUES = [b.key for b in FACTOR_MODEL]\n",
+        "import screener.config as _cfg\n",
+        "\n",
+        "# El modelo VIGENTE, ya con el perfil aplicado: seis bloques, sin\n",
+        "# Portfolio Fit. Se lee aqui y no al importar, por la misma razon.\n",
+        "MODELO = _cfg.FACTOR_MODEL\n",
+        "BLOQUES = [b.key for b in MODELO]\n",
         "\n",
         "tabla = pd.DataFrame([{\n",
         "    'rank': i,\n",
@@ -363,11 +377,13 @@ def build_cells() -> list[dict]:
         "    'max_dd': r.diagnostics.get('max_drawdown'),\n",
         "    'beta': r.diagnostics.get('beta'),\n",
         "    'sharpe': r.raw_metrics.get('sharpe_1y'),\n",
-        "    'corr_libro': r.raw_metrics.get('corr_to_portfolio'),\n",
+        "    # Sin libro no hay correlacion contra el libro. Se muestra alfa\n",
+        "    # anualizado en su lugar, no una columna vacia.\n",
+        "    'alpha': r.diagnostics.get('alpha_annual'),\n",
         "    'gates': ', '.join(r.gates_triggered),\n",
         "} for i, r in enumerate(scored, 1)])\n",
         "\n",
-        "PORCENTAJES = ['peso_ind', 'ret_1a', 'vol', 'max_dd']\n",
+        "PORCENTAJES = ['peso_ind', 'ret_1a', 'vol', 'max_dd', 'alpha']\n",
         "\n",
         "def pintar_reco(v):\n",
         "    return {\n",
@@ -378,7 +394,7 @@ def build_cells() -> list[dict]:
         "(tabla.head(40).style\n",
         "    .format({c: '{:.1%}' for c in PORCENTAJES} |\n",
         "            {'score': '{:.1f}', 'z': '{:+.2f}', 'beta': '{:.2f}',\n",
-        "             'sharpe': '{:.2f}', 'corr_libro': '{:+.2f}'}, na_rep='—')\n",
+        "             'sharpe': '{:.2f}'}, na_rep='—')\n",
         "    .map(pintar_reco, subset=['reco'])\n",
         "    .map(lambda v: escala(v, 20, 80), subset=['score'])\n",
         "    .hide(axis='index'))\n",
@@ -386,13 +402,13 @@ def build_cells() -> list[dict]:
 
     # -------------------------------------------------------------- heatmap
     cells.append(md(
-        "## 8 · Mapa de factores\n",
+        "## 7 · Mapa de factores\n",
         "\n",
         "Dónde gana o pierde cada nombre. Un score compuesto alto sostenido por "
         "un solo bloque es frágil de una forma que el ranking no te muestra.\n",
     ))
     cells.append(code(
-        "ETIQUETAS = {b.key: b.label for b in FACTOR_MODEL}\n",
+        "ETIQUETAS = {b.key: b.label for b in MODELO}\n",
         "\n",
         "mapa = pd.DataFrame(\n",
         "    [{'ticker': r.ticker, **{ETIQUETAS[k]: r.block_scores.get(k)\n",
@@ -407,7 +423,7 @@ def build_cells() -> list[dict]:
     ))
 
     # --------------------------------------------------------------- detail
-    cells.append(md("## 9 · Detalle de un nombre\n"))
+    cells.append(md("## 8 · Detalle de un nombre\n"))
     cells.append(code(
         'TICKER = "NVDA"  # @param {type:"string"}\n',
         "\n",
@@ -434,7 +450,7 @@ def build_cells() -> list[dict]:
         "        print(f\"\\nExposicion duplicada: {', '.join(_r.duplicates)}\")\n",
         "\n",
         "    print('\\nBloques')\n",
-        "    for _b in FACTOR_MODEL:\n",
+        "    for _b in MODELO:\n",
         "        _s = _r.block_scores.get(_b.key)\n",
         "        _c = _r.block_coverage.get(_b.key, 0.0)\n",
         "        _bar = '#' * int(max(0, min(4, (_s or 0) + 2)) * 5)\n",
@@ -451,11 +467,11 @@ def build_cells() -> list[dict]:
     ))
 
     # ---------------------------------------------------------------- export
-    cells.append(md("## 10 · Exportar\n"))
+    cells.append(md("## 9 · Exportar\n"))
     cells.append(code(
         "from screener.report import write_csv, write_markdown\n",
         "\n",
-        "write_csv(scored, 'screen_results.csv')\n",
+        "write_csv(scored, 'screen_results.csv', standalone=True)\n",
         "write_markdown(scored, meta, 'screen_report.md')\n",
         "\n",
         "try:\n",
@@ -466,13 +482,73 @@ def build_cells() -> list[dict]:
         "    print('Fuera de Colab: archivos escritos en el directorio actual.')\n",
     ))
 
+    # ------------------------------------------------------------- compare
+    cells.append(md(
+        "## 10 · Comparar los tres perfiles\n",
+        "\n",
+        "El mismo universo, los mismos datos, tres configuraciones. Un nombre "
+        "que aparece Overweight en los tres es una señal robusta; uno que solo "
+        "sobrevive en Agresivo te está diciendo que su score depende de que le "
+        "perdones la volatilidad.\n",
+    ))
+    cells.append(code(
+        "from screener.profiles import PROFILES\n",
+        "from screener.tuning import reset_all\n",
+        "\n",
+        "_por_perfil = {}\n",
+        "try:\n",
+        "    for _k, _p in PROFILES.items():\n",
+        "        _s, _ = run_standalone(market_data, profile=_k,\n",
+        "                               position_usd=TAMANO_POSICION_USD,\n",
+        "                               rf=TASA_LIBRE_RIESGO)\n",
+        "        _por_perfil[_p.label] = {r.ticker: r for r in _s}\n",
+        "finally:\n",
+        "    # Deja el modelo como lo encontro el resto del notebook.\n",
+        "    reset_all()\n",
+        "    scored, meta = run_standalone(market_data, profile=PERFIL,\n",
+        "                                  position_usd=TAMANO_POSICION_USD,\n",
+        "                                  rf=TASA_LIBRE_RIESGO)\n",
+        "\n",
+        "_tickers = [r.ticker for r in scored]\n",
+        "comparacion = pd.DataFrame({\n",
+        "    _label: pd.Series({t: _rows[t].recommendation for t in _tickers})\n",
+        "    for _label, _rows in _por_perfil.items()\n",
+        "})\n",
+        "comparacion.insert(0, 'score_' + PERFIL.lower(),\n",
+        "                   pd.Series({r.ticker: r.score_0_100 for r in scored}))\n",
+        "\n",
+        "_ABREV = {'OVERWEIGHT': 'OW', 'MARKET WEIGHT': 'MW', 'UNDERWEIGHT': 'UW'}\n",
+        "_TONO = {'OVERWEIGHT': 1.6, 'MARKET WEIGHT': 0.0, 'UNDERWEIGHT': -1.6}\n",
+        "_PERFILES = [p.label for p in PROFILES.values()]\n",
+        "\n",
+        "_ow = comparacion[_PERFILES].eq('OVERWEIGHT').sum(axis=1)\n",
+        "print(f'Overweight en los tres perfiles: "
+        "{list(comparacion.index[_ow == 3]) or \"ninguno\"}')\n",
+        "print(f'Overweight solo en Agresivo:     '\n",
+        "      f'{list(comparacion.index[(_ow == 1) & "
+        "comparacion[\"Agresivo\"].eq(\"OVERWEIGHT\")]) or \"ninguno\"}')\n",
+        "\n",
+        "(comparacion.head(30).style\n",
+        "    .format({comparacion.columns[0]: '{:.1f}'})\n",
+        "    .format(lambda v: _ABREV.get(v, v), subset=_PERFILES)\n",
+        "    .map(lambda v: escala(_TONO.get(v, 0.0)), subset=_PERFILES)\n",
+        "    .map(lambda v: escala(v, 20, 80), subset=[comparacion.columns[0]])\n",
+        "    .set_caption('Recomendación por perfil'))\n",
+    ))
+
     # ---------------------------------------------------------------- tuning
     cells.append(md(
-        "## 11 · Cambiar el modelo\n",
+        "## 11 · Ajuste fino del modelo\n",
         "\n",
-        "Los pesos de bloque y los gates son juicios, no verdades. Cámbialos y "
-        "vuelve a correr la celda 6 en adelante — no hace falta reiniciar el "
-        "entorno.\n",
+        "Los tres perfiles ya cubren la mayoría de los casos. Esto es para "
+        "cuando quieras algo que ningún perfil expresa — mueve los pesos y "
+        "vuelve a correr desde la celda 5, sin reiniciar el entorno.\n",
+        "\n",
+        "**Ojo con el orden:** `run_standalone` vuelve a aplicar el perfil en "
+        "cada llamada, así que sobrescribe lo que pongas aquí. Para que un "
+        "ajuste manual sobreviva, usa `run(market_data, {}, standalone=True, "
+        "target_position_usd=TAMANO_POSICION_USD)` en lugar de "
+        "`run_standalone`.\n",
         "\n",
         "`set_block_weights` acepta tamaños relativos y renormaliza. Un bloque "
         "en `0.0` se sigue calculando y mostrando, pero no aporta al compuesto: "
@@ -494,7 +570,9 @@ def build_cells() -> list[dict]:
         "# --- Ejemplo D: barrido de sensibilidad, sin efectos permanentes ----\n",
         "# for _peso in (0.0, 0.11, 0.22, 0.44):\n",
         "#     with block_weights({'momentum': _peso}):\n",
-        "#         _s, _ = run(market_data, PORTAFOLIO, rf=TASA_LIBRE_RIESGO)\n",
+        "#         _s, _ = run(market_data, {}, standalone=True,\n",
+        "#                     target_position_usd=TAMANO_POSICION_USD,\n",
+        "#                     rf=TASA_LIBRE_RIESGO)\n",
         "#         _top = ', '.join(r.ticker for r in _s[:5])\n",
         "#         print(f'momentum {_peso:.0%} -> {_top}')\n",
         "\n",
