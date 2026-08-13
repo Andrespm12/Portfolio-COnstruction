@@ -136,7 +136,7 @@ def build_cells() -> list[dict]:
     # -------------------------------------------------------------- install
     cells.append(md("## 1 · Instalación y motor\n"))
     cells.append(code(
-        "%pip install -q yfinance\n",
+        "%pip install -q yfinance openpyxl\n",
         "print('yfinance listo')\n",
     ))
 
@@ -466,60 +466,62 @@ def build_cells() -> list[dict]:
         "z {_r.metric_z.get(_k, float(\"nan\")):+.2f}')\n",
     ))
 
-    # ---------------------------------------------------------------- export
-    cells.append(md("## 9 · Exportar\n"))
-    cells.append(code(
-        "from screener.report import write_csv, write_markdown\n",
-        "\n",
-        "write_csv(scored, 'screen_results.csv', standalone=True)\n",
-        "write_markdown(scored, meta, 'screen_report.md')\n",
-        "\n",
-        "try:\n",
-        "    from google.colab import files\n",
-        "    files.download('screen_results.csv')\n",
-        "    files.download('screen_report.md')\n",
-        "except ImportError:\n",
-        "    print('Fuera de Colab: archivos escritos en el directorio actual.')\n",
-    ))
-
     # ------------------------------------------------------------- compare
     cells.append(md(
-        "## 10 · Comparar los tres perfiles\n",
+        "## 9 · Comparar los tres perfiles\n",
         "\n",
         "El mismo universo, los mismos datos, tres configuraciones. Un nombre "
         "que aparece Overweight en los tres es una señal robusta; uno que solo "
         "sobrevive en Agresivo te está diciendo que su score depende de que le "
         "perdones la volatilidad.\n",
+        "\n",
+        "**`n/e` no es un error.** Cada perfil tiene su propio piso de liquidez "
+        "($50MM / $20MM / $10MM de volumen diario), así que un nombre puede ser "
+        "elegible para uno y no para otro. Cuando eso pasa, el perfil más "
+        "estricto lo marca como no elegible y te dice por qué.\n",
     ))
     cells.append(code(
         "from screener.profiles import PROFILES\n",
         "from screener.tuning import reset_all\n",
         "\n",
-        "_por_perfil = {}\n",
+        "_recos, _excluidos = {}, {}\n",
         "try:\n",
         "    for _k, _p in PROFILES.items():\n",
-        "        _s, _ = run_standalone(market_data, profile=_k,\n",
-        "                               position_usd=TAMANO_POSICION_USD,\n",
-        "                               rf=TASA_LIBRE_RIESGO)\n",
-        "        _por_perfil[_p.label] = {r.ticker: r for r in _s}\n",
+        "        _s, _m = run_standalone(market_data, profile=_k,\n",
+        "                                position_usd=TAMANO_POSICION_USD,\n",
+        "                                rf=TASA_LIBRE_RIESGO)\n",
+        "        _recos[_p.label] = {r.ticker: r.recommendation for r in _s}\n",
+        "        _excluidos[_p.label] = dict(_m.get('excluded', []))\n",
         "finally:\n",
-        "    # Deja el modelo como lo encontro el resto del notebook.\n",
+        "    # Deja el modelo como lo espera el resto del notebook.\n",
         "    reset_all()\n",
         "    scored, meta = run_standalone(market_data, profile=PERFIL,\n",
         "                                  position_usd=TAMANO_POSICION_USD,\n",
         "                                  rf=TASA_LIBRE_RIESGO)\n",
         "\n",
+        "NO_ELEGIBLE = 'NO ELEGIBLE'\n",
         "_tickers = [r.ticker for r in scored]\n",
+        "\n",
+        "# Cada perfil filtra por liquidez distinto, asi que no todos puntuan\n",
+        "# el mismo conjunto de nombres. Indexar a ciegas aqui reventaria con\n",
+        "# KeyError en cuanto un perfil excluya algo que otro si acepto.\n",
         "comparacion = pd.DataFrame({\n",
-        "    _label: pd.Series({t: _rows[t].recommendation for t in _tickers})\n",
-        "    for _label, _rows in _por_perfil.items()\n",
+        "    _label: pd.Series({t: _r.get(t, NO_ELEGIBLE) for t in _tickers})\n",
+        "    for _label, _r in _recos.items()\n",
         "})\n",
         "comparacion.insert(0, 'score_' + PERFIL.lower(),\n",
         "                   pd.Series({r.ticker: r.score_0_100 for r in scored}))\n",
         "\n",
-        "_ABREV = {'OVERWEIGHT': 'OW', 'MARKET WEIGHT': 'MW', 'UNDERWEIGHT': 'UW'}\n",
+        "_ABREV = {'OVERWEIGHT': 'OW', 'MARKET WEIGHT': 'MW',\n",
+        "          'UNDERWEIGHT': 'UW', NO_ELEGIBLE: 'n/e'}\n",
         "_TONO = {'OVERWEIGHT': 1.6, 'MARKET WEIGHT': 0.0, 'UNDERWEIGHT': -1.6}\n",
         "_PERFILES = [p.label for p in PROFILES.values()]\n",
+        "\n",
+        "def _estilo_reco(v):\n",
+        "    # No elegible es una categoria aparte, no un punto de la escala.\n",
+        "    if v == NO_ELEGIBLE:\n",
+        "        return 'background-color:#F5F5F4;color:#A8A29E;font-style:italic'\n",
+        "    return escala(_TONO.get(v, 0.0))\n",
         "\n",
         "_ow = comparacion[_PERFILES].eq('OVERWEIGHT').sum(axis=1)\n",
         "print(f'Overweight en los tres perfiles: "
@@ -528,12 +530,76 @@ def build_cells() -> list[dict]:
         "      f'{list(comparacion.index[(_ow == 1) & "
         "comparacion[\"Agresivo\"].eq(\"OVERWEIGHT\")]) or \"ninguno\"}')\n",
         "\n",
+        "for _label in _PERFILES:\n",
+        "    _fuera = [t for t in _tickers if _recos[_label].get(t) is None]\n",
+        "    if _fuera:\n",
+        "        print(f'\\n{_label} no considera {len(_fuera)} de estos nombres:')\n",
+        "        for _t in _fuera[:8]:\n",
+        "            _razon = (_excluidos[_label].get(_t) or ['fuera del universo'])[0]\n",
+        "            print(f'  {_t:8s} {_razon}')\n",
+        "\n",
         "(comparacion.head(30).style\n",
         "    .format({comparacion.columns[0]: '{:.1f}'})\n",
         "    .format(lambda v: _ABREV.get(v, v), subset=_PERFILES)\n",
-        "    .map(lambda v: escala(_TONO.get(v, 0.0)), subset=_PERFILES)\n",
+        "    .map(_estilo_reco, subset=_PERFILES)\n",
         "    .map(lambda v: escala(v, 20, 80), subset=[comparacion.columns[0]])\n",
         "    .set_caption('Recomendación por perfil'))\n",
+    ))
+
+    # ---------------------------------------------------------------- export
+    cells.append(md(
+        "## 10 · Exportar a Excel\n",
+        "\n",
+        "Un solo archivo con cinco hojas: ranking, scores por bloque, "
+        "comparación de perfiles, cobertura de métricas y los parámetros con "
+        "que se corrió — para que el archivo se explique solo dentro de seis "
+        "meses.\n",
+    ))
+    cells.append(code(
+        "ARCHIVO = 'screening.xlsx'\n",
+        "\n",
+        "parametros = pd.DataFrame([\n",
+        "    ('Generado (UTC)', pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M')),\n",
+        "    ('Perfil', perfil.label),\n",
+        "    ('Perfil — resumen', perfil.summary),\n",
+        "    ('Universo', UNIVERSO),\n",
+        "    ('Nombres puntuados', len(scored)),\n",
+        "    ('Benchmark', BENCHMARK),\n",
+        "    ('Historia', PERIODO),\n",
+        "    ('Tasa libre de riesgo', f'{TASA_LIBRE_RIESGO:.2%}'),\n",
+        "    ('Posición asumida (liquidez)', f'${TAMANO_POSICION_USD:,.0f}'),\n",
+        "    ('Fuente de datos', market_data['data_source']),\n",
+        "    ('Portafolio', 'ninguno — screen independiente'),\n",
+        "    ('Umbral Overweight', f'z >= {perfil.bands.overweight_z:+.2f}'),\n",
+        "    ('Umbral Underweight', f'z <= {perfil.bands.underweight_z:+.2f}'),\n",
+        "    ('Techo de volatilidad para OW',\n",
+        "     f'{perfil.gates.max_volatility_for_overweight:.0%}'),\n",
+        "    ('Beta máxima', f'{perfil.gates.beta_limit:.2f}'),\n",
+        "    ('Peso máximo por posición', f'{perfil.sizing.max_weight:.1%}'),\n",
+        "    ('Volumen diario mínimo', f'${perfil.eligibility.min_adv_usd/1e6:,.0f}MM'),\n",
+        "] + [(f'Peso — {b.label}', f'{b.weight:.0%}') for b in MODELO],\n",
+        "    columns=['Parámetro', 'Valor'])\n",
+        "\n",
+        "with pd.ExcelWriter(ARCHIVO, engine='openpyxl') as _xl:\n",
+        "    tabla.to_excel(_xl, sheet_name='Ranking', index=False)\n",
+        "    mapa.to_excel(_xl, sheet_name='Bloques')\n",
+        "    comparacion.to_excel(_xl, sheet_name='Perfiles')\n",
+        "    _cov.to_excel(_xl, sheet_name='Cobertura', index=False)\n",
+        "    parametros.to_excel(_xl, sheet_name='Parametros', index=False)\n",
+        "\n",
+        "    for _hoja in _xl.book.worksheets:\n",
+        "        _hoja.freeze_panes = 'A2'\n",
+        "        for _col in _hoja.columns:\n",
+        "            _ancho = max((len(str(c.value)) for c in _col if c.value), default=8)\n",
+        "            _hoja.column_dimensions[_col[0].column_letter].width = min(46, _ancho + 3)\n",
+        "\n",
+        "print(f'{ARCHIVO}  —  {len(scored)} nombres, 5 hojas')\n",
+        "\n",
+        "try:\n",
+        "    from google.colab import files\n",
+        "    files.download(ARCHIVO)\n",
+        "except ImportError:\n",
+        "    print('Fuera de Colab: el archivo quedó en el directorio actual.')\n",
     ))
 
     # ---------------------------------------------------------------- tuning

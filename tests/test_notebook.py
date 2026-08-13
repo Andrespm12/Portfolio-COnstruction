@@ -103,11 +103,20 @@ def test_embedded_engine_is_current() -> None:
 # Execution
 # --------------------------------------------------------------------------
 
+#: Offline stand-in for the Yahoo download.
+#:
+#: DBC is given a deliberately thin volume so its average daily traded value
+#: lands between the aggressive profile's $10MM floor and the conservative
+#: profile's $50MM one. That makes the three profiles score *different sets of
+#: names*, which is exactly the condition that made the profile-comparison cell
+#: raise KeyError: it indexed one profile's results by another's tickers.
 OFFLINE_FETCH = """
 from test_yahoo_adapter import make_yf_frame
 from screener.yahoo_adapter import build_market_data
 
 _frame = make_yf_frame(TICKERS, dividends={'SPY': 6.0, 'JPM': 4.0})
+if ('Volume', 'DBC') in _frame.columns:
+    _frame[('Volume', 'DBC')] = 250_000.0
 market_data = build_market_data(
     _frame, TICKERS, benchmark=BENCHMARK,
     risk_free_rate=TASA_LIBRE_RIESGO,
@@ -142,7 +151,8 @@ def test_cells_execute() -> None:
 
     # A small custom universe keeps the fixture fast and exercises the
     # custom-list branch of the parameter cell.
-    tickers = ["SPY", "QQQ", "IWM", "GLD", "TLT", "AAPL", "MSFT", "NVDA", "JPM", "LLY"]
+    tickers = ["SPY", "QQQ", "IWM", "GLD", "TLT", "AAPL", "MSFT", "NVDA",
+               "JPM", "LLY", "DBC"]
     patched = 0
     for i, source in enumerate(cells):
         if "UNIVERSO =" in source:
@@ -221,17 +231,49 @@ def test_cells_execute() -> None:
     check("comparing profiles left the selected profile in force",
           namespace["meta"]["profile"] == namespace["perfil"].key)
 
-    exported = Path(workdir) / "screen_results.csv"
-    report = Path(workdir) / "screen_report.md"
-    check("CSV export is written", exported.exists() and exported.stat().st_size > 0)
-    check("Markdown report is written", report.exists() and report.stat().st_size > 0)
+    # Regression: profiles apply different liquidity floors, so they score
+    # different sets of names. The comparison must report that, not raise.
+    labels = ["Conservador", "Moderado", "Agresivo"]
+    ineligible = (comparison[labels] == namespace["NO_ELEGIBLE"]).sum().sum()
+    check("a name eligible under one profile but not another is marked, not dropped",
+          ineligible > 0,
+          "the fixture should make DBC fail the conservative liquidity floor")
+    check("the strictest profile is the one that rejects it",
+          (comparison["Conservador"] == namespace["NO_ELEGIBLE"]).sum()
+          >= (comparison["Agresivo"] == namespace["NO_ELEGIBLE"]).sum())
+    check("every other cell holds a real recommendation",
+          comparison[labels].isin(
+              ["OVERWEIGHT", "MARKET WEIGHT", "UNDERWEIGHT",
+               namespace["NO_ELEGIBLE"]]).all().all())
 
-    header = exported.read_text(encoding="utf-8").splitlines()[0]
-    check("exported CSV carries the full schema",
-          "block_momentum" in header and "indicative_weight" in header)
-    check("exported CSV has no book-relative columns",
-          "corr_to_portfolio" not in header and "existing_overlap" not in header,
-          f"got {header}")
+    workbook = Path(workdir) / "screening.xlsx"
+    check("Excel workbook is written",
+          workbook.exists() and workbook.stat().st_size > 0)
+    check("no markdown report is produced",
+          not (Path(workdir) / "screen_report.md").exists())
+
+    import openpyxl
+    wb = openpyxl.load_workbook(workbook)
+    check("workbook has the five documented sheets",
+          set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles",
+                                 "Cobertura", "Parametros"},
+          f"got {wb.sheetnames}")
+
+    ranking_header = [c.value for c in next(wb["Ranking"].iter_rows(max_row=1))]
+    check("Ranking sheet has a row per scored name",
+          wb["Ranking"].max_row == len(namespace["scored"]) + 1)
+    check("Ranking sheet carries no book-relative column",
+          not {"corr_libro", "corr_to_portfolio", "existing_overlap"}
+          & set(ranking_header), f"got {ranking_header}")
+    check("Ranking sheet reports alpha in place of correlation-to-book",
+          "alpha" in ranking_header)
+
+    parametros = [row[0].value for row in wb["Parametros"].iter_rows(min_row=2)]
+    check("Parametros sheet records the profile and that no book was used",
+          "Perfil" in parametros and "Portafolio" in parametros,
+          f"got {parametros}")
+    check("Parametros sheet records every block weight",
+          sum(1 for p in parametros if str(p).startswith("Peso — ")) == 6)
 
 
 def test_no_account_data_in_the_notebook() -> None:

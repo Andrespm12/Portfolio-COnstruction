@@ -98,6 +98,18 @@ A comparison cell runs all three over the same data. A name that holds an
 Overweight in all three is a robust call; one that only survives in Aggressive
 is telling you its score depends on forgiving its volatility.
 
+Because each profile applies its own liquidity floor, the three do not score the
+same set of names — a $30MM-ADV ETF is eligible for Aggressive and Moderate but
+not Conservative. The comparison marks those cells `n/e` and prints the reason
+(`ADV $39.3MM below $50MM minimum`) rather than failing. An earlier version
+indexed one profile's results by another's tickers and raised `KeyError` on the
+first such name; `tests/test_notebook.py` now runs the notebook against a
+fixture built specifically to straddle two liquidity floors.
+
+Output is a single `screening.xlsx` with five sheets — ranking, block scores,
+profile comparison, metric coverage, and the parameters the run used, so the
+file still explains itself six months later.
+
 What Yahoo cannot supply is stated rather than faked. `iv_percentile` needs a
 *history* of implied volatility; Yahoo publishes today's option chain only, so
 the metric is **omitted from the payload, not zero-filled** — the scorer
