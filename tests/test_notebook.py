@@ -246,6 +246,32 @@ def test_cells_execute() -> None:
               ["OVERWEIGHT", "MARKET WEIGHT", "UNDERWEIGHT",
                namespace["NO_ELEGIBLE"]]).all().all())
 
+    # ---- Black-Litterman export -------------------------------------------
+    views = namespace["views"]
+    check("the notebook produced Black-Litterman views", len(views) > 0)
+    check("every view carries the fields CCI's approval flow reads",
+          all({"estrategia", "tipo", "Q", "conviccion", "justificacion"} <= set(v)
+              for v in views))
+    check("views are tagged with the CCI strategy, not the screener profile",
+          all(v["estrategia"] == namespace["ESTRATEGIA_CCI"] for v in views))
+    check("no view exceeds the +/-5% band CCI's document specifies",
+          all(abs(v["Q"]) <= 0.05 + 1e-9 for v in views))
+    check("the exported basket uses CCI's sheet columns",
+          list(namespace["cesta_df"].columns)
+          == list(__import__("screener.black_litterman",
+                             fromlist=["BASKET_COLUMNS"]).BASKET_COLUMNS))
+
+    views_file = Path(workdir) / namespace["ARCHIVO_VIEWS"]
+    check("the views JSON is written with CCI's naming convention",
+          views_file.exists() and views_file.name.endswith(".json"))
+    payload = json.loads(views_file.read_text(encoding="utf-8"))
+    check("the JSON declares the IC as an assumption",
+          "supuesto" in payload["calibracion"]["nota"])
+    check("the JSON records that no account data was read",
+          "sin datos de cuenta" in payload["origen"])
+    check("the exported basket CSV is written",
+          (Path(workdir) / namespace["ARCHIVO_CESTA"]).exists())
+
     workbook = Path(workdir) / "screening.xlsx"
     check("Excel workbook is written",
           workbook.exists() and workbook.stat().st_size > 0)

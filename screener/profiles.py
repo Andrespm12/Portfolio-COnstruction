@@ -124,6 +124,51 @@ def _pct(value: float | None) -> str:
 # The three profiles
 # --------------------------------------------------------------------------
 
+CONSERVADOR_DEFENSIVO = RiskProfile(
+    key="conservador_defensivo",
+    label="Conservador Defensivo",
+    summary="mandato de mínima volatilidad; la tendencia casi no puntúa",
+    # The most defensive mandate in CCI's Investment Procedure. Momentum falls
+    # to a third of the Conservative weight and the volatility/drawdown block
+    # becomes a third of the entire model: this book is judged on the path, not
+    # the endpoint. Liquidity is the second-largest block because an inability
+    # to exit is itself a drawdown for a mandate defined by drawdown.
+    block_weights={
+        "momentum": 0.08,
+        "risk_adjusted": 0.22,
+        "risk": 0.34,
+        "market_sensitivity": 0.08,
+        "liquidity": 0.16,
+        "valuation_carry": 0.12,
+    },
+    # The most asymmetric bands in the set: an Overweight needs a full standard
+    # deviation of edge, while a fifth of one is enough to step aside.
+    bands=RecommendationBands(
+        overweight_z=1.00, underweight_z=-0.20, min_populated_blocks=5,
+    ),
+    gates=RiskGates(
+        trend_gate_enabled=True,
+        max_drawdown_limit=-0.20,
+        beta_limit=0.85,
+        corr_limit=1.01,             # inert: no book is read
+        existing_weight_limit=1.01,  # inert: no book is read
+        liquidity_gate_enabled=True,
+        max_volatility_for_overweight=0.22,
+        duplicate_corr_limit=0.88,
+    ),
+    sizing=SizingParams(
+        target_position_vol=0.08, base_weight=0.020,
+        overweight_multiplier=1.35, market_weight_multiplier=1.00,
+        underweight_multiplier=0.25,
+        min_weight=0.005, max_weight=0.035,
+    ),
+    eligibility=EligibilityRules(
+        min_price=10.0, min_adv_usd=100_000_000.0,
+        max_participation_rate=0.10, max_days_to_liquidate=1.5,
+    ),
+    default_position_usd=250_000.0,
+)
+
 CONSERVADOR = RiskProfile(
     key="conservador",
     label="Conservador",
@@ -256,8 +301,29 @@ AGRESIVO = RiskProfile(
 )
 
 PROFILES: dict[str, RiskProfile] = {
-    p.key: p for p in (CONSERVADOR, MODERADO, AGRESIVO)
+    p.key: p for p in (CONSERVADOR_DEFENSIVO, CONSERVADOR, MODERADO, AGRESIVO)
 }
+
+#: CCI's four Mercado Internacional strategies, in the exact spelling their
+#: Google Sheet tabs and REGULACIONES dictionary use, mapped to the profile
+#: that expresses the same risk appetite.
+CCI_STRATEGIES: dict[str, str] = {
+    "Conservador_Defensivo": "conservador_defensivo",
+    "Conservador": "conservador",
+    "Moderado": "moderado",
+    "Agresivo": "agresivo",
+}
+
+
+def profile_for_strategy(strategy: str) -> RiskProfile:
+    """Resolve a CCI strategy name to its screening profile."""
+    key = CCI_STRATEGIES.get(strategy.strip())
+    if key is None:
+        raise KeyError(
+            f"Estrategia CCI desconocida: {strategy!r}. "
+            f"Opciones: {sorted(CCI_STRATEGIES)}"
+        )
+    return PROFILES[key]
 
 
 def get_profile(name: str) -> RiskProfile:

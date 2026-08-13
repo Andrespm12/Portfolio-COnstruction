@@ -4,7 +4,7 @@ A systematic screen over US-listed equities and ETFs that produces a composite
 score and an **Overweight / Market Weight / Underweight** call for every name,
 scored against a live Interactive Brokers account.
 
-Four deliverables:
+Five deliverables:
 
 1. **[`PROMPT_SCREENING.md`](PROMPT_SCREENING.md)** — the reusable LLM prompt
    encoding the full methodology.
@@ -15,7 +15,10 @@ Four deliverables:
    re-pulls from IBKR on demand.
 4. **`notebooks/`** — a Colab notebook that runs the same engine over a
    ~600-name universe on live Yahoo Finance data, with **no account data and no
-   broker session**, under a Conservative / Moderate / Aggressive risk profile.
+   broker session**, under one of four risk profiles.
+5. **[`PROMPT_BL_INTEGRATION.md`](PROMPT_BL_INTEGRATION.md)** + `screener/black_litterman.py`
+   — the analysis prompt and the bridge that feeds CCI's Black-Litterman
+   tactical allocation system.
 
 ---
 
@@ -38,6 +41,7 @@ python3 tests/test_scoring.py            # engine correctness
 python3 tests/test_yahoo_adapter.py      # Yahoo -> payload conversion
 python3 tests/test_tuning.py             # runtime config overrides
 python3 tests/test_profiles.py           # risk profiles + account-independence
+python3 tests/test_black_litterman.py    # BL bridge, against CCI's own solver
 python3 tests/test_notebook.py           # notebook drift + full execution
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
@@ -140,6 +144,55 @@ on any drift, checks each embedded module byte-for-byte against the repo, then
 executes every code cell — engine unpack, parameters, coverage, scoring, both
 styled tables, the detail view, export and tuning — with only the network call
 stubbed.
+
+---
+
+## Black-Litterman bridge
+
+CCI's tactical allocation system and this screener are complementary, and the
+boundary is sharp: **the screener decides which names carry a view and how
+strong it is; Black-Litterman decides the weights.**
+
+`screener/black_litterman.py` exports only tactical inputs -- the `Q` vector and
+the conviction feeding the view-variance matrix -- in the exact schema
+`flujo_aprobacion` and `black_litterman_core` already consume, so the receiving
+notebook needs no change. It deliberately does **not** export portfolio weights:
+under Black-Litterman those are an output of the constrained optimizer, and
+shipping a second unconstrained set alongside them invites exactly the confusion
+a model-risk review exists to prevent.
+
+A cross-sectional z-score is a ranking, not a forecast, so the translation is
+explicit and risk-scaled:
+
+```
+Q_i = IC * z_i * sigma_i          clipped to +/-5%
+```
+
+At equal ranking a more volatile name earns more expected return -- which is what
+a mean-variance optimizer needs to size correctly -- and a name at the middle of
+the cross-section gets exactly zero. **`IC` is a declared assumption, not an
+estimate**: the 0.08 default is not calibrated against any backtest, and the
+exported JSON says so.
+
+Conviction is kept separate from signal magnitude. Magnitude belongs in `Q`;
+conviction measures confidence in the estimate -- how many of the six blocks
+agree in sign, how much data backed them, whether a risk gate fired. It is built
+as a ceiling scaled by factors each bounded by 1.0 rather than a product clipped
+at the end, so a gate always reduces conviction, including on the strongest
+names, which are the ones gates exist to restrain.
+
+The four CCI strategies map to four profiles:
+
+| Estrategia | Momentum | Vol/DD | OW `z >=` | Vol ceiling | Max weight | Min ADV |
+|---|---:|---:|---:|---:|---:|---:|
+| Conservador_Defensivo | 8% | 34% | +1.00 | 22% | 3.5% | $100MM |
+| Conservador | 12% | 28% | +0.80 | 30% | 5.0% | $50MM |
+| Moderado | 25% | 17% | +0.50 | 60% | 8.0% | $20MM |
+| Agresivo | 36% | 8% | +0.30 | 90% | 12.0% | $10MM |
+
+`tests/test_black_litterman.py` carries a **verbatim copy** of CCI's
+`black_litterman_core` and runs it on the exported views: a test written against
+a paraphrase of the consumer proves nothing about the consumer.
 
 ---
 
@@ -303,7 +356,8 @@ screener/
   report.py                  CSV / markdown / console output
   run_screen.py              CLI entry point
   yahoo_adapter.py           Yahoo Finance -> the same payload, for broker-free runs
-  profiles.py                Conservative/Moderate/Aggressive; drops the Portfolio Fit block
+  profiles.py                Four CCI mandates; drops the Portfolio Fit block
+  black_litterman.py         Ranking -> BL views (Q, conviction) for CCI's optimizer
   tuning.py                  Runtime weight/gate overrides that actually reach the scorer
 web/
   template.html              The page: JS port of the engine, styling, IBKR live-refresh
@@ -318,7 +372,8 @@ tests/
   test_scoring.py            12 assertions, mostly on metric direction
   test_yahoo_adapter.py      50 assertions on the Yahoo -> payload conversion
   test_tuning.py             31 assertions that overrides reach the scorer
-  test_profiles.py           62 assertions on profiles and account-independence
+  test_profiles.py           67 assertions on profiles and account-independence
+  test_black_litterman.py    56 assertions, incl. CCI's own solver on the export
   test_notebook.py           Rebuilds, diffs and executes every notebook cell
   verify_js_engine.js        Extracts and runs the engine out of the built page
   compare_engines.py         Diffs JS output against Python at 1e-6

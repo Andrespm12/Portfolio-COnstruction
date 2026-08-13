@@ -32,7 +32,8 @@ import screener.config as config  # noqa: E402
 import screener.scoring as scoring  # noqa: E402
 import screener.universe as universe  # noqa: E402
 from screener.profiles import (  # noqa: E402
-    AGRESIVO, CONSERVADOR, MODERADO, PROFILES, apply_profile, get_profile,
+    AGRESIVO, CONSERVADOR, CONSERVADOR_DEFENSIVO, MODERADO, PROFILES,
+    apply_profile, get_profile,
 )
 from screener.report import write_csv  # noqa: E402
 from screener.run_screen import run, run_standalone  # noqa: E402
@@ -81,12 +82,22 @@ def test_profiles_are_ordered_by_risk_tolerance() -> None:
     """The differences must run the direction the labels claim."""
     weights = {k: dict(p.block_weights) for k, p in PROFILES.items()}
 
-    check("momentum rises with risk tolerance",
-          weights["conservador"]["momentum"] < weights["moderado"]["momentum"]
+    check("momentum rises with risk tolerance across all four profiles",
+          weights["conservador_defensivo"]["momentum"]
+          < weights["conservador"]["momentum"] < weights["moderado"]["momentum"]
           < weights["agresivo"]["momentum"])
     check("the volatility/drawdown brake falls as risk tolerance rises",
-          weights["conservador"]["risk"] > weights["moderado"]["risk"]
-          > weights["agresivo"]["risk"])
+          weights["conservador_defensivo"]["risk"] > weights["conservador"]["risk"]
+          > weights["moderado"]["risk"] > weights["agresivo"]["risk"])
+    check("the defensive mandate is the strictest on every hard limit",
+          CONSERVADOR_DEFENSIVO.gates.max_volatility_for_overweight
+          < CONSERVADOR.gates.max_volatility_for_overweight
+          and CONSERVADOR_DEFENSIVO.gates.beta_limit < CONSERVADOR.gates.beta_limit
+          and CONSERVADOR_DEFENSIVO.sizing.max_weight < CONSERVADOR.sizing.max_weight
+          and CONSERVADOR_DEFENSIVO.eligibility.min_adv_usd
+          > CONSERVADOR.eligibility.min_adv_usd)
+    check("the defensive mandate demands the most edge for an Overweight",
+          CONSERVADOR_DEFENSIVO.bands.overweight_z > CONSERVADOR.bands.overweight_z)
     check("liquidity matters more when drawdown tolerance is lower",
           weights["conservador"]["liquidity"] > weights["agresivo"]["liquidity"])
 

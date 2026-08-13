@@ -33,7 +33,7 @@ OUT = ROOT / "notebooks" / "screener_colab.ipynb"
 MODULES = (
     "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
-    "profiles.py",
+    "profiles.py", "black_litterman.py",
 )
 
 
@@ -103,7 +103,8 @@ def build_cells() -> list[dict]:
         "\n",
         "## Perfil de riesgo\n",
         "\n",
-        "Eliges **Conservador**, **Moderado** o **Agresivo** en Parámetros, y "
+        "Eliges **Conservador Defensivo**, **Conservador**, **Moderado** o "
+        "**Agresivo** en Parámetros, y "
         "eso reconfigura cuatro cosas a la vez — no es una etiqueta sobre el "
         "mismo ranking:\n",
         "\n",
@@ -220,7 +221,7 @@ def build_cells() -> list[dict]:
         "TASA_LIBRE_RIESGO = 0.0425  # @param {type:\"number\"}\n",
         "\n",
         "# @markdown ### Perfil de riesgo\n",
-        'PERFIL = "Moderado"  # @param ["Conservador", "Moderado", "Agresivo"]\n',
+        'PERFIL = "Moderado"  # @param ["Conservador Defensivo", "Conservador", "Moderado", "Agresivo"]\n',
         "# @markdown Cambia pesos de bloque, umbrales de recomendación, gates "
         "de riesgo, dimensionamiento y liquidez mínima — todo a la vez.\n",
         "TAMANO_POSICION_USD = 500000  # @param {type:\"number\"}\n",
@@ -468,16 +469,16 @@ def build_cells() -> list[dict]:
 
     # ------------------------------------------------------------- compare
     cells.append(md(
-        "## 9 · Comparar los tres perfiles\n",
+        "## 9 · Comparar los perfiles\n",
         "\n",
-        "El mismo universo, los mismos datos, tres configuraciones. Un nombre "
-        "que aparece Overweight en los tres es una señal robusta; uno que solo "
+        "El mismo universo, los mismos datos, cuatro configuraciones. Un nombre "
+        "que aparece Overweight en todas es una señal robusta; uno que solo "
         "sobrevive en Agresivo te está diciendo que su score depende de que le "
         "perdones la volatilidad.\n",
         "\n",
         "**`n/e` no es un error.** Cada perfil tiene su propio piso de liquidez "
-        "($50MM / $20MM / $10MM de volumen diario), así que un nombre puede ser "
-        "elegible para uno y no para otro. Cuando eso pasa, el perfil más "
+        "($100MM / $50MM / $20MM / $10MM de volumen diario), así que un nombre "
+        "puede ser elegible para uno y no para otro. Cuando eso pasa, el más "
         "estricto lo marca como no elegible y te dice por qué.\n",
     ))
     cells.append(code(
@@ -524,8 +525,8 @@ def build_cells() -> list[dict]:
         "    return escala(_TONO.get(v, 0.0))\n",
         "\n",
         "_ow = comparacion[_PERFILES].eq('OVERWEIGHT').sum(axis=1)\n",
-        "print(f'Overweight en los tres perfiles: "
-        "{list(comparacion.index[_ow == 3]) or \"ninguno\"}')\n",
+        "print(f'Overweight en TODOS los perfiles: "
+        "{list(comparacion.index[_ow == len(_PERFILES)]) or \"ninguno\"}')\n",
         "print(f'Overweight solo en Agresivo:     '\n",
         "      f'{list(comparacion.index[(_ow == 1) & "
         "comparacion[\"Agresivo\"].eq(\"OVERWEIGHT\")]) or \"ninguno\"}')\n",
@@ -602,9 +603,120 @@ def build_cells() -> list[dict]:
         "    print('Fuera de Colab: el archivo quedó en el directorio actual.')\n",
     ))
 
+    # -------------------------------------------------------- black-litterman
+    cells.append(md(
+        "## 11 · Exportar views para Black-Litterman (CCI)\n",
+        "\n",
+        "Los dos sistemas son complementarios y la frontera es nítida: **el "
+        "screener decide sobre qué nombres hay una view y cuán fuerte es; "
+        "Black-Litterman decide los pesos.**\n",
+        "\n",
+        "Esta celda exporta los insumos tácticos — `Q` y convicción — en el "
+        "esquema exacto que ya consumen `flujo_aprobacion` y "
+        "`black_litterman_core` de tu notebook de CCI. No exporta pesos: bajo "
+        "Black-Litterman los pesos salen del optimizador sujeto al "
+        "Procedimiento de Inversión, y mandar un segundo juego de pesos sin "
+        "restricciones al lado invita justo la confusión que una revisión de "
+        "riesgo model existe para evitar.\n",
+        "\n",
+        "### Cómo se traduce un ranking a un retorno esperado\n",
+        "\n",
+        "Un z-score transversal es un **ranking**, no un pronóstico. La "
+        "conversión es explícita:\n",
+        "\n",
+        "$$Q_i = IC \\times z_i \\times \\sigma_i$$\n",
+        "\n",
+        "Escalado por riesgo (a igual ranking, el nombre más volátil merece "
+        "mayor retorno esperado, que es lo que el optimizador media-varianza "
+        "necesita para dimensionar bien) y centrado (un nombre en el medio de "
+        "la sección transversal da exactamente cero).\n",
+        "\n",
+        "**El IC es un supuesto declarado, no una estimación.** Es la "
+        "correlación asumida entre el ranking del screener y los retornos "
+        "realizados. El 0.08 por defecto es deliberadamente modesto y produce "
+        "views dentro de la banda ±5% de tu documento técnico. No está "
+        "calibrado contra ningún backtest.\n",
+        "\n",
+        "La convicción es otra cosa: alimenta Ω y mide **confianza en la "
+        "estimación** — cuántos de los seis bloques coinciden en signo, cuánta "
+        "cobertura de datos hubo, si se activó un gate. Un nombre en z=+1.5 "
+        "sostenido por un solo bloque no merece la misma Ω que uno donde los "
+        "seis coinciden.\n",
+    ))
+    cells.append(code(
+        "from screener.black_litterman import (ViewParams, build_basket,\n",
+        "                                      build_views, write_views)\n",
+        "from screener.profiles import CCI_STRATEGIES, profile_for_strategy\n",
+        "\n",
+        "# @markdown Estrategia de destino en el sistema BL de CCI.\n",
+        'ESTRATEGIA_CCI = "Moderado"  # @param ["Conservador_Defensivo", '
+        '"Conservador", "Moderado", "Agresivo"]\n',
+        "IC_SUPUESTO = 0.08  # @param {type:\"number\"}\n",
+        "MAX_VIEWS = 8  # @param {type:\"integer\"}\n",
+        "\n",
+        "# Equivale a la columna activo_referencia de tu Google Sheet: empareja\n",
+        "# una accion con el ETF contra el que debe medirse. Un nombre con\n",
+        "# referencia produce una view RELATIVA; el resto, ABSOLUTA.\n",
+        "REFERENCIAS = {\n",
+        "    'AAPL': 'QQQ', 'MSFT': 'QQQ', 'NVDA': 'QQQ', 'AVGO': 'SMH',\n",
+        "    'JPM': 'XLF', 'BAC': 'XLF', 'LLY': 'XLV', 'UNH': 'XLV',\n",
+        "    'XOM': 'XLE', 'CVX': 'XLE',\n",
+        "}\n",
+        "\n",
+        "_perfil_cci = profile_for_strategy(ESTRATEGIA_CCI)\n",
+        "if _perfil_cci.key != perfil.key:\n",
+        "    print(f'AVISO: corriste el screen con perfil {perfil.label} pero vas '\n",
+        "          f'a exportar para {ESTRATEGIA_CCI}, que corresponde a '\n",
+        "          f'{_perfil_cci.label}.')\n",
+        "    print('       Vuelve a la celda de Parametros y alinea ambos, o las '\n",
+        "          'views\\n       llevaran umbrales y gates de otro mandato.')\n",
+        "\n",
+        "_params = ViewParams(information_coefficient=IC_SUPUESTO,\n",
+        "                     max_views=MAX_VIEWS)\n",
+        "\n",
+        "views = build_views(scored, market_data, strategy=ESTRATEGIA_CCI,\n",
+        "                    reference_map=REFERENCIAS, params=_params)\n",
+        "cesta = build_basket(scored, strategy=ESTRATEGIA_CCI,\n",
+        "                     reference_map=REFERENCIAS)\n",
+        "\n",
+        "print(f'{len(views)} views para {ESTRATEGIA_CCI} '\n",
+        "      f'(perfil {_perfil_cci.label}, IC {IC_SUPUESTO})\\n')\n",
+        "for _v in views:\n",
+        "    _quien = (_v['activo'] if _v['tipo'] == 'absoluto'\n",
+        "              else f\"{_v['activo_long']} / {_v['activo_short']}\")\n",
+        "    print(f\"  {_v['tipo']:9s} {_quien:18s} Q {_v['Q']:+.2%}   \"\n",
+        "          f\"convicción {_v['conviccion']:.2f}\")\n",
+        "\n",
+        "views_df = pd.DataFrame(views)\n",
+        "cesta_df = pd.DataFrame(cesta)\n",
+        "views_df\n",
+    ))
+    cells.append(code(
+        "# Archivos para el sistema BL: el JSON va a la carpeta 'aprobadas' de\n",
+        "# tu Drive, la cesta a la pestana correspondiente del Google Sheet.\n",
+        "from screener.black_litterman import default_views_filename\n",
+        "\n",
+        "ARCHIVO_VIEWS = default_views_filename(ESTRATEGIA_CCI)\n",
+        "ARCHIVO_CESTA = f'cesta_{ESTRATEGIA_CCI}.csv'\n",
+        "\n",
+        "write_views(views, ARCHIVO_VIEWS, strategy=ESTRATEGIA_CCI,\n",
+        "            profile=_perfil_cci, meta=meta, params=_params)\n",
+        "cesta_df.to_csv(ARCHIVO_CESTA, index=False)\n",
+        "\n",
+        "print(f'{ARCHIVO_VIEWS}  —  {len(views)} views')\n",
+        "print(f'{ARCHIVO_CESTA}  —  {len(cesta_df)} activos, columnas del Sheet')\n",
+        "\n",
+        "try:\n",
+        "    from google.colab import files\n",
+        "    files.download(ARCHIVO_VIEWS)\n",
+        "    files.download(ARCHIVO_CESTA)\n",
+        "except ImportError:\n",
+        "    print('Fuera de Colab: los archivos quedaron en el directorio actual.')\n",
+    ))
+
     # ---------------------------------------------------------------- tuning
     cells.append(md(
-        "## 11 · Ajuste fino del modelo\n",
+        "## 12 · Ajuste fino del modelo\n",
         "\n",
         "Los tres perfiles ya cubren la mayoría de los casos. Esto es para "
         "cuando quieras algo que ningún perfil expresa — mueve los pesos y "
