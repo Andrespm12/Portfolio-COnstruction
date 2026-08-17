@@ -529,6 +529,57 @@ def fetch_atm_iv(tickers: Sequence[str], min_days: int = 20,
     return out
 
 
+def daily_returns(df: pd.DataFrame,
+                  tickers: Sequence[str] | None = None) -> pd.DataFrame:
+    """
+    Daily total-return series as ``DataFrame[date x ticker]``.
+
+    Uses adjusted close for the same reason ``history.close`` does: a dividend
+    must not read as a price decline. The optimizer needs daily rather than
+    weekly observations -- a covariance estimated from ~52 weekly bars over more
+    than 52 names is singular, and shrinkage alone cannot rescue that few
+    degrees of freedom.
+    """
+    try:
+        prices = extract_field(df, "Adj Close")
+    except KeyError:
+        prices = extract_field(df, "Close")
+    if tickers is not None:
+        keep = [t for t in tickers if t in prices.columns]
+        prices = prices[keep]
+    return prices.pct_change().dropna(how="all")
+
+
+def fetch_market_caps(tickers: Sequence[str],
+                      max_workers: int = 8) -> dict[str, float]:
+    """
+    Market capitalization for stocks, total net assets for ETFs.
+
+    Missing values are simply absent from the result rather than defaulted.
+    :func:`screener.optimizer.market_weights` reports what is missing, because a
+    silent constant here would mis-anchor the market equilibrium that the whole
+    Black-Litterman model starts from.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import yfinance as yf
+
+    def _one(ticker: str) -> tuple[str, float | None]:
+        try:
+            info = yf.Ticker(ticker).info or {}
+            value = info.get("marketCap") or info.get("totalAssets")
+            return ticker, _f(value)
+        except Exception:
+            return ticker, None
+
+    out: dict[str, float] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for ticker, value in pool.map(_one, [t.upper() for t in tickers]):
+            if value and value > 0:
+                out[ticker] = value
+    return out
+
+
 def default_universe(include: Iterable[str] = ("SP500", "NDX", "DJIA", "ETF"),
                      benchmark: str = BENCHMARK_TICKER) -> list[str]:
     """The repo's curated lists, unioned and sorted, benchmark guaranteed in."""
@@ -550,8 +601,14 @@ def fetch_market_data(tickers: Sequence[str] | None = None, *,
                       weeks: int = DEFAULT_WEEKS,
                       with_metadata: bool = False,
                       with_iv: bool = False,
-                      progress: bool = False) -> dict:
-    """End-to-end: download, then convert. The one call the notebook makes."""
+                      progress: bool = False,
+                      with_frame: bool = False):
+    """
+    End-to-end: download, then convert. The one call the notebook makes.
+
+    ``with_frame=True`` also returns the raw daily frame, which the optimizer
+    needs for a covariance estimated on daily rather than weekly observations.
+    """
     syms = list(tickers) if tickers else default_universe(benchmark=benchmark)
     if benchmark.upper() not in {t.upper() for t in syms}:
         syms.append(benchmark.upper())
@@ -560,8 +617,9 @@ def fetch_market_data(tickers: Sequence[str] | None = None, *,
     names, sectors = fetch_metadata(syms) if with_metadata else ({}, {})
     iv = fetch_atm_iv(syms) if with_iv else {}
 
-    return build_market_data(
+    payload = build_market_data(
         frame, syms,
         benchmark=benchmark, risk_free_rate=risk_free_rate,
         weeks=weeks, names=names, sectors=sectors, iv=iv,
     )
+    return (payload, frame) if with_frame else payload

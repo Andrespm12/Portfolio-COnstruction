@@ -16,9 +16,10 @@ Five deliverables:
 4. **`notebooks/`** — a Colab notebook that runs the same engine over a
    ~600-name universe on live Yahoo Finance data, with **no account data and no
    broker session**, under one of four risk profiles.
-5. **[`PROMPT_BL_INTEGRATION.md`](PROMPT_BL_INTEGRATION.md)** + `screener/black_litterman.py`
-   — the analysis prompt and the bridge that feeds CCI's Black-Litterman
-   tactical allocation system.
+5. **[`PROMPT_BL_INTEGRATION.md`](PROMPT_BL_INTEGRATION.md)**, `screener/black_litterman.py`
+   and `screener/optimizer.py` — the analysis prompt, the bridge that turns
+   rankings into Black-Litterman views, and the constrained optimizer that turns
+   those into a CCI-compliant portfolio.
 
 ---
 
@@ -42,6 +43,7 @@ python3 tests/test_yahoo_adapter.py      # Yahoo -> payload conversion
 python3 tests/test_tuning.py             # runtime config overrides
 python3 tests/test_profiles.py           # risk profiles + account-independence
 python3 tests/test_black_litterman.py    # BL bridge, against CCI's own solver
+python3 tests/test_optimizer.py          # posterior, regulatory bands, audit
 python3 tests/test_notebook.py           # notebook drift + full execution
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
@@ -227,6 +229,44 @@ the paste-in snippet against real bridge output rather than shipping it unrun.
 
 ---
 
+## The optimizer
+
+The notebook runs the whole chain in one process: screen, views, allocation.
+Nothing is written between the halves — `views` is a Python list that the
+optimizer cell consumes directly, which is why the file question stopped
+mattering.
+
+`screener/optimizer.py` follows CCI's technical document: inverse optimization
+for the equilibrium, Ledoit-Wolf shrinkage on daily returns, the Bayesian
+posterior, and mean-variance maximization under `screener/cci_regulation.py`.
+The two files are split because CCI's own architecture insists on it — the
+Investment Procedure delimits risk boundaries and is never the starting point
+for weights.
+
+Three defects in the original are not carried over, each a behaviour change:
+
+| | CCI's implementation | Here |
+|---|---|---|
+| Solver | `ECOS`, absent from a stock Colab — the saved run died there with no allocation | `CLARABEL`, bundled with CVXPY, with fallbacks |
+| Leverage | `leverage_max` 1.25/1.50 declared; optimizer hard-coded `sum(w) == 1` | a real gross-exposure budget with the documented 95% buffer |
+| Band audit | wrote `"Auditoría OK"` unconditionally | compares every limit and returns the breaches |
+
+An audit that cannot fail is worse than none: it leaves a document asserting
+compliance that nothing verified.
+
+**One gap needs Compliance, not code.** CCI's `REGULACIONES` has no asset class
+for commodities, and their optimizer constrains only classes present in
+`bandas` — an unconstrained gold sleeve could take the entire book.
+`COMMODITY_BANDS` closes it with a ceiling per strategy, but those numbers are
+placeholders chosen so the hole is loud rather than silent. They are not from
+the Investment Procedure.
+
+Market caps are never defaulted. CCI's code substitutes `1e9` on any lookup
+failure, straight into the equilibrium the whole model starts from;
+`market_weights` returns the missing names so the run can report them.
+
+---
+
 ## The page
 
 `web/screener.html` is a single self-contained file that carries the **entire
@@ -388,7 +428,9 @@ screener/
   run_screen.py              CLI entry point
   yahoo_adapter.py           Yahoo Finance -> the same payload, for broker-free runs
   profiles.py                Four CCI mandates; drops the Portfolio Fit block
-  black_litterman.py         Ranking -> BL views (Q, conviction) for CCI's optimizer
+  black_litterman.py         Ranking -> BL views (Q, conviction)
+  cci_regulation.py          CCI's Investment Procedure as data: classes, bands, exclusions
+  optimizer.py               Equilibrium, Bayesian posterior, constrained allocation
   tuning.py                  Runtime weight/gate overrides that actually reach the scorer
 web/
   template.html              The page: JS port of the engine, styling, IBKR live-refresh
@@ -405,6 +447,7 @@ tests/
   test_tuning.py             31 assertions that overrides reach the scorer
   test_profiles.py           67 assertions on profiles and account-independence
   test_black_litterman.py    74 assertions, incl. CCI's own solver on the export
+  test_optimizer.py          86 assertions on posterior, bands and the audit
 snippets/
   cci_bl_cargar_propuestas.py  Paste-in cell for CCI's notebook
   test_notebook.py           Rebuilds, diffs and executes every notebook cell

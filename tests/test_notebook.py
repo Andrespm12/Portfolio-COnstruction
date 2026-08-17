@@ -121,6 +121,15 @@ market_data = build_market_data(
     _frame, TICKERS, benchmark=BENCHMARK,
     risk_free_rate=TASA_LIBRE_RIESGO,
 )
+frame_diario = _frame
+
+# The optimizer cell fetches market caps over the network. Stub the module
+# attribute before that cell imports the name, so the offline run exercises the
+# real optimization path rather than skipping it.
+import screener.yahoo_adapter as _ya
+_ya.fetch_market_caps = lambda tickers, **kw: {
+    t: 1e10 + 1e9 * i for i, t in enumerate(tickers)
+}
 print(f'{len(market_data["instruments"])} instrumentos (fixture offline)')
 """
 
@@ -281,9 +290,9 @@ def test_cells_execute() -> None:
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the seven documented sheets",
+    check("workbook has the eight documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
-                                 "Cesta", "Cobertura", "Parametros"},
+                                 "Cartera", "Cesta", "Cobertura", "Parametros"},
           f"got {wb.sheetnames}")
 
     # The whole point of the JSON/Excel split: a human reads the views in the
@@ -308,12 +317,36 @@ def test_cells_execute() -> None:
     check("Ranking sheet reports alpha in place of correlation-to-book",
           "alpha" in ranking_header)
 
+    # ---- the optimizer ran in-process, with no file between the two halves --
+    cartera = namespace["cartera"]
+    check("the notebook produced an optimized portfolio", cartera.feasible,
+          f"status {cartera.status}")
+    check("the portfolio passes its own band audit",
+          not cartera.breaches, "; ".join(cartera.breaches))
+    check("the portfolio holds more than one position",
+          int((cartera.weights > 0).sum()) > 1)
+    check("weights are non-negative (long-only)",
+          bool((cartera.weights >= -1e-9).all()))
+
+    from screener.cci_regulation import REGULACIONES
+    from screener.optimizer import LEVERAGE_BUFFER
+    budget = REGULACIONES[namespace["ESTRATEGIA_CCI"]]["leverage_max"] * LEVERAGE_BUFFER
+    check("gross exposure respects the leverage budget",
+          cartera.gross_exposure <= budget + 1e-6,
+          f"{cartera.gross_exposure:.4f} > {budget:.4f}")
+    check("the views reached the optimizer in memory, with no file in between",
+          "views" in namespace and len(namespace["views"]) > 0)
+    check("the Cartera sheet lists the held positions",
+          wb["Cartera"].max_row == int((cartera.weights > 0).sum()) + 1)
+
     parametros = [row[0].value for row in wb["Parametros"].iter_rows(min_row=2)]
     check("Parametros sheet records the profile and that no book was used",
           "Perfil" in parametros and "Portafolio" in parametros,
           f"got {parametros}")
     check("Parametros sheet records every block weight",
           sum(1 for p in parametros if str(p).startswith("Peso — ")) == 6)
+    check("Parametros sheet records the compliance audit result",
+          "Auditoria de bandas" in parametros)
 
 
 def test_no_account_data_in_the_notebook() -> None:

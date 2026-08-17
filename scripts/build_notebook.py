@@ -33,7 +33,8 @@ OUT = ROOT / "notebooks" / "screener_colab.ipynb"
 MODULES = (
     "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
-    "profiles.py", "black_litterman.py",
+    "profiles.py", "black_litterman.py", "cci_regulation.py",
+    "optimizer.py",
 )
 
 
@@ -137,7 +138,7 @@ def build_cells() -> list[dict]:
     # -------------------------------------------------------------- install
     cells.append(md("## 1 · Instalación y motor\n"))
     cells.append(code(
-        "%pip install -q yfinance openpyxl\n",
+        "%pip install -q yfinance openpyxl cvxpy scikit-learn\n",
         "print('yfinance listo')\n",
     ))
 
@@ -281,7 +282,7 @@ def build_cells() -> list[dict]:
         "from screener.yahoo_adapter import fetch_market_data\n",
         "\n",
         "_t0 = time.time()\n",
-        "market_data = fetch_market_data(\n",
+        "market_data, frame_diario = fetch_market_data(\n",
         "    TICKERS,\n",
         "    benchmark=BENCHMARK,\n",
         "    risk_free_rate=TASA_LIBRE_RIESGO,\n",
@@ -289,6 +290,7 @@ def build_cells() -> list[dict]:
         "    with_metadata=CON_NOMBRES_Y_SECTORES,\n",
         "    with_iv=CON_VOL_IMPLICITA,\n",
         "    progress=True,\n",
+        "    with_frame=True,   # el optimizador necesita retornos diarios\n",
         ")\n",
         "\n",
         "print(f'\\n{len(market_data[\"instruments\"])} instrumentos utilizables "
@@ -635,13 +637,108 @@ def build_cells() -> list[dict]:
         "cesta_df = pd.DataFrame(cesta)\n",
         "views_df\n",
     ))
+    # ------------------------------------------------------------- optimizer
+    cells.append(md(
+        "## 11 · Cartera Black-Litterman\n",
+        "\n",
+        "Aquí no hay archivo de por medio: `views` es una variable de Python "
+        "que la celda anterior dejó en memoria, y esta la consume directo.\n",
+        "\n",
+        "El equilibrio de mercado (π) sale de capitalización real vía "
+        "optimización inversa, la covarianza usa contracción Ledoit-Wolf sobre "
+        "retornos **diarios** — con ~52 barras semanales y más de 52 nombres la "
+        "matriz sería singular — y la optimización respeta las bandas del "
+        "Procedimiento de Inversión.\n",
+        "\n",
+        "### Tres arreglos frente al sistema original\n",
+        "\n",
+        "1. **Solver.** Tu código pedía ECOS, que no viene en Colab; tu corrida "
+        "guardada murió ahí sin producir cartera. Este usa CLARABEL, que viene "
+        "con CVXPY.\n",
+        "2. **Apalancamiento.** `leverage_max` de 1.25 y 1.50 estaba declarado "
+        "pero el optimizador fijaba `sum(w) == 1`. Ahora es un presupuesto real, "
+        "con el buffer de 95% que dice tu documento.\n",
+        "3. **La auditoría ahora puede fallar.** `auditar_bandas` escribía "
+        "\"Auditoría OK\" sin comparar nada. Esta compara contra cada límite y "
+        "reporta lo que se rompe.\n",
+        "\n",
+        "**Un aviso:** tus bandas no tienen clase para materias primas, y tu "
+        "optimizador solo restringe las clases que aparecen en `bandas` — oro "
+        "podía tomar el libro entero. Le puse un techo por perfil, pero **ese "
+        "número lo inventé yo**, no sale de tu Procedimiento de Inversión. "
+        "Confírmalo con Compliance antes de operar con esto.\n",
+    ))
+    cells.append(code(
+        "# @markdown Cuántos nombres del ranking entran a la optimización.\n",
+        "TOP_N_CARTERA = 25  # @param {type:\"integer\"}\n",
+        "# @markdown Menos nombres = covarianza mejor estimada; más = más "
+        "diversificación.\n",
+        "\n",
+        "from screener.optimizer import (implied_equilibrium, market_weights,\n",
+        "                               optimize, posterior, shrunk_covariance,\n",
+        "                               allocation_table)\n",
+        "from screener.cci_regulation import classify_for_bands\n",
+        "from screener.yahoo_adapter import daily_returns, fetch_market_caps\n",
+        "\n",
+        "cartera_tickers = [r.ticker for r in scored[:TOP_N_CARTERA]]\n",
+        "if BENCHMARK not in cartera_tickers:\n",
+        "    cartera_tickers.append(BENCHMARK)\n",
+        "\n",
+        "retornos = daily_returns(frame_diario, cartera_tickers)\n",
+        "covarianza = shrunk_covariance(retornos)\n",
+        "\n",
+        "capitalizaciones = fetch_market_caps(list(covarianza.columns))\n",
+        "pesos_mkt, sin_cap = market_weights(capitalizaciones,\n",
+        "                                    list(covarianza.columns))\n",
+        "if sin_cap:\n",
+        "    print(f'Sin capitalizacion, excluidos del equilibrio: {sin_cap}')\n",
+        "\n",
+        "pi = implied_equilibrium(pesos_mkt, covarianza)\n",
+        "er_posterior, cov_posterior = posterior(pi, covarianza, views)\n",
+        "\n",
+        "tipos = {r.ticker: r.asset_type for r in scored}\n",
+        "clases = {t: classify_for_bands(t, tipos.get(t, 'ETF'))\n",
+        "          for t in covarianza.columns}\n",
+        "\n",
+        "cartera = optimize(er_posterior, cov_posterior, tipos, ESTRATEGIA_CCI)\n",
+        "\n",
+        "print(f'{ESTRATEGIA_CCI}  |  estado: {cartera.status}')\n",
+        "print(f'Exposicion bruta   {cartera.gross_exposure:.1%}')\n",
+        "print(f'Retorno esperado   {cartera.expected_return:+.2%} anual')\n",
+        "print(f'Volatilidad        {cartera.volatility:.1%} anual')\n",
+        "print(f'Posiciones         {int((cartera.weights > 0).sum())}')\n",
+        "\n",
+        "print('\\nPor clase de activo')\n",
+        "for _clase, _peso in cartera.by_class.items():\n",
+        "    if _peso > 0.0001:\n",
+        "        print(f'  {_peso:7.2%}  {_clase}')\n",
+        "\n",
+        "if cartera.breaches:\n",
+        "    print('\\nAUDITORIA — INCUMPLIMIENTOS:')\n",
+        "    for _b in cartera.breaches:\n",
+        "        print(f'  {_b}')\n",
+        "else:\n",
+        "    print('\\nAuditoria de bandas: sin incumplimientos.')\n",
+        "for _n in cartera.notes:\n",
+        "    print(f'NOTA: {_n}')\n",
+        "\n",
+        "cartera_df = allocation_table(cartera, classes=clases)\n",
+        "\n",
+        "(cartera_df.style\n",
+        "    .format({'peso': '{:.2%}'})\n",
+        "    .map(lambda v: escala(v, 0, 0.12), subset=['peso'])\n",
+        "    .hide(axis='index')\n",
+        "    .set_caption(f'Cartera optimizada — {ESTRATEGIA_CCI}'))\n",
+    ))
+
     # ---------------------------------------------------------------- export
     cells.append(md(
-        "## 11 · Descargar\n",
+        "## 12 · Descargar\n",
         "\n",
-        "**El Excel es para ti.** Siete hojas: ranking, scores por bloque, "
-        "comparación de perfiles, las views con su justificación, la cesta, la "
-        "cobertura de métricas y los parámetros de la corrida.\n",
+        "**El Excel es para ti.** Ocho hojas: ranking, scores por bloque, "
+        "comparación de perfiles, las views con su justificación, la cartera "
+        "optimizada, la cesta, la cobertura de métricas y los parámetros de la "
+        "corrida.\n",
         "\n",
         "**El JSON es para tu sistema Black-Litterman**, no para leerlo. "
         "`black_litterman_core` hace `json.load()` y espera diccionarios de "
@@ -707,6 +804,11 @@ def build_cells() -> list[dict]:
         "    ('Portafolio', 'ninguno — screen independiente'),\n",
         "    ('IC supuesto (views)', IC_SUPUESTO),\n",
         "    ('Nota sobre el IC', 'supuesto declarado, no calibrado contra backtest'),\n",
+        "    ('Estado de la optimizacion', cartera.status),\n",
+        "    ('Exposicion bruta', f'{cartera.gross_exposure:.2%}'),\n",
+        "    ('Auditoria de bandas',\n",
+        "     'sin incumplimientos' if not cartera.breaches\n",
+        "     else ' | '.join(cartera.breaches)),\n",
         "    ('Umbral Overweight', f'z >= {perfil.bands.overweight_z:+.2f}'),\n",
         "    ('Umbral Underweight', f'z <= {perfil.bands.underweight_z:+.2f}'),\n",
         "    ('Techo de volatilidad para OW',\n",
@@ -734,6 +836,7 @@ def build_cells() -> list[dict]:
         "    mapa.to_excel(_xl, sheet_name='Bloques')\n",
         "    comparacion.to_excel(_xl, sheet_name='Perfiles')\n",
         "    views_excel.to_excel(_xl, sheet_name='Views BL', index=False)\n",
+        "    cartera_df.to_excel(_xl, sheet_name='Cartera', index=False)\n",
         "    cesta_df.to_excel(_xl, sheet_name='Cesta', index=False)\n",
         "    _cov.to_excel(_xl, sheet_name='Cobertura', index=False)\n",
         "    parametros.to_excel(_xl, sheet_name='Parametros', index=False)\n",
@@ -744,7 +847,7 @@ def build_cells() -> list[dict]:
         "            _ancho = max((len(str(c.value)) for c in _col if c.value), default=8)\n",
         "            _hoja.column_dimensions[_col[0].column_letter].width = min(46, _ancho + 3)\n",
         "\n",
-        "print(f'{ARCHIVO_EXCEL}  —  {len(scored)} nombres, 7 hojas')\n",
+        "print(f'{ARCHIVO_EXCEL}  —  {len(scored)} nombres, 8 hojas')\n",
         "\n",
         "if EXPORTAR_JSON_PARA_BL:\n",
         "    write_views(views, ARCHIVO_VIEWS, strategy=ESTRATEGIA_CCI,\n",
@@ -772,7 +875,7 @@ def build_cells() -> list[dict]:
 
     # ---------------------------------------------------------------- tuning
     cells.append(md(
-        "## 12 · Ajuste fino del modelo\n",
+        "## 13 · Ajuste fino del modelo\n",
         "\n",
         "Los tres perfiles ya cubren la mayoría de los casos. Esto es para "
         "cuando quieras algo que ningún perfil expresa — mueve los pesos y "
