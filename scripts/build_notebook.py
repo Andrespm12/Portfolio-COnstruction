@@ -654,10 +654,38 @@ def build_cells() -> list[dict]:
         "\n",
         "Si no vas a alimentar el modelo BL hoy, desmarca la casilla y bájate "
         "solo el Excel.\n",
+        "\n",
+        "### Dónde cae el archivo\n",
+        "\n",
+        "En `CCI_BlackLitterman/propuestas/`, **nunca** en `aprobadas/`. "
+        "Esa carpeta guarda las views que ya revisaste y justificaste, y tu "
+        "`flujo_aprobacion` escribe ahí un archivo de la misma forma. Un "
+        "archivo sin aprobar cayendo en esa ruta reemplazaría una decisión "
+        "firmada por salida de máquina, sin dejar rastro. `write_views` se "
+        "niega a escribir bajo `aprobadas/` aunque se lo pidas.\n",
+        "\n",
+        "### Del lado de tu notebook BL\n",
+        "\n",
+        "En el repo está `snippets/cci_bl_cargar_propuestas.py`: una celda "
+        "para pegar entre `generar_propuestas_views` y `flujo_aprobacion`. "
+        "Lee el archivo más reciente, avisa si está viejo, y fusiona con las "
+        "propuestas de tu propio motor resolviendo duplicados por convicción "
+        "— un mismo activo propuesto por ambas fuentes serían dos filas casi "
+        "idénticas de P, lo que estrecha Ω artificialmente y le da a esa "
+        "apuesta un peso que ninguna de las dos fuentes justifica sola.\n",
+        "\n",
+        "El gestor sigue viendo cada view y decidiendo. Nada se aplica sin "
+        "tu aprobación.\n",
     ))
     cells.append(code(
         "EXPORTAR_JSON_PARA_BL = True  # @param {type:\"boolean\"}\n",
         "# @markdown Desmárcalo si solo quieres el Excel.\n",
+        "GUARDAR_EN_DRIVE = False  # @param {type:\"boolean\"}\n",
+        "# @markdown Escribe las propuestas directo en "
+        "`CCI_BlackLitterman/propuestas/` de tu Drive, para que el "
+        "notebook BL las encuentre sin descargar ni subir nada.\n",
+        "\n",
+        "from pathlib import Path\n",
         "\n",
         "from screener.black_litterman import default_views_filename\n",
         "\n",
@@ -721,7 +749,17 @@ def build_cells() -> list[dict]:
         "if EXPORTAR_JSON_PARA_BL:\n",
         "    write_views(views, ARCHIVO_VIEWS, strategy=ESTRATEGIA_CCI,\n",
         "                profile=_perfil_cci, meta=meta, params=_params)\n",
-        "    print(f'{ARCHIVO_VIEWS}  —  {len(views)} views para el motor BL')\n",
+        "    print(f'{ARCHIVO_VIEWS}  —  {len(views)} propuestas')\n",
+        "\n",
+        "if EXPORTAR_JSON_PARA_BL and GUARDAR_EN_DRIVE:\n",
+        "    from screener.black_litterman import DRIVE_PROPOSALS_DIR\n",
+        "    from google.colab import drive\n",
+        "    drive.mount('/content/drive')\n",
+        "    _destino = (Path('/content/drive/MyDrive/CCI_BlackLitterman')\n",
+        "                / DRIVE_PROPOSALS_DIR / ARCHIVO_VIEWS)\n",
+        "    write_views(views, _destino, strategy=ESTRATEGIA_CCI,\n",
+        "                profile=_perfil_cci, meta=meta, params=_params)\n",
+        "    print(f'Guardado en Drive: {_destino}')\n",
         "\n",
         "try:\n",
         "    from google.colab import files\n",

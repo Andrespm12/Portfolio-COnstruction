@@ -428,8 +428,11 @@ def test_written_payload_round_trips() -> None:
                            strategy="Moderado", profile=profile, meta=meta)
         payload = json.loads(path.read_text(encoding="utf-8"))
 
-    check("filename matches CCI's Drive convention",
-          path.name.startswith("Moderado_views_") and path.suffix == ".json")
+    check("the filename marks the file as a proposal, not approved views",
+          path.name.startswith("Moderado_screener_propuestas_")
+          and path.suffix == ".json", f"got {path.name}")
+    check("the filename cannot be confused with the approval flow's output",
+          path.name != f"Moderado_views_{__import__('datetime').date.today()}.json")
     check("payload records the profile used", payload["perfil_screener"] == "moderado")
     check("payload states no account data was read",
           "sin datos de cuenta" in payload["origen"])
@@ -443,6 +446,131 @@ def test_written_payload_round_trips() -> None:
     weights = pd.Series(1.0 / len(cov.columns), index=cov.columns)
     posterior, _ = cci_black_litterman_core(weights, cov, payload["views"])
     check("CCI's solver accepts the views read back from disk",
+          bool(np.all(np.isfinite(posterior.values))))
+
+
+def test_refuses_to_write_into_the_approved_folder() -> None:
+    """
+    Governance guard. CCI's flujo_aprobacion writes a same-shaped file into
+    aprobadas/ once a manager has reviewed and justified each view. Screener
+    output landing there would replace a signed-off decision with unreviewed
+    machine output, silently.
+    """
+    scored, meta, data, profile = screen("Moderado")
+    views = build_views(scored, data, strategy="Moderado")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp) / "CCI_BlackLitterman"
+        for folder in ("propuestas", "aprobadas"):
+            (base / folder).mkdir(parents=True)
+
+        try:
+            write_views(views, base / "aprobadas" / "Moderado_views_2026-08-17.json")
+            check("writing into aprobadas/ is refused", False, "no exception")
+        except ValueError as exc:
+            check("writing into aprobadas/ is refused", True)
+            check("the error explains why and names the right folder",
+                  "propuestas" in str(exc) and "aprob" in str(exc).lower())
+
+        check("no file was created in the protected folder",
+              not list((base / "aprobadas").iterdir()))
+
+        # Case variations must not slip past the guard.
+        try:
+            write_views(views, base / "APROBADAS" / "x.json")
+            check("the guard is case-insensitive", False, "no exception")
+        except ValueError:
+            check("the guard is case-insensitive", True)
+
+        ok = write_views(views, base / "propuestas"
+                         / default_views_filename("Moderado"),
+                         strategy="Moderado", profile=profile, meta=meta)
+        check("writing into propuestas/ succeeds", ok.exists())
+
+
+def test_cci_side_loader_snippet() -> None:
+    """
+    The snippet CCI pastes into their notebook is code that will run on their
+    side, so it is exercised here against real bridge output rather than
+    shipped unrun.
+    """
+    import datetime
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "cci_loader", Path(__file__).resolve().parents[1]
+        / "snippets" / "cci_bl_cargar_propuestas.py")
+    loader = importlib.util.module_from_spec(spec)
+
+    scored, meta, data, profile = screen("Moderado")
+    views = build_views(scored, data, strategy="Moderado",
+                        reference_map=REFERENCIAS)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        loader.BASE_DIR = tmp
+        spec.loader.exec_module(loader)
+        loader.CARPETA_PROPUESTAS = str(Path(tmp) / "propuestas")
+
+        write_views(views, Path(loader.CARPETA_PROPUESTAS)
+                    / default_views_filename("Moderado"),
+                    strategy="Moderado", profile=profile, meta=meta)
+
+        cargadas = loader.cargar_propuestas_screener("Moderado")
+        check("the loader reads back every view the bridge wrote",
+              len(cargadas) == len(views))
+        check("the loader tags each view with its origin",
+              all(v["origen"] == "screener" for v in cargadas))
+        check("a strategy with no file returns empty rather than raising",
+              loader.cargar_propuestas_screener("Agresivo") == [])
+
+        stale = default_views_filename(
+            "Conservador", datetime.date.today() - datetime.timedelta(days=30))
+        write_views(views, Path(loader.CARPETA_PROPUESTAS) / stale,
+                    strategy="Conservador", profile=profile, meta=meta)
+        check("a stale file is still loaded (the warning is advisory)",
+              len(loader.cargar_propuestas_screener("Conservador")) == len(views))
+
+    # --- fusionar --------------------------------------------------------
+    motor = [
+        {"tipo": "absoluto", "activo": "SPY", "Q": 0.01, "conviccion": 0.90},
+        {"tipo": "relativo", "activo_long": "QQQ", "activo_short": "AAPL",
+         "Q": 0.02, "conviccion": 0.30},
+        {"tipo": "absoluto", "activo": "GLD", "Q": 0.01, "conviccion": 0.40},
+    ]
+    screener_side = [
+        {"tipo": "absoluto", "activo": "SPY", "Q": -0.02, "conviccion": 0.50,
+         "origen": "screener"},
+        # Same pair, legs reversed -- still the same bet, must dedupe.
+        {"tipo": "relativo", "activo_long": "AAPL", "activo_short": "QQQ",
+         "Q": 0.03, "conviccion": 0.70, "origen": "screener"},
+        {"tipo": "absoluto", "activo": "TLT", "Q": 0.01, "conviccion": 0.60,
+         "origen": "screener"},
+    ]
+    merged = loader.fusionar(motor, screener_side)
+
+    check("duplicate absolute views collapse to one",
+          sum(1 for v in merged if v.get("activo") == "SPY") == 1)
+    check("the higher-conviction side wins a duplicate",
+          next(v for v in merged if v.get("activo") == "SPY")["conviccion"] == 0.90)
+    check("a reversed relative pair is recognised as the same bet",
+          sum(1 for v in merged if v["tipo"] == "relativo") == 1)
+    check("the reversed pair keeps the higher-conviction leg order",
+          next(v for v in merged
+               if v["tipo"] == "relativo")["activo_long"] == "AAPL")
+    check("non-duplicate views from both sources survive",
+          {"GLD", "TLT"} <= {v.get("activo") for v in merged})
+    check("merged views are ordered by conviction",
+          all(merged[i]["conviccion"] >= merged[i + 1]["conviccion"]
+              for i in range(len(merged) - 1)))
+    check("max_total caps the merged list",
+          len(loader.fusionar(motor, screener_side, max_total=2)) == 2)
+
+    # The merged set must still be something CCI's solver can consume.
+    import pandas as pd
+    cov = covariance(data, [r.ticker for r in scored])
+    weights = pd.Series(1.0 / len(cov.columns), index=cov.columns)
+    posterior, _ = cci_black_litterman_core(weights, cov, merged)
+    check("CCI's solver accepts the merged view set",
           bool(np.all(np.isfinite(posterior.values))))
 
 
@@ -482,6 +610,8 @@ def main() -> int:
         test_view_count_is_capped,
         test_basket_schema,
         test_written_payload_round_trips,
+        test_refuses_to_write_into_the_approved_folder,
+        test_cci_side_loader_snippet,
         test_no_portfolio_weights_are_exported,
     ]:
         fn()

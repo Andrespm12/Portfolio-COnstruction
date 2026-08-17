@@ -114,13 +114,17 @@ Output is a single `screening.xlsx` with seven sheets — ranking, block scores,
 profile comparison, the generated views, the basket, metric coverage, and the
 parameters the run used, so the file still explains itself six months later.
 
-A second file, `{Estrategia}_views_{fecha}.json`, is written only when the BL
-export is ticked. It is machine input, not a report: `black_litterman_core` does
-`json.load()` and expects heterogeneous dicts — an absolute view carries
-`activo`, a relative one carries `activo_long`/`activo_short` — which a flat
-sheet would force into empty cells, and Excel silently coerces types on a number
-that feeds the view-variance matrix directly. The same views are in the workbook
-for reading; the JSON exists for the engine.
+A second file, `{Estrategia}_screener_propuestas_{fecha}.json`, is written only
+when the BL export is ticked. It is machine input, not a report:
+`black_litterman_core` does `json.load()` and expects heterogeneous dicts — an
+absolute view carries `activo`, a relative one carries
+`activo_long`/`activo_short` — which a flat sheet would force into empty cells,
+and Excel silently coerces types on a number that feeds the view-variance matrix
+directly. The same views are in the workbook for reading; the JSON exists for the
+engine.
+
+Optionally it is written straight into `CCI_BlackLitterman/propuestas/` on
+Drive, so the handoff needs no download-then-upload.
 
 What Yahoo cannot supply is stated rather than faked. `iv_percentile` needs a
 *history* of implied volatility; Yahoo publishes today's option chain only, so
@@ -198,9 +202,28 @@ The four CCI strategies map to four profiles:
 | Moderado | 25% | 17% | +0.50 | 60% | 8.0% | $20MM |
 | Agresivo | 36% | 8% | +0.30 | 90% | 12.0% | $10MM |
 
+### Proposals are not approvals
+
+Screener output goes to `propuestas/`, never `aprobadas/`, and `write_views`
+raises if asked to write anywhere under the latter. This is a guard, not a
+convention: CCI's `flujo_aprobacion` writes `{estrategia}_views_{fecha}.json`
+into `aprobadas/` *after* a manager has reviewed and justified each view. The
+bridge originally used that identical filename, so dropping its output in that
+folder would have silently replaced signed-off decisions with unreviewed machine
+output — the exact trail the system's Supervised Execution principle exists to
+preserve. The proposal filename is now distinct on sight.
+
+`snippets/cci_bl_cargar_propuestas.py` is a paste-in cell for the CCI notebook
+that loads the latest proposals, warns when they are stale, and merges them with
+the engine's own — deduplicating by conviction, since the same asset proposed by
+both sources would otherwise become two near-identical rows of `P`, narrowing
+`Ω` artificially and giving that bet more weight than either source justifies
+alone. The manager still approves, edits or rejects every view.
+
 `tests/test_black_litterman.py` carries a **verbatim copy** of CCI's
 `black_litterman_core` and runs it on the exported views: a test written against
-a paraphrase of the consumer proves nothing about the consumer.
+a paraphrase of the consumer proves nothing about the consumer. It also executes
+the paste-in snippet against real bridge output rather than shipping it unrun.
 
 ---
 
@@ -381,7 +404,9 @@ tests/
   test_yahoo_adapter.py      50 assertions on the Yahoo -> payload conversion
   test_tuning.py             31 assertions that overrides reach the scorer
   test_profiles.py           67 assertions on profiles and account-independence
-  test_black_litterman.py    56 assertions, incl. CCI's own solver on the export
+  test_black_litterman.py    74 assertions, incl. CCI's own solver on the export
+snippets/
+  cci_bl_cargar_propuestas.py  Paste-in cell for CCI's notebook
   test_notebook.py           Rebuilds, diffs and executes every notebook cell
   verify_js_engine.js        Extracts and runs the engine out of the built page
   compare_engines.py         Diffs JS output against Python at 1e-6

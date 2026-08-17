@@ -438,14 +438,41 @@ def views_payload(views: Sequence[dict], *, strategy: str,
     }
 
 
+#: Subfolder of CCI's Drive tree that receives screener output.
+#:
+#: ``propuestas``, never ``aprobadas``. The distinction is the governance
+#: boundary of the whole system: the screener emits *proposals*, and only the
+#: manager's approval flow may write to ``aprobadas``. Their
+#: ``flujo_aprobacion`` writes ``{estrategia}_views_{fecha}.json`` there after a
+#: human has reviewed, edited and justified each view -- an unreviewed file
+#: landing on that path would replace signed-off decisions with machine output
+#: and leave no trace that it happened.
+DRIVE_PROPOSALS_DIR = "propuestas"
+
+#: Directory name that screener output must never be written into.
+PROTECTED_DIR = "aprobadas"
+
+
 def write_views(views: Sequence[dict], path: str | Path, **kwargs: Any) -> Path:
     """
-    Write the views JSON.
+    Write the proposals JSON.
 
     The ``views`` list inside is exactly what CCI's ``black_litterman_core``
     accepts, so the file can be read straight into that function.
+
+    Refuses to write anywhere under an ``aprobadas`` directory. That is a
+    guard, not a convention: CCI's approval flow writes a file of the same
+    shape there once a manager has reviewed and justified each view, and a
+    silent overwrite would substitute unreviewed machine output for a signed-off
+    decision with nothing in the record to show it.
     """
     path = Path(path)
+    if PROTECTED_DIR in {p.lower() for p in path.parts}:
+        raise ValueError(
+            f"Se intentó escribir propuestas del screener en '{PROTECTED_DIR}/'. "
+            "Esa carpeta es solo para views que un gestor ya aprobó; escribir "
+            f"ahí sobrescribiría decisiones firmadas. Usa '{DRIVE_PROPOSALS_DIR}/'."
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = views_payload(views, **kwargs) if kwargs else {"views": list(views)}
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
@@ -454,5 +481,12 @@ def write_views(views: Sequence[dict], path: str | Path, **kwargs: Any) -> Path:
 
 
 def default_views_filename(strategy: str, when: date | None = None) -> str:
-    """Matches the naming CCI's approval flow already writes to Drive."""
-    return f"{strategy}_views_{when or date.today()}.json"
+    """
+    Filename for a proposals file.
+
+    Deliberately *not* CCI's ``{estrategia}_views_{fecha}.json``. That name
+    belongs to the approval flow's output; reusing it invites exactly the
+    overwrite :func:`write_views` refuses to perform, and makes the two files
+    indistinguishable in a Drive listing.
+    """
+    return f"{strategy}_screener_propuestas_{when or date.today()}.json"
