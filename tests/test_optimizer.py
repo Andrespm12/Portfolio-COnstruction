@@ -33,8 +33,9 @@ from screener.cci_regulation import (  # noqa: E402
     classify_for_bands, unbanded_classes,
 )
 from screener.optimizer import (  # noqa: E402
-    LEVERAGE_BUFFER, allocation_table, audit_bands, implied_equilibrium,
-    market_weights, optimize, posterior, shrunk_covariance,
+    LEVERAGE_BUFFER, allocation_table, audit_bands, feasibility_report,
+    implied_equilibrium, market_weights, optimize, posterior, select_basket,
+    shrunk_covariance,
 )
 from screener.profiles import profile_for_strategy  # noqa: E402
 from screener.run_screen import run_standalone  # noqa: E402
@@ -464,6 +465,88 @@ def test_infeasible_problem_reports_rather_than_crashes() -> None:
           bool(alloc.breaches or alloc.notes))
 
 
+def test_equity_only_basket_is_the_infeasibility_that_emptied_the_sheet() -> None:
+    """
+    Regression for a real failure: the notebook wrote an empty Cartera tab.
+
+    The optimizer basket was the top-N by screener score. The screen ranks on
+    momentum and risk-adjusted return, which equities dominate, so the basket
+    came out all equity -- and every mandate caps total equity below the amount
+    the book must invest. The solver said "infeasible" and the sheet came out
+    blank with no stated cause.
+    """
+    equity_only = ["SPY", "QQQ", "IWM", "XLE", "XLV", "XLF",
+                   "AAPL", "MSFT", "NVDA", "JPM", "LLY"]
+    frame = make_yf_frame(equity_only)
+    cov = shrunk_covariance(daily_returns(frame))
+    caps = {t: 1e10 for t in cov.columns}
+    weights, _ = market_weights(caps, list(cov.columns))
+    pi = implied_equilibrium(weights, cov)
+    types = {t: ("STOCK" if t in ("AAPL", "MSFT", "NVDA", "JPM", "LLY") else "ETF")
+             for t in cov.columns}
+
+    alloc = optimize(pi, cov, types, "Moderado")
+    check("an all-equity basket is infeasible under the mandate",
+          not alloc.feasible, f"status {alloc.status}")
+    check("the empty result explains itself instead of going out blank",
+          any("solo renta variable" in b for b in alloc.breaches),
+          f"got {alloc.breaches}")
+    check("the diagnosis names the classes that are missing",
+          any("RentaFija" in b for b in alloc.breaches))
+    check("allocation_table on an infeasible run is empty, so callers must handle it",
+          allocation_table(alloc).empty)
+
+
+def test_select_basket_spans_the_classes() -> None:
+    tickers = ["SPY", "QQQ", "IWM", "XLE", "XLV", "XLF", "AAPL", "MSFT",
+               "NVDA", "JPM", "LLY", "AMZN", "META", "MU", "TLT", "IEF",
+               "LQD", "HYG", "BIL", "AGG", "GLD"]
+    frame = make_yf_frame(tickers)
+    data = build_market_data(frame, tickers, benchmark="SPY")
+    try:
+        scored, _ = run_standalone(data, "moderado")
+    finally:
+        reset_all()
+
+    types = {r.ticker: r.asset_type for r in scored}
+    basket = select_basket(scored, "Moderado", top_n=8, min_per_class=2)
+    classes = {t: classify_for_bands(t, types.get(t, "ETF")) for t in basket}
+
+    check("the basket keeps the top names by score",
+          {r.ticker for r in scored[:8]} <= set(basket))
+    check("the basket reaches beyond the top-N to cover classes",
+          len(basket) > 8, f"got {len(basket)}")
+    check("fixed income is represented",
+          any(c.startswith("RentaFija") for c in classes.values()),
+          f"classes {sorted(set(classes.values()))}")
+    check("cash is represented", "Efectivo_MM" in set(classes.values()))
+    check("no ticker is duplicated", len(basket) == len(set(basket)))
+
+    universe_classes = {classify_for_bands(r.ticker, types.get(r.ticker, "ETF"))
+                        for r in scored}
+    check("every class available in the universe makes it into the basket",
+          universe_classes == set(classes.values()),
+          f"missing {universe_classes - set(classes.values())}")
+
+    # And the whole point: it now solves.
+    cov = shrunk_covariance(daily_returns(frame, basket))
+    caps = {t: 1e10 + 1e9 * i for i, t in enumerate(cov.columns)}
+    w, _ = market_weights(caps, list(cov.columns))
+    alloc = optimize(implied_equilibrium(w, cov), cov, types, "Moderado")
+    check("the class-aware basket produces a feasible portfolio",
+          alloc.feasible, f"status {alloc.status}")
+    check("and a non-empty allocation table", not allocation_table(alloc).empty)
+
+
+def test_feasibility_report_is_quiet_when_reachable() -> None:
+    healthy = {"TLT": "RentaFija_Soberana_IG", "AAPL": "Equity",
+               "BIL": "Efectivo_MM", "SPY": "ETF_RentaVariable"}
+    check("a basket that can fill the mandate reports no problem",
+          feasibility_report(healthy, "Moderado") == [])
+    check("an equity-only basket is flagged before the solver runs",
+          feasibility_report({"AAPL": "Equity"}, "Moderado") != [])
+
+
 def main() -> int:
     for fn in [
         test_covariance,
@@ -485,6 +568,9 @@ def main() -> int:
         test_negative_and_excluded_weights_are_caught,
         test_end_to_end_with_screener_views,
         test_infeasible_problem_reports_rather_than_crashes,
+        test_equity_only_basket_is_the_infeasibility_that_emptied_the_sheet,
+        test_select_basket_spans_the_classes,
+        test_feasibility_report_is_quiet_when_reachable,
     ]:
         fn()
 

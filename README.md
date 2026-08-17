@@ -265,6 +265,23 @@ Market caps are never defaulted. CCI's code substitutes `1e9` on any lookup
 failure, straight into the equilibrium the whole model starts from;
 `market_weights` returns the missing names so the run can report them.
 
+### The basket must span the bands
+
+`select_basket` picks the optimizer's universe class-aware rather than as the
+top N by score, and that is a correctness requirement, not a refinement. The
+screen ranks on momentum and risk-adjusted return, which equities dominate, so
+the top of the list is routinely all equity — and every mandate caps total
+equity below the amount the book must invest. The solver returns infeasible and
+the portfolio comes out empty.
+
+CCI's system never hits this because its basket comes from a hand-maintained
+sheet that deliberately spans bonds, credit, cash and equity. Replacing the
+sheet means reproducing that property.
+
+`feasibility_report` states the structural reason before the solver runs, so an
+empty result carries its cause — "la cesta es solo renta variable, y Moderado la
+limita a 60%" — instead of a bare `infeasible`.
+
 ---
 
 ## The page

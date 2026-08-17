@@ -185,6 +185,87 @@ def posterior(pi: pd.Series, covariance: pd.DataFrame,
 # Constrained optimization
 # --------------------------------------------------------------------------
 
+def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
+                  min_per_class: int = 3) -> list[str]:
+    """
+    Choose the optimizer's basket so the mandate's bands are actually reachable.
+
+    Top-N by score alone is not enough, and the failure is silent. The screener
+    ranks on momentum and risk-adjusted return, which equities dominate, so the
+    top of the list is routinely all equity. Under Moderado total equity caps at
+    60% while the book must be roughly fully invested -- the solver returns
+    infeasible and the portfolio comes out empty with no obvious cause.
+
+    CCI's system never hits this because its basket comes from a hand-maintained
+    sheet that deliberately spans bonds, credit, cash and equity. Replacing that
+    sheet means reproducing that property: take the top names by score, then
+    ensure every asset class available in the universe has at least a few
+    representatives, chosen by score within the class.
+    """
+    ranked = [r for r in scored if getattr(r, "eligible", True)]
+    picked = [r.ticker for r in ranked[:max(top_n, 0)]]
+    chosen = set(picked)
+
+    by_class: dict[str, list[str]] = {}
+    for row in ranked:
+        clase = classify_for_bands(row.ticker, getattr(row, "asset_type", "ETF"))
+        by_class.setdefault(clase, []).append(row.ticker)
+
+    for clase, members in by_class.items():
+        if clase not in bands_for(strategy):
+            continue
+        present = sum(1 for t in members if t in chosen)
+        for ticker in members:
+            if present >= min_per_class:
+                break
+            if ticker not in chosen:
+                chosen.add(ticker)
+                picked.append(ticker)
+                present += 1
+
+    return picked
+
+
+def feasibility_report(classes: Mapping[str, str], strategy: str,
+                       budget: float | None = None) -> list[str]:
+    """
+    Why a basket cannot fill the mandate, stated before the solver says
+    "infeasible".
+
+    A solver status is not a diagnosis. This adds the upper bands of every class
+    actually present in the basket: if that ceiling sits below the amount the
+    book must invest, no allocation exists and the reason is a missing asset
+    class, not a numerical problem.
+    """
+    rules = REGULACIONES[strategy]
+    required = budget if budget is not None else rules["leverage_max"] * LEVERAGE_BUFFER
+    bands = bands_for(strategy)
+
+    present = set(classes.values())
+    reachable = sum(bands[c][1] for c in present if c in bands)
+
+    equity_only = present <= {CLASE_EQUITY, CLASE_ETF_RV}
+    problems: list[str] = []
+
+    if equity_only and rules["max_equity_total"] < required:
+        missing = [c for c in bands if c not in present
+                   and c not in (CLASE_EQUITY, CLASE_ETF_RV)]
+        problems.append(
+            f"La cesta es solo renta variable, y {strategy} la limita a "
+            f"{rules['max_equity_total']:.0%} del libro, pero hay que invertir "
+            f"{required:.0%}. Faltan clases como: {', '.join(missing[:4])}. "
+            "Amplía el universo o baja el top-N para que entren."
+        )
+    elif reachable < required:
+        problems.append(
+            f"Las bandas de las clases presentes suman como máximo "
+            f"{reachable:.0%}, por debajo del {required:.0%} que hay que "
+            f"invertir. Clases en la cesta: {', '.join(sorted(present))}."
+        )
+
+    return problems
+
+
 @dataclass
 class Allocation:
     """Solved weights plus everything a reviewer needs to challenge them."""
@@ -230,6 +311,10 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     classes = {t: classify_for_bands(t, asset_types.get(t, "ETF")) for t in tickers}
 
     notes: list[str] = []
+    budget_required = float(rules["leverage_max"]) * LEVERAGE_BUFFER
+    infeasible_reasons = feasibility_report(classes, strategy, budget_required)
+    notes.extend(infeasible_reasons)
+
     orphaned = unbanded_classes(classes, strategy)
     if orphaned:
         notes.append(
@@ -287,12 +372,16 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             notes.append(f"Solver {candidate} falló: {exc}")
 
     if w.value is None:
+        # A bare "infeasible" is not a diagnosis. Lead with the structural
+        # reason when there is one, so the empty result explains itself.
+        reasons = infeasible_reasons or [
+            "La optimización no encontró solución factible. Revisa que la "
+            "cesta cubra las clases de activo que exigen las bandas."
+        ]
         return Allocation(pd.Series(0.0, index=tickers), strategy,
                           status or "infeasible", 0.0, 0.0, 0.0,
                           pd.Series(dtype=float),
-                          breaches=["La optimización no encontró solución "
-                                    "factible; revisa bandas y cesta."],
-                          notes=notes)
+                          breaches=reasons, notes=notes)
 
     weights = pd.Series(np.asarray(w.value).ravel(), index=tickers).clip(lower=0.0)
     weights[weights < 1e-6] = 0.0

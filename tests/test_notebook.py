@@ -338,6 +338,13 @@ def test_cells_execute() -> None:
           "views" in namespace and len(namespace["views"]) > 0)
     check("the Cartera sheet lists the held positions",
           wb["Cartera"].max_row == int((cartera.weights > 0).sum()) + 1)
+    # Regression: an earlier version wrote a blank Cartera tab when the
+    # optimization was infeasible, telling the reader nothing at all.
+    check("the Cartera sheet is never blank -- positions or a stated reason",
+          wb["Cartera"].max_row > 1)
+    check("the basket spans more than one asset class, or nothing can solve",
+          len(set(namespace["clases"].values())) > 1,
+          f"got {sorted(set(namespace['clases'].values()))}")
 
     parametros = [row[0].value for row in wb["Parametros"].iter_rows(min_row=2)]
     check("Parametros sheet records the profile and that no book was used",
