@@ -260,6 +260,8 @@ def test_cells_execute() -> None:
           list(namespace["cesta_df"].columns)
           == list(__import__("screener.black_litterman",
                              fromlist=["BASKET_COLUMNS"]).BASKET_COLUMNS))
+    check("the JSON download is a togglable choice, not forced",
+          "EXPORTAR_JSON_PARA_BL" in namespace)
 
     views_file = Path(workdir) / namespace["ARCHIVO_VIEWS"]
     check("the views JSON is written with CCI's naming convention",
@@ -269,21 +271,33 @@ def test_cells_execute() -> None:
           "supuesto" in payload["calibracion"]["nota"])
     check("the JSON records that no account data was read",
           "sin datos de cuenta" in payload["origen"])
-    check("the exported basket CSV is written",
-          (Path(workdir) / namespace["ARCHIVO_CESTA"]).exists())
-
     workbook = Path(workdir) / "screening.xlsx"
     check("Excel workbook is written",
           workbook.exists() and workbook.stat().st_size > 0)
     check("no markdown report is produced",
           not (Path(workdir) / "screen_report.md").exists())
+    check("the basket is a sheet, not a stray CSV",
+          not list(Path(workdir).glob("cesta_*.csv")))
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the five documented sheets",
-          set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles",
-                                 "Cobertura", "Parametros"},
+    check("workbook has the seven documented sheets",
+          set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
+                                 "Cesta", "Cobertura", "Parametros"},
           f"got {wb.sheetnames}")
+
+    # The whole point of the JSON/Excel split: a human reads the views in the
+    # workbook, the BL engine reads them from the JSON.
+    views_header = [c.value for c in next(wb["Views BL"].iter_rows(max_row=1))]
+    check("the Views sheet resolves both view shapes into explicit columns",
+          {"tipo", "activo", "long", "short", "Q", "conviccion", "justificacion"}
+          == set(views_header), f"got {views_header}")
+    check("every view in the JSON also appears in the workbook",
+          wb["Views BL"].max_row == len(views) + 1)
+    check("the Cesta sheet carries CCI's basket columns",
+          [c.value for c in next(wb["Cesta"].iter_rows(max_row=1))]
+          == list(__import__("screener.black_litterman",
+                             fromlist=["BASKET_COLUMNS"]).BASKET_COLUMNS))
 
     ranking_header = [c.value for c in next(wb["Ranking"].iter_rows(max_row=1))]
     check("Ranking sheet has a row per scored name",

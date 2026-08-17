@@ -110,9 +110,17 @@ indexed one profile's results by another's tickers and raised `KeyError` on the
 first such name; `tests/test_notebook.py` now runs the notebook against a
 fixture built specifically to straddle two liquidity floors.
 
-Output is a single `screening.xlsx` with five sheets — ranking, block scores,
-profile comparison, metric coverage, and the parameters the run used, so the
-file still explains itself six months later.
+Output is a single `screening.xlsx` with seven sheets — ranking, block scores,
+profile comparison, the generated views, the basket, metric coverage, and the
+parameters the run used, so the file still explains itself six months later.
+
+A second file, `{Estrategia}_views_{fecha}.json`, is written only when the BL
+export is ticked. It is machine input, not a report: `black_litterman_core` does
+`json.load()` and expects heterogeneous dicts — an absolute view carries
+`activo`, a relative one carries `activo_long`/`activo_short` — which a flat
+sheet would force into empty cells, and Excel silently coerces types on a number
+that feeds the view-variance matrix directly. The same views are in the workbook
+for reading; the JSON exists for the engine.
 
 What Yahoo cannot supply is stated rather than faked. `iv_percentile` needs a
 *history* of implied volatility; Yahoo publishes today's option chain only, so
