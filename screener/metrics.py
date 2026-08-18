@@ -276,6 +276,46 @@ def beta_alpha(returns: np.ndarray, bench: np.ndarray,
     return beta, alpha_ann, r2
 
 
+#: Minimum t-statistic on beta for the market model to be treated as
+#: established. Two is the conventional threshold, and with ~52 observations it
+#: corresponds to an R-squared of roughly 0.075.
+MIN_BETA_T_STAT = 2.0
+
+
+def market_model_holds(r2: float | None, n: int,
+                       min_t: float = MIN_BETA_T_STAT) -> bool:
+    """
+    Whether a regression on the benchmark explains enough to interpret.
+
+    The t-statistic on an OLS slope is ``sqrt((n - 2) * R2 / (1 - R2))``, so
+    this is the question "is beta distinguishable from zero at all", asked with
+    the sample size actually available rather than against a fixed R-squared.
+
+    Why anything downstream should care
+    -----------------------------------
+    When beta is indistinguishable from zero, Jensen's alpha collapses into the
+    asset's own excess return: ``alpha = mean(r) - beta * mean(m)`` with
+    ``beta ~ 0`` is just ``mean(r)``. It stops being "return the market does not
+    explain" -- there is no market relationship to net out -- and becomes raw
+    return wearing the label of skill. That matters here because raw return is
+    already the momentum block, so the composite pays for the same performance
+    twice, and it does so through a metric weighted 0.35 inside its own block.
+
+    Measured on the IBKR snapshot, the names where this bites are not the ones
+    an asset-class rule would catch: LLY regresses on SPY at an R-squared of
+    0.005 and is handed a "+70% alpha" against a +73% total return, while GLD
+    explains better (0.187) than AAPL (0.178). The problem is statistical, not
+    categorical, so the test is statistical too.
+    """
+    if r2 is None or not np.isfinite(r2) or n <= 2:
+        return False
+    if r2 >= 1.0:
+        return True
+    if r2 <= 0.0:
+        return False
+    return float((n - 2) * r2 / (1.0 - r2)) >= min_t ** 2
+
+
 def capture_ratios(returns: np.ndarray, bench: np.ndarray) -> tuple[float | None, float | None]:
     """
     Upside and downside capture vs the benchmark.
@@ -435,6 +475,35 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
     capture_spread = (up_cap - down_cap) if (up_cap is not None and down_cap is not None) else None
     idio = (1.0 - r2) if r2 is not None else None
 
+    # The whole market-sensitivity block is withheld when no market
+    # relationship is established, because every one of its four metrics is
+    # defined against a relationship that is not there:
+    #
+    #   alpha          collapses into the asset's own excess return, which the
+    #                  momentum block already scores -- the same performance
+    #                  paid for twice, under a label that reads as skill.
+    #   capture_spread becomes the ratio of two means that move independently.
+    #   beta           is correctly ~0, but that is the same fact as the next
+    #   idio_vol_share line: both are functions of R-squared, so keeping the
+    #                  pair states one observation twice and lets it carry the
+    #                  block.
+    #
+    # Keeping only beta and idiosyncratic share was tried and is worse than it
+    # looks. Block scores renormalize over the metrics present, so dropping two
+    # of four does not reduce the block's influence on the composite -- it just
+    # changes which metrics decide it. Uncorrelated names then sweep both
+    # survivors by construction and still top the block, now with no return
+    # term anywhere in it: on the IBKR snapshot that scored TLT fourth-highest
+    # on "alpha quality" in a year it lost 4.9%.
+    #
+    # Withholding the block is the honest outcome. The composite renormalizes
+    # over the remaining blocks, which is the same machinery that handles any
+    # missing input, and the name is ranked on the dimensions it can actually
+    # be measured on rather than on a regression against an index it does not
+    # track.
+    if not market_model_holds(r2, int(min(rets.size, bench_returns.size))):
+        beta = alpha = capture_spread = idio = None
+
     adv = adv_usd(instrument)
     target_position_usd = net_liq * base_position_weight
     dtl = days_to_liquidate(adv, target_position_usd, participation)
@@ -477,11 +546,22 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
 
 def diagnostics(instrument: dict, bench_returns: np.ndarray,
                 rf: float = RISK_FREE_RATE) -> dict[str, Any]:
-    """Raw descriptive values carried through to the report (not scored)."""
+    """
+    Raw descriptive values carried through to the report (not scored).
+
+    ``alpha_annual`` and the capture ratios are withheld on the same
+    significance test the scorer applies, so the report never prints an alpha
+    the model has declined to score. Beta stays: an estimate near zero is a
+    true and useful description of the name, whereas an alpha computed against
+    a beta of zero reads as skill and is only the asset's own return.
+    ``r_squared`` is reported either way, so the reason is visible.
+    """
     prices = _closes(instrument)
     rets = simple_returns(prices)
     beta, alpha, r2 = beta_alpha(rets, bench_returns, rf=rf)
     up_cap, down_cap = capture_ratios(rets, bench_returns)
+    if not market_model_holds(r2, int(min(rets.size, bench_returns.size))):
+        alpha = up_cap = down_cap = None
     mdd = max_drawdown(prices)
     return {
         "last_price": last_price(instrument),

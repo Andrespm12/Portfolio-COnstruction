@@ -32,6 +32,37 @@ def make_series(n=60, drift=0.004, vol=0.02, seed=0, start=100.0):
     return start * np.cumprod(1.0 + shocks)
 
 
+def make_correlated(bench, beta=1.0, alpha=0.0, idio_vol=0.015, seed=0, start=100.0):
+    """
+    A price series that genuinely regresses on the benchmark.
+
+    Fixtures built from independent random walks are uncorrelated with the
+    benchmark by construction, which now means the market-sensitivity block is
+    withheld from every one of them -- and with it enough block coverage to
+    drop the whole cross-section below ``min_populated_blocks``. Every name
+    would then come back Market Weight for want of data, and any test about
+    ranking would pass or fail for the wrong reason. Real equities are
+    correlated with the market; fixtures standing in for them should be too.
+    """
+    rng = np.random.default_rng(seed)
+    b = simple_returns(np.asarray(bench, dtype=float))
+    shocks = alpha + beta * b + rng.normal(0.0, idio_vol, b.size)
+    return start * np.cumprod(1.0 + shocks)
+
+
+def varied(i, **overrides):
+    """
+    Per-name market-data inputs that actually differ across the cross-section.
+
+    Constant inputs are worse than missing ones here: ``zscore`` returns all-NaN
+    on zero variance, so a fixture that gives every name the same ADV and
+    dividend yield silently empties the liquidity and valuation blocks instead
+    of scoring them.
+    """
+    return dict({"adv": 5e8 * (1.0 + 0.35 * i), "div": 0.5 + 0.4 * i,
+                 "iv": 0.20 + 0.03 * i, "hv": 0.19 + 0.02 * i}, **overrides)
+
+
 def make_instrument(ticker, prices, asset_type="STOCK", adv=5e8, div=1.0,
                     iv=0.25, hv=0.24):
     return {
@@ -54,7 +85,10 @@ def make_instrument(ticker, prices, asset_type="STOCK", adv=5e8, div=1.0,
         },
         "history": {
             "close": [float(p) for p in prices],
-            "volume": [1e7] * len(prices),
+            # Jittered rather than flat: constant volume makes
+            # turnover_stability undefined (sd == 0) for every name at once.
+            "volume": [1e7 * (1.0 + 0.05 * ((j * 7 + hash(ticker)) % 11) / 11.0)
+                       for j in range(len(prices))],
         },
     }
 
@@ -270,6 +304,162 @@ def test_excludes_leveraged_and_income_products():
           f"kept {len(should_keep)} ordinary securities")
 
 
+_MARKET_SENSITIVITY = ("beta_1y", "alpha_annual", "capture_spread", "idio_vol_share")
+
+
+def test_market_model_significance_threshold():
+    """
+    The floor is the conventional t >= 2 on beta, evaluated at the sample size
+    actually available -- not a fixed R-squared. Same explanatory power means
+    something different on 20 observations than on 200.
+    """
+    from screener.metrics import market_model_holds
+
+    # t^2 = (n-2) * R2/(1-R2); at n=52 the break-even R2 is 4/(50+4).
+    breakeven = 4.0 / 54.0
+    assert market_model_holds(breakeven + 1e-9, 52)
+    assert not market_model_holds(breakeven - 1e-9, 52)
+
+    # The same R-squared passes with more data and fails with less.
+    assert not market_model_holds(0.05, 30), "0.05 should not clear on 30 bars"
+    assert market_model_holds(0.05, 200), "0.05 should clear on 200 bars"
+
+    for bad in (None, float("nan"), -0.1, 0.0):
+        assert not market_model_holds(bad, 52), f"{bad} should not hold"
+    assert market_model_holds(1.0, 52), "a perfect fit holds"
+    assert not market_model_holds(0.9, 2), "n=2 has no degrees of freedom"
+    print(f"PASS market-model floor is t>=2 on beta "
+          f"(R2 {breakeven:.3f} at 52 bars, {4.0 / 202:.3f} at 200)")
+
+
+def test_uncorrelated_name_drops_the_market_block():
+    """
+    An asset the benchmark does not explain must not be scored against it.
+
+    Jensen's alpha at beta ~ 0 is the asset's own excess return, which the
+    momentum block already scores -- so leaving it in pays for the same
+    performance twice, under a label that reads as skill. Beta and
+    idiosyncratic share are both functions of R-squared, so keeping only those
+    two states one fact twice and leaves the block with no return term at all.
+    The block is withheld entirely and the composite renormalizes.
+    """
+    bench = make_series(n=60, drift=0.004, vol=0.02, seed=71)
+    bench_rets = simple_returns(bench)
+    independent = make_series(n=60, drift=0.004, vol=0.02, seed=999)
+
+    m = compute_metrics(make_instrument("INDEP", independent), bench_rets,
+                        net_liq=1e7, participation=0.2, base_position_weight=0.03)
+    d = diagnostics(make_instrument("INDEP", independent), bench_rets)
+
+    assert d["r_squared"] < 0.07, f"fixture is not uncorrelated: R2={d['r_squared']:.3f}"
+    for key in _MARKET_SENSITIVITY:
+        assert m[key] is None, f"{key} survived at R2={d['r_squared']:.3f}: {m[key]}"
+    assert d["alpha_annual"] is None, "the report would print an unscored alpha"
+    assert d["upside_capture"] is None and d["downside_capture"] is None
+    assert d["beta"] is not None, "beta is descriptive and should stay"
+    assert d["r_squared"] is not None, "R2 must stay so the reason is visible"
+
+    # And a correlated name keeps everything.
+    levered = np.asarray([100.0], dtype=float)
+    for x in simple_returns(bench) * 1.5:
+        levered = np.append(levered, levered[-1] * (1 + x))
+    m_ok = compute_metrics(make_instrument("LEVER", levered), bench_rets,
+                           net_liq=1e7, participation=0.2, base_position_weight=0.03)
+    for key in _MARKET_SENSITIVITY:
+        assert m_ok[key] is not None, f"{key} was dropped from a correlated name"
+    print(f"PASS market block withheld at R2={d['r_squared']:.3f}, kept at "
+          f"R2={diagnostics(make_instrument('LEVER', levered), bench_rets)['r_squared']:.3f}")
+
+
+def test_uncorrelated_loser_is_not_rewarded_for_being_uncorrelated():
+    """
+    The mis-ranking this fixes, stated as an outcome rather than a mechanism.
+
+    On the IBKR snapshot the old model scored TLT fourth-highest on "Market
+    Sensitivity & Alpha Quality" in a year it lost 4.9%, because beta near zero
+    and idiosyncratic share near one are both just 'this does not track SPY'.
+    A name that lost money must not out-score a name that made money on a block
+    whose stated purpose is alpha quality.
+    """
+    bench = make_series(n=60, drift=0.005, vol=0.02, seed=81)
+    bench_rets = simple_returns(bench)
+
+    rows = []
+    specs = [("LOSER", -0.004, 909), ("WINNER", 0.012, 77), ("MID1", 0.004, 78),
+             ("MID2", 0.005, 79), ("MID3", 0.003, 80)]
+    for tkr, drift, seed in specs:
+        series = make_series(n=60, drift=drift, vol=0.02, seed=seed)
+        inst = make_instrument(tkr, series)
+        m = compute_metrics(inst, bench_rets, net_liq=1e7, participation=0.2,
+                            base_position_weight=0.03)
+        m.update({"corr_to_portfolio": 0.3, "diversification_benefit": 0.0,
+                  "existing_overlap": 0.0})
+        rows.append(ScoredInstrument(tkr, tkr, "STOCK", ["SP500"], "Test", m,
+                                     diagnostics=diagnostics(inst, bench_rets)))
+
+    by = {r.ticker: r for r in run_scoring_pipeline(rows)}
+    loser, winner = by["LOSER"], by["WINNER"]
+
+    assert loser.raw_metrics["mom_12_1"] < 0, "fixture LOSER did not lose"
+    assert winner.raw_metrics["mom_12_1"] > 0, "fixture WINNER did not win"
+
+    loser_ms = loser.block_scores.get("market_sensitivity")
+    if loser_ms is not None:
+        assert loser_ms <= winner.block_scores.get("market_sensitivity", 99), (
+            f"a losing name out-scored a winning one on alpha quality: "
+            f"{loser_ms:+.2f} vs {winner.block_scores.get('market_sensitivity')}"
+        )
+    assert loser.composite_z < winner.composite_z, (
+        f"LOSER z {loser.composite_z:+.2f} >= WINNER z {winner.composite_z:+.2f}"
+    )
+    populated = sum(1 for v in loser.block_coverage.values() if v > 0)
+    print(f"PASS uncorrelated loser scored on {populated} blocks, z "
+          f"{loser.composite_z:+.2f} below the winner's {winner.composite_z:+.2f}")
+
+
+def test_dropping_the_block_still_leaves_a_scoreable_name():
+    """
+    Withholding one block must not silently force every such name to neutral.
+
+    ``BANDS.min_populated_blocks`` is 5. The account-aware model declares 7
+    blocks and the standalone profiles 6, so dropping market sensitivity leaves
+    6 and 5 respectively -- at the threshold in standalone mode, which is worth
+    a test rather than an assumption.
+    """
+    from screener.config import BANDS
+
+    bench = make_series(n=60, drift=0.004, vol=0.02, seed=91)
+    bench_rets = simple_returns(bench)
+
+    rows = []
+    for i, seed in enumerate((901, 902, 903, 904, 905)):
+        # Independent of the benchmark on purpose -- these are the names whose
+        # market block gets withheld. Everything else varies so the remaining
+        # blocks are genuinely populated, as they are on real data.
+        series = make_series(n=60, drift=0.002 * i, vol=0.02, seed=seed)
+        inst = make_instrument(f"U{i}", series, **varied(i))
+        m = compute_metrics(inst, bench_rets, net_liq=1e7, participation=0.2,
+                            base_position_weight=0.03)
+        m.update({"corr_to_portfolio": 0.2 + 0.05 * i,
+                  "diversification_benefit": 0.01 * (i % 4),
+                  "existing_overlap": 0.005 * i})
+        rows.append(ScoredInstrument(f"U{i}", f"U{i}", "STOCK", ["SP500"], "Test", m,
+                                     diagnostics=diagnostics(inst, bench_rets)))
+
+    scored = run_scoring_pipeline(rows)
+    dropped = [r for r in scored if r.block_coverage.get("market_sensitivity", 0) == 0]
+    assert dropped, "fixture produced no uncorrelated names, so it proves nothing"
+    for row in dropped:
+        populated = sum(1 for v in row.block_coverage.values() if v > 0)
+        assert populated >= BANDS.min_populated_blocks, (
+            f"{row.ticker} fell to {populated} blocks, below the "
+            f"{BANDS.min_populated_blocks} needed for a non-neutral call"
+        )
+        assert np.isfinite(row.composite_z), f"{row.ticker} lost its composite"
+    print(f"PASS {len(dropped)} name(s) kept a scoreable composite with the "
+          f"market block withheld")
+
+
 def _cross_section(drift_shift: float = 0.0, n: int = 8):
     """
     A scored cross-section whose whole return distribution can be shifted.
@@ -284,13 +474,15 @@ def _cross_section(drift_shift: float = 0.0, n: int = 8):
 
     rows = []
     for i in range(n):
-        series = make_series(n=60, drift=0.001 * i + drift_shift,
-                             vol=0.012 + 0.004 * (i % 3), seed=200 + i)
-        inst = make_instrument(f"N{i}", series)
+        series = make_correlated(bench, beta=0.7 + 0.15 * i,
+                                 alpha=0.001 * i + drift_shift,
+                                 idio_vol=0.010 + 0.004 * (i % 3), seed=200 + i)
+        inst = make_instrument(f"N{i}", series, **varied(i))
         m = compute_metrics(inst, bench_rets, net_liq=1e7, participation=0.2,
                             base_position_weight=0.03)
-        m.update({"corr_to_portfolio": 0.3, "diversification_benefit": 0.0,
-                  "existing_overlap": 0.0})
+        m.update({"corr_to_portfolio": 0.2 + 0.05 * i,
+                  "diversification_benefit": 0.01 * (i % 4),
+                  "existing_overlap": 0.005 * i})
         rows.append(ScoredInstrument(inst["ticker"], inst["ticker"], "STOCK",
                                      ["SP500"], "Test", m,
                                      diagnostics=diagnostics(inst, bench_rets)))
@@ -324,34 +516,88 @@ def test_bands_are_purely_relative():
           f"{len(overweights)} Overweight, one of them down {worst:.0%}")
 
 
-def test_quality_floor_removes_overweights_in_a_falling_universe():
+def _repathed(market_data, annual_drift):
     """
-    The gate that makes 'if nothing is good, nothing gets overweighted' true.
+    The real universe with every price series re-pathed to a given drift.
 
-    Same shifted cross-section as above, run through the full pipeline: with
-    the floor disabled the relative bands hand out Overweights in a universe
-    where every name lost money; with it enabled, none survive.
+    Each name keeps its own volatility, its own shape and all of its
+    non-price data; only the mean return is moved. That isolates the market
+    regime from every other difference between names, which a freshly
+    generated synthetic universe cannot do.
+    """
+    import copy
+
+    out = copy.deepcopy(market_data)
+    for inst in out.get("instruments", []):
+        history = inst.get("history") or {}
+        closes = history.get("close") or []
+        if len(closes) < 10:
+            continue
+        prices = np.asarray(closes, dtype=float)
+        rets = np.diff(prices) / prices[:-1]
+        rets = rets - rets.mean() + annual_drift / 52.0
+        path = [prices[0]]
+        for r in rets:
+            path.append(path[-1] * (1.0 + r))
+        history["close"] = path
+        if history.get("high"):
+            history["high"] = [p * 1.01 for p in path]
+        if history.get("low"):
+            history["low"] = [p * 0.99 for p in path]
+    return out
+
+
+def test_quality_floor_across_market_regimes():
+    """
+    The finding, on the real universe rather than a synthetic one.
+
+    A flat market is the case that mattered and the case a synthetic fixture
+    misses. The trend gate needs a broken moving average *and* negative
+    momentum, so it does nothing when prices go sideways -- yet at a 4.25%
+    risk-free rate a flat year is a negative Sharpe, and overweighting equity
+    that lost to Treasury bills is exactly what an absolute floor is for.
+
+    The bull case is the control: a rail that also fires when the universe is
+    genuinely good would be a bug, not a safeguard.
     """
     from screener import tuning
+    from screener.run_screen import load_json, run
 
-    def overweights(**gate_changes):
+    root = Path(__file__).resolve().parents[1]
+    market = load_json(root / "data" / "raw" / "market_data.json")
+    book = load_json(root / "data" / "portfolio_ibkr.json")
+
+    def overweights(data, **gate_changes):
         tuning.reset_all()
         if gate_changes:
             tuning.override("GATES", **gate_changes)
         try:
-            scored = run_scoring_pipeline(_cross_section(-0.010))
-            return [r.ticker for r in scored if r.recommendation == OVERWEIGHT]
+            rows, _ = run(data, book)
+            return [r.ticker for r in rows if r.recommendation == OVERWEIGHT]
         finally:
             tuning.reset_all()
 
-    without = overweights(min_momentum_for_overweight=None,
-                          min_sharpe_for_overweight=None)
-    with_floor = overweights()
+    off = dict(min_momentum_for_overweight=None, min_sharpe_for_overweight=None)
+    results = {}
+    for label, drift in (("alcista", 0.20), ("plano", 0.0), ("bajista", -0.10)):
+        data = _repathed(market, drift)
+        results[label] = (overweights(data, **off), overweights(data))
 
-    assert without, "fixture must produce Overweights without the floor"
-    assert not with_floor, f"floor let {with_floor} through a losing universe"
-    print(f"PASS quality floor: {len(without)} Overweight(s) without it, "
-          f"none with it, in a universe where every name fell")
+    bull_without, bull_with = results["alcista"]
+    assert bull_without, "the bull fixture produced no Overweights at all"
+    assert bull_with == bull_without, (
+        f"the floor changed a rising market: {bull_without} -> {bull_with}"
+    )
+
+    for label in ("plano", "bajista"):
+        without, with_floor = results[label]
+        assert without, f"the {label} fixture produced no Overweights without the floor"
+        assert not with_floor, (
+            f"floor let {with_floor} through a {label} market"
+        )
+
+    print("PASS quality floor by regime: " + ", ".join(
+        f"{label} {len(w)}→{len(f)}" for label, (w, f) in results.items()))
 
 
 def test_quality_floor_does_not_touch_a_healthy_universe():

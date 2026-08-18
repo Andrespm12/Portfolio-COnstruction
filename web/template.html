@@ -443,20 +443,41 @@ function ivHv(it){ const iv=sg(it.snapshot,"implied_vol_underlying","annual_iv")
 function divYield(it){ const y=sg(it.snapshot,"dividend_yield","yield_pct");
   return y===null?null:y/100; }
 
+/* Se omite el bloque de sensibilidad de mercado completo cuando no hay
+   relación con el mercado que interpretar. El t de beta es
+   sqrt((n-2)*R2/(1-R2)); por debajo de 2, el alfa de Jensen degenera en el
+   retorno propio del activo (beta~0 => alfa = media de r), que el bloque de
+   momentum ya puntúa, y las razones de captura son el cociente de dos medias
+   sin relación. Beta e idio_vol_share son ambas funciones del R2: dejarlas
+   solas repite un mismo dato dos veces y deja el bloque sin ningún término de
+   retorno. Se omite el bloque entero: el compuesto renormaliza sobre los
+   bloques restantes, igual que con cualquier dato faltante. */
+const MIN_BETA_T=2.0;
+function marketModelHolds(r2,n,minT=MIN_BETA_T){
+  if(!fin(r2)||n<=2) return false;
+  if(r2>=1) return true;
+  if(r2<=0) return false;
+  return ((n-2)*r2/(1-r2))>=minT*minT; }
+
 function computeMetrics(it,bm,netLiq,rf){
   const p=it.history.close||[], r=rets(p);
   const [beta,alpha,r2]=betaAlpha(r,bm,rf);
   const [uc,dc]=capture(r,bm);
   const adv=advUsd(it), dd=maxDD(p);
   const dtl=(adv&&adv>0)?(netLiq*SIZING.base)/(adv*ELIG.participation):null;
+  const holds=marketModelHolds(r2,Math.min(r.length,bm.length));
+  const alphaOut=holds?alpha:null;
+  const betaOut=holds?beta:null;
+  const idioOut=(holds&&r2!==null)?1-r2:null;
+  const captureOut=(holds&&uc!==null&&dc!==null)?uc-dc:null;
   return {
     mom_12_1:totalReturn(p,48,4), mom_6m:totalReturn(p,26), mom_3m:totalReturn(p,13),
     pct_from_52w_high:pctFromHigh(it), above_40w_ma:pctAboveMA(p,40), ma_slope_13w:maSlope(p,40,13),
     sharpe_1y:sharpe(r,rf), sortino_1y:sortino(r,rf), calmar_1y:calmar(p), pct_positive_periods:pctPos(r),
     volatility_1y:annVol(r), max_drawdown:dd===null?null:Math.abs(dd),
     downside_deviation:downDev(r), ulcer_index:ulcer(p),
-    capture_spread:(uc!==null&&dc!==null)?uc-dc:null, alpha_annual:alpha,
-    idio_vol_share:r2===null?null:1-r2, beta_1y:beta,
+    capture_spread:captureOut, alpha_annual:alphaOut,
+    idio_vol_share:idioOut, beta_1y:betaOut,
     adv_usd_log:(adv&&adv>0)?Math.log10(adv):null, days_to_liquidate:dtl,
     turnover_stability:turnStab(it),
     dividend_yield:divYield(it), iv_hv_spread:ivHv(it),
@@ -466,11 +487,17 @@ function computeMetrics(it,bm,netLiq,rf){
 }
 function diagnostics(it,bm,rf){
   const p=it.history.close||[], r=rets(p);
-  const [beta,alpha]=betaAlpha(r,bm,rf); const [uc,dc]=capture(r,bm);
+  const [beta,alpha,r2]=betaAlpha(r,bm,rf); const [uc,dc]=capture(r,bm);
+  // Mismo test de significancia que aplica el scorer: el reporte nunca imprime
+  // un alfa que el modelo se negó a puntuar. Beta se queda — un estimado cerca
+  // de cero describe bien al activo — y r2 queda visible para ver por qué.
+  const holds=marketModelHolds(r2,Math.min(r.length,bm.length));
   return {last_price:lastPrice(it), bars:p.length,
     return_1y:totalReturn(p,Math.min(52,Math.max(p.length-1,0))),
-    volatility:annVol(r), max_drawdown:maxDD(p), beta, alpha_annual:alpha,
-    upside_capture:uc, downside_capture:dc, adv_usd:advUsd(it), dividend_yield:divYield(it)}; }
+    volatility:annVol(r), max_drawdown:maxDD(p), beta,
+    alpha_annual:holds?alpha:null, r_squared:r2,
+    upside_capture:holds?uc:null, downside_capture:holds?dc:null,
+    adv_usd:advUsd(it), dividend_yield:divYield(it)}; }
 
 /* ---------- portafolio ---------- */
 function portfolioSeries(positions,histByT){
