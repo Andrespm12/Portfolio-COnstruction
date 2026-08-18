@@ -243,16 +243,56 @@ The two files are split because CCI's own architecture insists on it — the
 Investment Procedure delimits risk boundaries and is never the starting point
 for weights.
 
-Three defects in the original are not carried over, each a behaviour change:
+Four defects in the original are not carried over, each a behaviour change:
 
 | | CCI's implementation | Here |
 |---|---|---|
 | Solver | `ECOS`, absent from a stock Colab — the saved run died there with no allocation | `CLARABEL`, bundled with CVXPY, with fallbacks |
 | Leverage | `leverage_max` 1.25/1.50 declared; optimizer hard-coded `sum(w) == 1` | a real gross-exposure budget with the documented 95% buffer |
 | Band audit | wrote `"Auditoría OK"` unconditionally | compares every limit and returns the breaches |
+| Equilibrium anchor | market cap normalized against ETF AUM — anchors near 95% equity | `policy_weights`: the mandate's own neutral portfolio |
 
 An audit that cannot fail is worse than none: it leaves a document asserting
 compliance that nothing verified.
+
+### The anchor is most of the answer
+
+`π = λ · Σ · w` passes `w` straight through. With eight views over twenty-odd
+assets, roughly three quarters of the final weights come from the anchor — it is
+the largest single decision in the allocation, not a technicality.
+
+Normalizing single-stock market capitalization against ETF assets under
+management gets it wrong twice. The units do not match: a company's market cap is
+what the company is worth, a fund's AUM is how much money sits in that wrapper,
+and for an equity ETF it double-counts shares already priced elsewhere in the
+basket. And it ignores the mandate — that calculation anchors near 95% equity,
+which no strategy here permits.
+
+The second problem is the visible one. Under the market anchor the solved
+portfolio sat on the equity ceiling *exactly*:
+
+| Strategy | Ceiling | Market anchor | Policy anchor |
+|:--|--:|--:|--:|
+| Conservador | 50% | 50.0% | 19.0% |
+| Moderado | 60% | 60.0% | — |
+| Agresivo | 80% | 80.0% | — |
+
+Pinned to the limit means the band was making the asset-allocation decision and
+the model was only choosing what was left over inside it.
+
+`policy_weights` anchors on the mandate instead: each class at its band midpoint,
+renormalized over the classes actually in the basket, with the equity ceiling
+applied to the anchor itself. Within a class the split is by market cap, which is
+where comparing market values is meaningful. The property that matters: **with no
+views, the optimizer returns the anchor** — verified to within 7e-5 across all
+four strategies — so the model's output with nothing to say is the mandate's own
+allocation, and views tilt away from it.
+
+**Band midpoints are not a strategic asset allocation**, and the code says so in
+its notes. A real SAA is an Investment Committee decision and CCI's documents
+supply bands, not targets. Pass `policy_weights(..., targets={...})` when those
+numbers exist. Until then, note that renormalizing over the classes present means
+the anchor moves with basket composition in a way a genuine SAA would not.
 
 **One gap needs Compliance, not code.** CCI's `REGULACIONES` has no asset class
 for commodities, and their optimizer constrains only classes present in
@@ -262,8 +302,9 @@ placeholders chosen so the hole is loud rather than silent. They are not from
 the Investment Procedure.
 
 Market caps are never defaulted. CCI's code substitutes `1e9` on any lookup
-failure, straight into the equilibrium the whole model starts from;
-`market_weights` returns the missing names so the run can report them.
+failure, straight into the equilibrium; `market_weights` returns the missing
+names so the run can report them, and `policy_weights` degrades a single class
+to an equal split rather than letting one gap move the whole portfolio.
 
 ### The basket must span the bands
 
@@ -378,7 +419,7 @@ also the exposure most likely to reverse. The volatility and drawdown blocks
 | Momentum & Trend | 22% | 12M−1M, 6M, 3M returns; distance from 52w high; 40W MA position and slope |
 | Risk-Adjusted Return | 18% | Sharpe, Sortino, Calmar, hit rate |
 | Volatility & Drawdown | 15% | Realized vol, max drawdown, downside deviation, Ulcer index |
-| Market Sensitivity | 12% | Up/down capture spread, Jensen's alpha, idiosyncratic vol share, beta |
+| Market Sensitivity | 12% | Up/down capture spread, Jensen's alpha, idiosyncratic vol share, beta — withheld entirely when the benchmark does not explain the name (see below) |
 | Liquidity & Tradability | 10% | ADV, days-to-liquidate at 20% participation, volume stability |
 | Valuation Proxy & Carry | 10% | Dividend yield, IV−HV spread, IV percentile, 52w range position |
 | Portfolio Fit | 13% | Correlation to your book, marginal diversification benefit, existing overlap |
@@ -390,6 +431,97 @@ screen would degenerate into "prefer diversified things."
 Weights **re-normalize** over available data rather than imputing zeros. Imputing
 a zero silently asserts "average," which is a factual claim about a security you
 have no measurement for.
+
+### The bands are relative; the floor is not
+
+Standardizing the composite carries no information about absolute quality. A
+threshold of z ≥ 0.50 names roughly the top third of *this* universe whether
+every name doubled or every name halved — z and percentile are monotone
+transforms of each other, and neither knows whether the universe is any good.
+(An earlier version of `config.py` claimed the opposite. It was wrong, and wrong
+in the direction that flatters the model.)
+
+The absolute bar lives in the gates, which run after scoring and can only
+downgrade: an Overweight requires positive 12M−1M momentum and a Sharpe above
+zero — it beat cash. Measured across regimes on the same universe:
+
+| Regime | Overweights without the floor | With it |
+|:--|--:|--:|
+| Bull, +20%/yr | 6 | 6 |
+| Flat, 0%/yr | 5 | 0 |
+| Bear, −10%/yr | 3 | 0 |
+
+The flat case is the one that mattered — the trend gate needs a broken moving
+average *and* negative momentum, so it does nothing when prices go sideways, yet
+at a 4.25% risk-free rate a flat year is a negative Sharpe. The bull column is
+the control: a rail that fires when the universe is genuinely good would be a
+bug.
+
+### Market sensitivity is withheld, not faked
+
+All four metrics in that block are defined against a relationship to SPY. When
+beta does not clear a t-statistic of 2 — `sqrt((n−2)·R²/(1−R²))`, evaluated at
+the sample size actually available — there is no relationship to interpret, and
+the block is dropped so the composite renormalizes over the rest.
+
+The trigger is statistical, not categorical, because asset class turned out to be
+the wrong predictor: LLY regresses on SPY at R² 0.005 and XLV at 0.021, while GLD
+explains better (0.187) than AAPL (0.178). An "exclude fixed income" rule would
+have kept the worst case and thrown out a sound one.
+
+What goes wrong if the block stays: at beta ≈ 0, Jensen's alpha collapses into
+the asset's own excess return, which the momentum block already scores. LLY was
+credited a "+70% alpha" against a +73% total return — the same performance paid
+for twice, under a label that reads as skill. Keeping only beta and idiosyncratic
+share is worse than it sounds, since both are functions of R² and block scores
+renormalize: uncorrelated names then sweep both survivors with no return term
+left anywhere, which ranked TLT fourth-highest on "alpha quality" in a year it
+lost 4.9%.
+
+### One year means one year
+
+`mom_12_1` is a 48-week return skipping the most recent 4, so it needs 53
+observations, and the download used to retain exactly 53. One missing Friday and
+the model's highest-weighted metric returned None, silently. The window is now 60
+bars.
+
+That creates the opposite hazard, so `RISK_WINDOW_BARS` pins every "1Y" statistic
+to 52 return observations regardless of how much history is retained — otherwise
+the extra bars would quietly stretch volatility, Sharpe and beta into 14-month
+figures while every label still said one year. The guarantee is tested in its
+strong form: 60 bars and the same series cut to 53 produce identical values for
+all 25 metrics.
+
+---
+
+## Diagnostics on the model itself
+
+`screener/diagnostics.py` runs on every screen (notebook section 10b) and
+changes nothing — it exists to tell you how far to trust the output above it.
+
+**Block correlation.** The model declares six blocks and spends a weight on
+each, which asserts each carries information the others do not. If two correlate
+at 0.90, their weights are one bet placed twice and the composite is less
+diversified than the weight table implies. The report gives the full matrix, the
+*effective factor count* (participation ratio of the eigenvalues: equal to the
+block count when the blocks are independent, falling toward 1 as they collapse
+onto one), and the combined weight of every overlapping pair.
+
+Blocks are excluded rather than reported as noise when they cannot be measured:
+below half the cross-section scored (otherwise Portfolio Fit, never populated in
+standalone mode, would empty the sample under listwise deletion), or with no
+cross-sectional variance — tested on a tolerance, since `np.std` of fifty
+identical floats returns ~1.7e-16 rather than zero and an exact comparison would
+publish that as a correlation.
+
+**View saturation.** `Q` is clipped at ±5% per CCI's technical document. That
+clip is a safety rail, but if most views land on it the rail has become the
+signal: names the screener ranked very differently arrive at the optimizer with
+identical expected returns, and that part of the ranking is discarded at the last
+step. The report counts views at the cap, shows what they would have been
+without it, and flags the case where the clip erased a distinction the model
+actually made. The correction is to lower the information coefficient, not to
+raise the cap — the cap is the calibration.
 
 ---
 
@@ -421,8 +553,21 @@ weight logic means they slot in without touching the scoring engine.
 - **Index membership is a static snapshot** (`universe.SNAPSHOT_DATE`), hardcoded
   because constituent sources are unreachable from here. `load_membership_override()`
   reads a CSV to replace it — wire that to a maintained feed in production.
-- **~52 weekly observations is a short sample.** Beta, alpha and capture ratios
-  carry wide confidence intervals. Do not read the third decimal.
+- **52 weekly observations is a short sample.** Beta, alpha and capture ratios
+  carry wide confidence intervals. Do not read the third decimal. Where the
+  interval is wide enough to swallow the estimate entirely, the block is
+  withheld rather than reported — but that is a floor, not a guarantee of
+  precision above it.
+- **The six blocks do not measure six independent things.** `diagnostics.py`
+  reports the effective factor count on every run, and it is well below the
+  block count. Part of that is structural: `range_position` (scored −1, inside
+  Valuation) is a monotone inverse of `pct_from_52w_high` (scored +1, inside
+  Momentum), so those two blocks partly cancel by construction. Read the block
+  weights as a stated intent, not as a measured decomposition of risk.
+- **Yahoo supplies no implied volatility**, so two of the four Valuation & Carry
+  metrics (IV−HV spread, IV percentile — half the block's declared weight) are
+  permanently absent on that path. The block renormalizes onto dividend yield and
+  range position, which is less than the name promises.
 - **One-year lookback only**, and that year contained a semiconductor melt-up
   (MU +618%) and a mega-cap tech drawdown (META −24%, MSFT −3%). The
   cross-section reflects that regime, not a stable equilibrium.
@@ -447,7 +592,8 @@ screener/
   profiles.py                Four CCI mandates; drops the Portfolio Fit block
   black_litterman.py         Ranking -> BL views (Q, conviction)
   cci_regulation.py          CCI's Investment Procedure as data: classes, bands, exclusions
-  optimizer.py               Equilibrium, Bayesian posterior, constrained allocation
+  optimizer.py               Equilibrium anchor, Bayesian posterior, constrained allocation
+  diagnostics.py             Measurements on the model itself: block overlap, view saturation
   tuning.py                  Runtime weight/gate overrides that actually reach the scorer
 web/
   template.html              The page: JS port of the engine, styling, IBKR live-refresh
@@ -482,7 +628,16 @@ and lets the same code run behind an agent, a cron job or a live gateway.
 
 **Gates can only downgrade.** An additive score can be dragged into Overweight by
 one extreme block — usually momentum. Making the gates one-directional means they
-can never justify a position the factor model does not already support.
+can never justify a position the factor model does not already support. It is
+also why the absolute quality floor is a gate rather than a band: bands are
+cross-sectional by construction, and a one-directional gate is the only place in
+the pipeline where a name can be measured against something other than its peers.
+
+**A metric that cannot be measured is withheld, never imputed.** This is the same
+rule in four places — a missing block, an unpopulated metric, an alpha with no
+market model behind it, a correlation on a flat series. Substituting zero asserts
+"average," which is a factual claim about something never observed, and it is
+indistinguishable from a real measurement downstream.
 
 **Structured products are excluded by pattern, not by omission.** A search for any
 liquid ticker on IBKR returns a long tail of `GRANITESH 2X LNG NVDA ETF`,
