@@ -346,6 +346,10 @@ const GATES = {
 const ELIG = {minPrice:5, minAdv:20e6, minBars:30, participation:.20, maxDays:3.0};
 const SIZING = {targetVol:.20, base:.030, ow:1.75, mw:1.00, uw:.35, min:.005, max:.080};
 const BANDS = {ow:.50, uw:-.50, minBlocks:5};
+/* Observaciones detrás de toda estadística etiquetada "1Y". Separado a
+   propósito de cuántas barras retiene la descarga: la historia retenida tiene
+   que ser más larga para que mom_12_1 (48 semanas saltando 4) tenga holgura. */
+const RISK_WINDOW_BARS=52;
 
 /* ---------- primitivas ---------- */
 const fin = v => v!==null && v!==undefined && Number.isFinite(v);
@@ -424,7 +428,10 @@ function advUsd(it){ const d=sg(it.snapshot,"avg_90d_usd_volume","volume");
   if(!v.length||!c.length) return null;
   const rec=[...(v.length>=13?v.slice(-13):v)].sort((a,b)=>a-b);
   return (pctile(rec,50)/5)*c[c.length-1]; }
-function turnStab(it){ const v=it.history.volume||[]; if(v.length<8) return null;
+// Ventana de un año como todo lo demás, para que retener historia extra en
+// beneficio de mom_12_1 no cambie lo que esto mide.
+function turnStab(it){ const v=(it.history.volume||[]).slice(-RISK_WINDOW_BARS);
+  if(v.length<8) return null;
   const m=mean(v), s=sd(v); return (!m||!s)?null:m/s; }
 function lastPrice(it){ const p=sg(it.snapshot,"last","price");
   if(p!==null&&p>0) return p; const c=it.history.close||[];
@@ -434,7 +441,9 @@ function rangePos(it){ const hi=sg(it.snapshot,"misc_statistics","high_52w"),
   if(hi===null||lo===null||l===null||hi<=lo) return null;
   return Math.max(0,Math.min(1,(l-lo)/(hi-lo))); }
 function pctFromHigh(it){ let hi=sg(it.snapshot,"misc_statistics","high_52w"), l=lastPrice(it);
-  const c=it.history.close||[];
+  // Ventana en el fallback: con historia de más de un año, el máximo sobre
+  // todas las barras retenidas no es un máximo de 52 semanas.
+  const c=(it.history.close||[]).slice(-(RISK_WINDOW_BARS+1));
   if(hi===null||l===null||hi<=0){ if(c.length<2) return null; hi=Math.max(...c); l=c[c.length-1]; }
   return hi<=0?null:l/hi-1; }
 function ivHv(it){ const iv=sg(it.snapshot,"implied_vol_underlying","annual_iv"),
@@ -461,11 +470,20 @@ function marketModelHolds(r2,n,minT=MIN_BETA_T){
 
 function computeMetrics(it,bm,netLiq,rf){
   const p=it.history.close||[], r=rets(p);
-  const [beta,alpha,r2]=betaAlpha(r,bm,rf);
-  const [uc,dc]=capture(r,bm);
-  const adv=advUsd(it), dd=maxDD(p);
+  /* El momentum lee toda la historia retenida; todo lo etiquetado "1Y" lee
+     exactamente un año de ella. Antes eran lo mismo, porque la descarga
+     retenía justo las 53 barras que mom_12_1 necesita: cero holgura, y una
+     semana faltante tumbaba el 35% del bloque de momentum sin avisar. Con una
+     historia más ancha aparece el riesgo opuesto — volatility_1y, sharpe_1y,
+     beta_1y salen de las barras que haya — así que aquí se recorta a un año.
+     Con menos de un año de barras esto no hace nada. */
+  const rp=p.slice(-(RISK_WINDOW_BARS+1)), rr=rets(rp);
+  const bw=bm.slice(-RISK_WINDOW_BARS);
+  const [beta,alpha,r2]=betaAlpha(rr,bw,rf);
+  const [uc,dc]=capture(rr,bw);
+  const adv=advUsd(it), dd=maxDD(rp);
   const dtl=(adv&&adv>0)?(netLiq*SIZING.base)/(adv*ELIG.participation):null;
-  const holds=marketModelHolds(r2,Math.min(r.length,bm.length));
+  const holds=marketModelHolds(r2,Math.min(rr.length,bw.length));
   const alphaOut=holds?alpha:null;
   const betaOut=holds?beta:null;
   const idioOut=(holds&&r2!==null)?1-r2:null;
@@ -473,9 +491,10 @@ function computeMetrics(it,bm,netLiq,rf){
   return {
     mom_12_1:totalReturn(p,48,4), mom_6m:totalReturn(p,26), mom_3m:totalReturn(p,13),
     pct_from_52w_high:pctFromHigh(it), above_40w_ma:pctAboveMA(p,40), ma_slope_13w:maSlope(p,40,13),
-    sharpe_1y:sharpe(r,rf), sortino_1y:sortino(r,rf), calmar_1y:calmar(p), pct_positive_periods:pctPos(r),
-    volatility_1y:annVol(r), max_drawdown:dd===null?null:Math.abs(dd),
-    downside_deviation:downDev(r), ulcer_index:ulcer(p),
+    sharpe_1y:sharpe(rr,rf), sortino_1y:sortino(rr,rf), calmar_1y:calmar(rp),
+    pct_positive_periods:pctPos(rr),
+    volatility_1y:annVol(rr), max_drawdown:dd===null?null:Math.abs(dd),
+    downside_deviation:downDev(rr), ulcer_index:ulcer(rp),
     capture_spread:captureOut, alpha_annual:alphaOut,
     idio_vol_share:idioOut, beta_1y:betaOut,
     adv_usd_log:(adv&&adv>0)?Math.log10(adv):null, days_to_liquidate:dtl,
@@ -486,14 +505,16 @@ function computeMetrics(it,bm,netLiq,rf){
   };
 }
 function diagnostics(it,bm,rf){
-  const p=it.history.close||[], r=rets(p);
-  const [beta,alpha,r2]=betaAlpha(r,bm,rf); const [uc,dc]=capture(r,bm);
+  // Misma ventana de un año que computeMetrics: estas columnas dicen "1Y".
+  const p=(it.history.close||[]).slice(-(RISK_WINDOW_BARS+1)), r=rets(p);
+  const bm1=bm.slice(-RISK_WINDOW_BARS);
+  const [beta,alpha,r2]=betaAlpha(r,bm1,rf); const [uc,dc]=capture(r,bm1);
   // Mismo test de significancia que aplica el scorer: el reporte nunca imprime
   // un alfa que el modelo se negó a puntuar. Beta se queda — un estimado cerca
   // de cero describe bien al activo — y r2 queda visible para ver por qué.
-  const holds=marketModelHolds(r2,Math.min(r.length,bm.length));
-  return {last_price:lastPrice(it), bars:p.length,
-    return_1y:totalReturn(p,Math.min(52,Math.max(p.length-1,0))),
+  const holds=marketModelHolds(r2,Math.min(r.length,bm1.length));
+  return {last_price:lastPrice(it), bars:(it.history.close||[]).length,
+    return_1y:totalReturn(p,Math.min(RISK_WINDOW_BARS,Math.max(p.length-1,0))),
     volatility:annVol(r), max_drawdown:maxDD(p), beta,
     alpha_annual:holds?alpha:null, r_squared:r2,
     upside_capture:holds?uc:null, downside_capture:holds?dc:null,

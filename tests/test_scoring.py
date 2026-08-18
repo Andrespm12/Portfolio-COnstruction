@@ -307,6 +307,80 @@ def test_excludes_leveraged_and_income_products():
 _MARKET_SENSITIVITY = ("beta_1y", "alpha_annual", "capture_spread", "idio_vol_share")
 
 
+def test_extra_history_changes_nothing():
+    """
+    Retaining more bars must be margin, not a redefinition.
+
+    The download now keeps 60 weekly bars where the engine's longest metric
+    needs 53, so ``mom_12_1`` survives a missing Friday instead of silently
+    returning None and dropping 35% of the momentum block. The hazard that
+    creates is the mirror image: every "1Y" statistic is computed from whatever
+    bars are present, so the extra history would quietly turn each of them into
+    a 14-month figure while the label, the report column and the documentation
+    all still said one year.
+
+    The guarantee this test pins down is that the two histories -- 60 bars, and
+    that same series truncated to its last 53 -- produce *identical* metrics.
+    If any statistic silently widens with the window, this fails.
+    """
+    bench_long = make_series(n=60, drift=0.004, vol=0.02, seed=61)
+    series_long = make_correlated(bench_long, beta=1.2, alpha=0.001,
+                                  idio_vol=0.012, seed=62)
+
+    long_inst = make_instrument("LONG", series_long, **varied(1))
+    short_inst = make_instrument("SHORT", series_long[-53:], **varied(1))
+    short_inst["history"]["volume"] = long_inst["history"]["volume"][-53:]
+
+    bench_rets_long = simple_returns(bench_long)
+    bench_rets_short = simple_returns(np.asarray(bench_long)[-53:])
+
+    a = compute_metrics(long_inst, bench_rets_long, net_liq=1e7,
+                        participation=0.2, base_position_weight=0.03)
+    b = compute_metrics(short_inst, bench_rets_short, net_liq=1e7,
+                        participation=0.2, base_position_weight=0.03)
+
+    drifted = []
+    for key in sorted(a):
+        x, y = a[key], b[key]
+        if x is None and y is None:
+            continue
+        if x is None or y is None or abs(float(x) - float(y)) > 1e-9:
+            drifted.append(f"{key}: 60 bars {x} vs 53 bars {y}")
+    assert not drifted, "metrics changed with history length: " + "; ".join(drifted)
+    assert a["mom_12_1"] is not None, "the fixture never computed momentum"
+    print(f"PASS all {len(a)} metrics identical on 60 bars and on the same "
+          f"series cut to 53")
+
+
+def test_momentum_survives_a_missing_bar():
+    """
+    The failure the wider window exists to prevent.
+
+    ``mom_12_1`` is a 48-week return skipping the most recent 4, so it needs 53
+    observations. At exactly 53 retained bars there is no slack: lose one and
+    the model's highest-weighted metric disappears without a word in the output.
+    """
+    bench = make_series(n=60, drift=0.004, vol=0.02, seed=63)
+    series = make_correlated(bench, beta=1.0, seed=64)
+
+    tight = make_instrument("TIGHT", series[-53:][:-1])  # 52 bars: one short
+    roomy = make_instrument("ROOMY", series[:-1])        # 59 bars: still fine
+
+    tight_m = compute_metrics(tight, simple_returns(bench), net_liq=1e7,
+                              participation=0.2, base_position_weight=0.03)
+    roomy_m = compute_metrics(roomy, simple_returns(bench), net_liq=1e7,
+                              participation=0.2, base_position_weight=0.03)
+
+    assert tight_m["mom_12_1"] is None, (
+        "fixture does not reproduce the shortfall it is testing"
+    )
+    assert roomy_m["mom_12_1"] is not None, (
+        "the wider window still lost momentum to a single missing bar"
+    )
+    print("PASS one missing week kills mom_12_1 at 53 retained bars, "
+          "survives at 60")
+
+
 def test_market_model_significance_threshold():
     """
     The floor is the conventional t >= 2 on beta, evaluated at the sample size

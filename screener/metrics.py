@@ -34,6 +34,14 @@ import numpy as np
 
 from .config import PERIODS_PER_YEAR, RISK_FREE_RATE
 
+#: Return observations behind every statistic labelled "1Y".
+#:
+#: Held separate from however many bars the download retains. The retained
+#: history has to be longer than this so that ``mom_12_1`` (48-week lookback
+#: skipping 4) has room to spare, and without an explicit window the extra bars
+#: would silently stretch every "1Y" risk figure past a year.
+RISK_WINDOW_BARS = PERIODS_PER_YEAR
+
 
 # --------------------------------------------------------------------------
 # Safe extraction helpers
@@ -368,8 +376,11 @@ def turnover_stability(instrument: dict) -> float | None:
 
     Names whose liquidity appears only in bursts (earnings, index events) are
     penalized: average ADV overstates the depth available on an ordinary day.
+
+    Windowed to a year like every other statistic here, so that retaining extra
+    history for ``mom_12_1``'s benefit cannot change what this measures.
     """
-    vols = _volumes(instrument)
+    vols = _volumes(instrument)[-RISK_WINDOW_BARS:]
     if vols.size < 8:
         return None
     mean = float(np.mean(vols))
@@ -416,7 +427,9 @@ def pct_from_52w_high(instrument: dict) -> float | None:
     hi = snap_get(snap, "misc_statistics", "high_52w")
     last = last_price(instrument)
     if hi is None or last is None or hi <= 0:
-        closes = _closes(instrument)
+        # Window the fallback: with a history longer than a year, the running
+        # max over every retained bar is not a 52-week high.
+        closes = _closes(instrument)[-(RISK_WINDOW_BARS + 1):]
         if closes.size < 2:
             return None
         hi, last = float(np.max(closes)), float(closes[-1])
@@ -470,8 +483,28 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
     prices = _closes(instrument)
     rets = simple_returns(prices)
 
-    beta, alpha, r2 = beta_alpha(rets, bench_returns, rf=rf)
-    up_cap, down_cap = capture_ratios(rets, bench_returns)
+    # Momentum reads the full retained history; every statistic labelled "1Y"
+    # reads exactly one year of it.
+    #
+    # These used to be the same thing, because the download retained exactly
+    # the 53 bars `mom_12_1` needs and nothing more. That left the model's
+    # highest-weighted momentum metric with zero slack: one missing week --- a
+    # holiday, a data gap, a late file --- and `total_return(lookback=48,
+    # skip=4)` returns None, dropping 35% of the momentum block without saying
+    # so. The history is now wider than the minimum, which fixes that but
+    # creates the opposite hazard: `volatility_1y`, `sharpe_1y`, `beta_1y` and
+    # the rest are computed from whatever bars are present, so a wider window
+    # would quietly turn every "1Y" figure into a 14-month one while the label,
+    # the report column and the documentation all still said one year.
+    #
+    # Windowing here is a no-op when fewer than a year of bars exist, so short
+    # histories behave exactly as before.
+    risk_prices = prices[-(RISK_WINDOW_BARS + 1):]
+    risk_rets = simple_returns(risk_prices)
+    bench_window = np.asarray(bench_returns, dtype=float)[-RISK_WINDOW_BARS:]
+
+    beta, alpha, r2 = beta_alpha(risk_rets, bench_window, rf=rf)
+    up_cap, down_cap = capture_ratios(risk_rets, bench_window)
     capture_spread = (up_cap - down_cap) if (up_cap is not None and down_cap is not None) else None
     idio = (1.0 - r2) if r2 is not None else None
 
@@ -501,13 +534,13 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
     # missing input, and the name is ranked on the dimensions it can actually
     # be measured on rather than on a regression against an index it does not
     # track.
-    if not market_model_holds(r2, int(min(rets.size, bench_returns.size))):
+    if not market_model_holds(r2, int(min(risk_rets.size, bench_window.size))):
         beta = alpha = capture_spread = idio = None
 
     adv = adv_usd(instrument)
     target_position_usd = net_liq * base_position_weight
     dtl = days_to_liquidate(adv, target_position_usd, participation)
-    vol = annualized_volatility(rets)
+    vol = annualized_volatility(risk_rets)
 
     return {
         # Momentum & trend
@@ -517,16 +550,17 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
         "pct_from_52w_high": pct_from_52w_high(instrument),
         "above_40w_ma": pct_above_ma(prices, 40),
         "ma_slope_13w": ma_slope(prices, window=40, lookback=13),
-        # Risk-adjusted return
-        "sharpe_1y": sharpe_ratio(rets, rf=rf),
-        "sortino_1y": sortino_ratio(rets, rf=rf),
-        "calmar_1y": calmar_ratio(prices),
-        "pct_positive_periods": pct_positive(rets),
-        # Volatility & drawdown
+        # Risk-adjusted return (one year of bars, see risk_prices above)
+        "sharpe_1y": sharpe_ratio(risk_rets, rf=rf),
+        "sortino_1y": sortino_ratio(risk_rets, rf=rf),
+        "calmar_1y": calmar_ratio(risk_prices),
+        "pct_positive_periods": pct_positive(risk_rets),
+        # Volatility & drawdown (same one-year window)
         "volatility_1y": vol,
-        "max_drawdown": abs(max_drawdown(prices)) if max_drawdown(prices) is not None else None,
-        "downside_deviation": downside_deviation(rets),
-        "ulcer_index": ulcer_index(prices),
+        "max_drawdown": (abs(max_drawdown(risk_prices))
+                         if max_drawdown(risk_prices) is not None else None),
+        "downside_deviation": downside_deviation(risk_rets),
+        "ulcer_index": ulcer_index(risk_prices),
         # Market sensitivity
         "capture_spread": capture_spread,
         "alpha_annual": alpha,
@@ -557,17 +591,23 @@ def diagnostics(instrument: dict, bench_returns: np.ndarray,
     ``r_squared`` is reported either way, so the reason is visible.
     """
     prices = _closes(instrument)
-    rets = simple_returns(prices)
-    beta, alpha, r2 = beta_alpha(rets, bench_returns, rf=rf)
-    up_cap, down_cap = capture_ratios(rets, bench_returns)
-    if not market_model_holds(r2, int(min(rets.size, bench_returns.size))):
+    # Same one-year window as compute_metrics, for the same reason: these feed
+    # report columns headed "1Y".
+    risk_prices = prices[-(RISK_WINDOW_BARS + 1):]
+    rets = simple_returns(risk_prices)
+    bench_window = np.asarray(bench_returns, dtype=float)[-RISK_WINDOW_BARS:]
+    beta, alpha, r2 = beta_alpha(rets, bench_window, rf=rf)
+    up_cap, down_cap = capture_ratios(rets, bench_window)
+    if not market_model_holds(r2, int(min(rets.size, bench_window.size))):
         alpha = up_cap = down_cap = None
-    mdd = max_drawdown(prices)
+    mdd = max_drawdown(risk_prices)
     return {
         "last_price": last_price(instrument),
         "bars": int(prices.size),
-        "return_1y": total_return(prices, lookback=min(52, max(prices.size - 1, 0))),
-        "ann_return": annualized_return(prices),
+        "return_1y": total_return(risk_prices,
+                                  lookback=min(RISK_WINDOW_BARS,
+                                               max(risk_prices.size - 1, 0))),
+        "ann_return": annualized_return(risk_prices),
         "volatility": annualized_volatility(rets),
         "max_drawdown": mdd,
         "beta": beta,

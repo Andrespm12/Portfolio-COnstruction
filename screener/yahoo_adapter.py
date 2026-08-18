@@ -69,9 +69,21 @@ BARS_52W = 252
 BARS_ADV = 90
 BARS_HV = 30
 
-#: Weekly bars retained. The engine's risk stats are 1-year statistics; 53
-#: bars is one year of Friday closes plus the stub week.
-DEFAULT_WEEKS = 53
+#: Weekly bars retained.
+#:
+#: Deliberately more than the engine needs. ``mom_12_1`` is the single
+#: highest-weighted metric in the model (0.35 of the momentum block) and is a
+#: 48-week return skipping the most recent 4, so it needs 53 observations
+#: exactly. Retaining exactly 53 left it with no slack at all: one missing
+#: Friday -- a holiday, a halt, a late file, a name that listed mid-window --
+#: and ``total_return`` returns None, dropping a third of the momentum block
+#: with nothing in the output to say it happened.
+#:
+#: 60 gives seven weeks of margin. The extra bars do not stretch the "1Y" risk
+#: statistics, because :data:`screener.metrics.RISK_WINDOW_BARS` windows those
+#: to a year explicitly -- which is the other half of this change and the part
+#: that would have gone wrong silently.
+DEFAULT_WEEKS = 60
 
 #: Minimum weekly observations before an instrument is worth emitting at all.
 #: Below the engine's ``min_history_bars`` the name would be screened out
