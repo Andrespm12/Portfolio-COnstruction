@@ -526,8 +526,8 @@ def compute_metrics(instrument: dict, bench_returns: np.ndarray,
     # of four does not reduce the block's influence on the composite -- it just
     # changes which metrics decide it. Uncorrelated names then sweep both
     # survivors by construction and still top the block, now with no return
-    # term anywhere in it: on the IBKR snapshot that scored TLT fourth-highest
-    # on "alpha quality" in a year it lost 4.9%.
+    # term anywhere in it: on the IBKR snapshot that ranked TLT fifth on
+    # "alpha quality" in a year it lost 4.9%, and DBA second on a +2.0% return.
     #
     # Withholding the block is the honest outcome. The composite renormalizes
     # over the remaining blocks, which is the same machinery that handles any

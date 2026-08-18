@@ -29,6 +29,18 @@ Five deliverables:
 [open the notebook in Colab](https://colab.research.google.com/github/Andrespm12/Portfolio-COnstruction/blob/claude/stock-picking-screening-metrics-b0b2dh/notebooks/screener_colab.ipynb)
 → *Runtime → Run all*.
 
+**The whole model, no notebook:**
+
+```bash
+pip install pandas numpy yfinance openpyxl cvxpy scikit-learn
+python3 scripts/correr_modelo.py                  # screen, views, diagnostics, portfolio
+python3 scripts/correr_modelo.py --perfil Agresivo --ancla mercado
+python3 scripts/correr_modelo.py --tickers SPY,QQQ,TLT,GLD,AAPL --con-nombres
+```
+
+Same package, same order, same output as the notebook — `screening.xlsx` plus
+the proposals JSON under `propuestas/`. `--help` lists every flag.
+
 **Locally:**
 
 ```bash
@@ -45,6 +57,8 @@ python3 tests/test_profiles.py           # risk profiles + account-independence
 python3 tests/test_black_litterman.py    # BL bridge, against CCI's own solver
 python3 tests/test_optimizer.py          # posterior, regulatory bands, audit
 python3 tests/test_notebook.py           # notebook drift + full execution
+python3 tests/test_diagnostics.py        # block overlap + view saturation
+python3 tests/test_correr_modelo.py      # the runner script, end to end
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
@@ -475,8 +489,8 @@ credited a "+70% alpha" against a +73% total return — the same performance pai
 for twice, under a label that reads as skill. Keeping only beta and idiosyncratic
 share is worse than it sounds, since both are functions of R² and block scores
 renormalize: uncorrelated names then sweep both survivors with no return term
-left anywhere, which ranked TLT fourth-highest on "alpha quality" in a year it
-lost 4.9%.
+left anywhere, which ranked TLT fifth on "alpha quality" in a year it lost
+4.9%, and DBA second on a +2.0% return.
 
 ### One year means one year
 
@@ -601,6 +615,7 @@ web/
 notebooks/
   screener_colab.ipynb       Built artifact (engine + Yahoo pull) — open this in Colab
 scripts/
+  correr_modelo.py           The whole chain in one command, no notebook
   build_market_data.py       Captured IBKR pull -> data/*.json
   build_page.py              template.html + data -> web/screener.html
   build_notebook.py          screener/ -> notebooks/screener_colab.ipynb

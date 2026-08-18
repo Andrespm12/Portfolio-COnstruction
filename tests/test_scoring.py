@@ -449,9 +449,10 @@ def test_uncorrelated_loser_is_not_rewarded_for_being_uncorrelated():
     """
     The mis-ranking this fixes, stated as an outcome rather than a mechanism.
 
-    On the IBKR snapshot the old model scored TLT fourth-highest on "Market
-    Sensitivity & Alpha Quality" in a year it lost 4.9%, because beta near zero
-    and idiosyncratic share near one are both just 'this does not track SPY'.
+    On the IBKR snapshot the old model ranked TLT fifth on "Market Sensitivity
+    & Alpha Quality" in a year it lost 4.9%, and DBA second on a +2.0% return,
+    because beta near zero and idiosyncratic share near one are both just
+    'this does not track SPY'.
     A name that lost money must not out-score a name that made money on a block
     whose stated purpose is alpha quality.
     """
