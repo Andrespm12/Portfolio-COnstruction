@@ -26,6 +26,18 @@ each is a behaviour change worth stating plainly:
    An audit trail that cannot fail is worse than none: it leaves a document
    claiming compliance that nothing verified.
 
+A fourth change comes out of the external model review, and is the largest of
+the four in its effect on the final weights:
+
+4. **The equilibrium anchor.** ``pi = lambda * Sigma * w`` passes whatever
+   ``w`` it is given straight through, and with a handful of views over a few
+   dozen assets the anchor decides roughly three quarters of the book. Anchoring
+   on market capitalization normalized against ETF AUM mixes incompatible units
+   and lands near 95% equity, which no mandate here permits, so the bands ended
+   up doing the asset allocation and the model was left arguing with them.
+   :func:`policy_weights` anchors on the mandate's own neutral portfolio
+   instead, and :func:`market_weights` is kept only for comparison.
+
 The views themselves come from :mod:`screener.black_litterman`, not from CCI's
 hybrid signal combiner, which mixes three signals on incompatible scales and
 hands a fully neutral asset a -1.4% expected return.
@@ -92,6 +104,11 @@ def market_weights(caps: Mapping[str, float],
     """
     Normalized market-capitalization weights, and the names that were missing.
 
+    Kept for comparison, and no longer the recommended anchor: see
+    :func:`policy_weights` for why normalizing single-stock market cap against
+    ETF assets under management is the wrong neutral portfolio for a
+    band-constrained mandate. Use this to show what changed, not to allocate.
+
     Returns the missing list rather than silently substituting a constant. CCI's
     implementation falls back to ``1e9`` on any lookup failure, which feeds
     straight into the equilibrium: an $80bn ETF that failed to download would
@@ -114,9 +131,208 @@ def market_weights(caps: Mapping[str, float],
     return series / series.sum(), missing
 
 
+#: Classes the ``max_equity_total`` ceiling applies to.
+EQUITY_CLASSES: tuple[str, ...] = (CLASE_EQUITY, CLASE_ETF_RV)
+
+
+def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
+                   caps: Mapping[str, float] | None = None,
+                   targets: Mapping[str, float] | None = None,
+                   total: float = 1.0) -> tuple[pd.Series, list[str]]:
+    """
+    The mandate's own neutral portfolio, for use as the Black-Litterman anchor.
+
+    Why not market-capitalization weights
+    -------------------------------------
+    ``pi = lambda * Sigma * w`` is a linear map: whatever ``w`` is handed to it
+    *is* the neutral portfolio, and with a handful of views over a few dozen
+    assets it determines most of the answer. Measured on this system, views move
+    about 27% of the book -- the other ~73% is the anchor. So the anchor is not
+    a technicality, it is the largest single decision in the allocation, and
+    :func:`market_weights` gets it wrong here for two reasons.
+
+    *The units do not match.* It normalizes single-stock market capitalization
+    against ETF assets under management. A company's market cap is the value of
+    the company; a fund's AUM is how much money happens to sit in that wrapper,
+    and for an equity ETF it double-counts shares already priced elsewhere in
+    the basket. Dividing one by the sum of both is not a market portfolio in any
+    sense the CAPM would recognize.
+
+    *It ignores the mandate.* Market-cap weighting a basket of mega-caps and
+    bond ETFs anchors near 95% equity. A Moderado mandate caps equity at 60%.
+    The optimizer then spends its whole budget dragging the solution back to the
+    ceiling, so the allocation is decided by the constraint rather than by the
+    model, and inside equity the weights are just market cap. Under that setup
+    the screener's ranking barely reaches the portfolio.
+
+    What this does instead
+    ----------------------
+    Cross-class allocation comes from policy; within-class allocation comes from
+    market value, where comparing market values is actually meaningful:
+
+    1. Each asset class present takes the midpoint of its regulatory band.
+    2. Midpoints are renormalized over the classes actually in the basket --
+       CCI's bands are ceilings and sum well above 1.0, so they are read as
+       relative preferences among what is held.
+    3. Total equity is scaled to respect ``max_equity_total``, with the shortfall
+       redistributed across the non-equity classes. An anchor sitting outside
+       the feasible set is the defect being fixed; it must not be reintroduced
+       here.
+    4. Inside each class, names split by market cap when available and equally
+       otherwise. Missing caps degrade one class's split rather than
+       mis-anchoring the whole portfolio.
+
+    With no views, reverse optimization on this anchor returns this portfolio.
+    That is the property that makes it the right neutral: the model's output
+    with nothing to say is the mandate's own strategic allocation, and views
+    tilt away from it.
+
+    A stand-in, and labelled as one
+    -------------------------------
+    **Band midpoints are not CCI's strategic asset allocation.** A real SAA is
+    an Investment Committee decision, and CCI's documents supply bands, not
+    targets. The midpoint is a defensible reading of a band and a far better
+    anchor than mixed market caps, but it is still an inference. Pass ``targets``
+    to supply the committee's real numbers; they are used as given (renormalized
+    to ``total``) and the equity ceiling is still enforced.
+
+    One consequence of renormalizing follows directly and is worth knowing
+    before reading the output: **the anchor depends on which classes are in the
+    basket.** Midpoints across CCI's classes sum well above 1.0, so the
+    normalization divides by whatever is present. Screen a basket spanning seven
+    classes and neutral equity comes out near 19%; screen the same mandate with
+    only equity and bonds in the basket and it comes out far higher, with no
+    change in policy. That is honest -- the optimizer can only hold what it is
+    given -- but it means the neutral portfolio moves with basket construction,
+    which a genuine SAA would not. Supplying ``targets`` removes the effect
+    entirely, and is the reason the parameter exists.
+
+    Returns the weights and a list of notes describing every substitution made.
+    """
+    tickers = list(asset_types)
+    if not tickers:
+        raise ValueError("No hay activos para anclar el equilibrio.")
+
+    notes: list[str] = []
+    classes = {t: classify_for_bands(t, asset_types[t]) for t in tickers}
+    present = sorted(set(classes.values()))
+    bands = bands_for(strategy)
+
+    if targets is not None:
+        unknown = set(targets) - set(present)
+        if unknown:
+            notes.append(
+                f"Objetivos de política para clases que no están en la cesta, "
+                f"ignorados: {sorted(unknown)}."
+            )
+        class_target = {c: float(targets.get(c, 0.0)) for c in present}
+        missing = [c for c in present if c not in targets]
+        if missing:
+            notes.append(
+                f"Sin objetivo explícito para {sorted(missing)}; quedan en 0 en "
+                "el ancla, así que el optimizador solo los tomará si una view "
+                "los empuja."
+            )
+    else:
+        class_target = {}
+        for clase in present:
+            band = bands.get(clase)
+            if band is None:
+                class_target[clase] = 0.0
+                notes.append(
+                    f"La clase {clase} no tiene banda declarada, así que no "
+                    "tiene punto medio y queda en 0 en el ancla. Sin banda no "
+                    "hay política que leer: confirmar con Compliance."
+                )
+            else:
+                class_target[clase] = (float(band[0]) + float(band[1])) / 2.0
+        notes.append(
+            "Ancla de política construida con los puntos medios de las bandas. "
+            "Eso es una lectura de los límites, NO la asignación estratégica "
+            "del Comité de Inversiones, que no está en los documentos."
+        )
+
+    gross = sum(class_target.values())
+    if gross <= 0:
+        raise ValueError(
+            f"Los objetivos de política suman {gross}; no se puede anclar el "
+            "equilibrio en una cartera vacía."
+        )
+    class_target = {c: v / gross * total for c, v in class_target.items()}
+
+    # The ceiling on total equity, applied to the anchor itself.
+    #
+    # Deliberately NOT scaled by `total`. `optimize` constrains
+    # `sum(w[equity]) <= max_equity_total` in absolute weight, while the gross
+    # budget may exceed 1.0 under leverage -- "máximo 60% en renta variable"
+    # reads against the portfolio's value, not against gross exposure. Scaling
+    # the ceiling here by the budget would make the anchor more permissive than
+    # the solver and could place it outside the feasible set, which is the exact
+    # defect this function exists to remove.
+    max_equity = float(REGULACIONES[strategy]["max_equity_total"])
+    equity_now = sum(v for c, v in class_target.items() if c in EQUITY_CLASSES)
+    other_now = total - equity_now
+    if equity_now > max_equity + 1e-12:
+        if other_now <= 1e-12:
+            notes.append(
+                f"La cesta es toda renta variable, así que el ancla no puede "
+                f"respetar el techo de {max_equity:.0%}. La cesta no es "
+                "compatible con el mandato."
+            )
+        else:
+            scale_eq = max_equity / equity_now
+            scale_other = (total - max_equity) / other_now
+            class_target = {
+                c: v * (scale_eq if c in EQUITY_CLASSES else scale_other)
+                for c, v in class_target.items()
+            }
+            notes.append(
+                f"Renta variable neutral bajada de {equity_now:.0%} a "
+                f"{max_equity:.0%} (peso absoluto) por el techo del mandato; "
+                "el resto se repartió entre las demás clases."
+            )
+
+    # Within each class, split by market value when it is comparable.
+    caps = {k.upper(): v for k, v in (caps or {}).items()}
+
+    def usable_cap(ticker: str) -> float | None:
+        """A positive, finite market value, or None. ``None`` is a real input
+        here -- callers pass a caps mapping straight from a download that may
+        have failed for some names."""
+        raw = caps.get(ticker.upper())
+        if raw is None:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if np.isfinite(value) and value > 0 else None
+
+    weights: dict[str, float] = {}
+    for clase in present:
+        members = [t for t in tickers if classes[t] == clase]
+        budget = class_target[clase]
+        usable = {t: c for t in members if (c := usable_cap(t)) is not None}
+        if len(usable) == len(members) and members:
+            scale = sum(usable.values())
+            for t in members:
+                weights[t] = budget * usable[t] / scale
+        else:
+            if members and usable:
+                notes.append(
+                    f"Capitalización faltante en {clase} para "
+                    f"{sorted(set(members) - set(usable))}; esa clase se reparte "
+                    "en partes iguales."
+                )
+            for t in members:
+                weights[t] = budget / len(members) if members else 0.0
+
+    return pd.Series(weights, dtype=float).reindex(tickers).fillna(0.0), notes
+
+
 def implied_equilibrium(weights: pd.Series, covariance: pd.DataFrame,
                         risk_aversion: float = RISK_AVERSION) -> pd.Series:
-    """Reverse optimization: ``pi = lambda * Sigma * w_mkt``."""
+    """Reverse optimization: ``pi = lambda * Sigma * w_anchor``."""
     common = [t for t in covariance.columns if t in weights.index]
     return risk_aversion * covariance.loc[common, common].dot(weights[common])
 

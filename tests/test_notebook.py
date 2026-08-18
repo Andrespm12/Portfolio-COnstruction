@@ -336,6 +336,40 @@ def test_cells_execute() -> None:
           f"{cartera.gross_exposure:.4f} > {budget:.4f}")
     check("the views reached the optimizer in memory, with no file in between",
           "views" in namespace and len(namespace["views"]) > 0)
+
+    # ---- the equilibrium anchor -------------------------------------------
+    # The anchor decides most of the book, so verify the notebook actually
+    # runs on the policy one rather than merely offering it as an option.
+    import pandas as _pd
+
+    from screener.cci_regulation import classify_for_bands as _classify
+    from screener.optimizer import EQUITY_CLASSES
+
+    check("the notebook defaults to the mandate's own neutral portfolio",
+          namespace.get("ANCLA") == "politica", f"got {namespace.get('ANCLA')!r}")
+
+    anchor = namespace["pesos_ancla"]
+    strategy = namespace["ESTRATEGIA_CCI"]
+    anchor_classes = _pd.Series(
+        {t: _classify(t, namespace["tipos_todos"].get(t, "ETF")) for t in anchor.index}
+    )
+    by_class = anchor.groupby(anchor_classes).sum()
+
+    check("the anchor spends exactly the leverage budget",
+          abs(float(anchor.sum()) - budget) < 1e-9,
+          f"{float(anchor.sum()):.6f} vs {budget:.6f}")
+    check("the anchor is long-only", bool((anchor >= -1e-12).all()))
+
+    anchor_equity = sum(float(by_class.get(c, 0.0)) for c in EQUITY_CLASSES)
+    ceiling = REGULACIONES[strategy]["max_equity_total"]
+    check("the anchor starts inside the mandate rather than on its ceiling",
+          anchor_equity <= ceiling + 1e-9,
+          f"renta variable neutral {anchor_equity:.4f} > techo {ceiling:.4f}")
+    check("the anchor spans the classes the basket actually holds",
+          set(by_class.index) == set(anchor_classes.unique()))
+    check("the notebook states that band midpoints are not a real SAA",
+          any("Comité de Inversiones" in n for n in namespace["_notas_ancla"]),
+          str(namespace.get("_notas_ancla")))
     check("the Cartera sheet lists the held positions",
           wb["Cartera"].max_row == int((cartera.weights > 0).sum()) + 1)
     # Regression: an earlier version wrote a blank Cartera tab when the

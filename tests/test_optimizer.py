@@ -33,9 +33,9 @@ from screener.cci_regulation import (  # noqa: E402
     classify_for_bands, unbanded_classes,
 )
 from screener.optimizer import (  # noqa: E402
-    LEVERAGE_BUFFER, allocation_table, audit_bands, feasibility_report,
-    implied_equilibrium, market_weights, optimize, posterior, select_basket,
-    shrunk_covariance,
+    EQUITY_CLASSES, LEVERAGE_BUFFER, allocation_table, audit_bands,
+    feasibility_report, implied_equilibrium, market_weights, optimize,
+    policy_weights, posterior, select_basket, shrunk_covariance,
 )
 from screener.profiles import profile_for_strategy  # noqa: E402
 from screener.run_screen import run_standalone  # noqa: E402
@@ -125,6 +125,218 @@ def test_market_weights_report_missing() -> None:
         check("no caps at all raises", False, "no exception")
     except ValueError:
         check("no caps at all raises", True)
+
+
+def test_policy_anchor_is_self_consistent() -> None:
+    """
+    The property that makes an anchor an anchor.
+
+    Reverse optimization is defined so that ``pi = lambda * Sigma * w`` fed back
+    into the same mean-variance problem returns ``w``. If the policy anchor did
+    not round-trip, it would not be the model's neutral portfolio -- it would
+    just be another input the optimizer argues with, which is the complaint
+    against the market-cap anchor in the first place.
+    """
+    _, scored, cov, _, types, caps = world("Moderado")
+    types = {t: types[t] for t in cov.columns}
+    budget = REGULACIONES["Moderado"]["leverage_max"] * LEVERAGE_BUFFER
+
+    anchor, _ = policy_weights(types, "Moderado", caps=caps, total=budget)
+    solved = optimize(implied_equilibrium(anchor, cov), cov, types, "Moderado")
+
+    check("optimizing the policy anchor with no views is feasible", solved.feasible,
+          solved.status)
+    drift = float((solved.weights - anchor.reindex(solved.weights.index)).abs().max())
+    check("with no views the solution IS the anchor", drift < 1e-3,
+          f"max drift {drift:.6f}")
+
+
+def test_policy_anchor_obeys_every_constraint_the_solver_applies() -> None:
+    """
+    The anchor must sit inside the feasible set, not merely near it.
+
+    An anchor outside the bands is the defect being fixed: the optimizer spends
+    its budget dragging the solution back to the boundary, so the constraint
+    decides the allocation and the model only decides what is left. The equity
+    ceiling is the specific trap -- ``optimize`` applies ``max_equity_total`` as
+    an absolute weight while gross exposure may exceed 1.0 under leverage, so an
+    anchor that scaled the ceiling by the budget would be quietly more
+    permissive than the solver.
+    """
+    for strategy in ("Conservador_Defensivo", "Conservador", "Moderado", "Agresivo"):
+        _, scored, cov, _, types, caps = world(strategy)
+        types = {t: types[t] for t in cov.columns}
+        budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+        anchor, _ = policy_weights(types, strategy, caps=caps, total=budget)
+        classes = pd.Series({t: classify_for_bands(t, types[t]) for t in anchor.index})
+        by_class = anchor.groupby(classes).sum()
+
+        check(f"{strategy}: anchor is long-only", bool((anchor >= -1e-12).all()))
+        check(f"{strategy}: anchor spends exactly the budget",
+              abs(anchor.sum() - budget) < 1e-9, f"{anchor.sum():.6f} vs {budget:.6f}")
+
+        equity = sum(by_class.get(c, 0.0) for c in EQUITY_CLASSES)
+        ceiling = REGULACIONES[strategy]["max_equity_total"]
+        check(f"{strategy}: anchor respects the absolute equity ceiling",
+              equity <= ceiling + 1e-9, f"{equity:.4f} > {ceiling:.4f}")
+
+        breaches = [
+            f"{clase} {by_class[clase]:.4f} outside [{lo}, {hi}]"
+            for clase, (lo, hi) in bands_for(strategy).items()
+            if clase in by_class.index and not (lo - 1e-9 <= by_class[clase] <= hi + 1e-9)
+        ]
+        check(f"{strategy}: anchor breaches no class band", not breaches, str(breaches))
+
+
+def test_policy_anchor_frees_the_equity_ceiling() -> None:
+    """
+    The finding, reproduced and then removed.
+
+    Market-cap weighting a basket of mega-caps and a few bond ETFs anchors near
+    all-equity, so the solved portfolio sits *exactly* on the mandate's equity
+    ceiling and the bands have made the asset-allocation decision. The policy
+    anchor starts inside the mandate, so the ceiling stops being the thing that
+    determines the answer.
+    """
+    strategy = "Conservador"
+    _, scored, cov, _, types, caps = world(strategy)
+    types = {t: types[t] for t in cov.columns}
+    budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+    ceiling = REGULACIONES[strategy]["max_equity_total"]
+    classes = pd.Series({t: classify_for_bands(t, types[t]) for t in cov.columns})
+
+    def solved_equity(anchor):
+        alloc = optimize(implied_equilibrium(anchor, cov), cov, types, strategy)
+        by_class = alloc.weights.groupby(classes).sum()
+        return sum(by_class.get(c, 0.0) for c in EQUITY_CLASSES), alloc
+
+    mkt_anchor, _ = market_weights(caps, list(cov.columns))
+    pol_anchor, _ = policy_weights(types, strategy, caps=caps, total=budget)
+    mkt_equity, _ = solved_equity(mkt_anchor)
+    pol_equity, pol_alloc = solved_equity(pol_anchor)
+
+    check("market-cap anchor pins the solution to the equity ceiling",
+          abs(mkt_equity - ceiling) < 1e-4, f"{mkt_equity:.4f} vs {ceiling:.4f}")
+    check("policy anchor leaves the ceiling slack",
+          pol_equity < ceiling - 1e-3,
+          f"{pol_equity:.4f} still at the {ceiling:.0%} ceiling")
+    check("the policy solution is still feasible", pol_alloc.feasible, pol_alloc.status)
+    print(f"    renta variable resuelta: ancla mercado {mkt_equity:.1%} "
+          f"(techo {ceiling:.0%}) vs ancla política {pol_equity:.1%}")
+
+
+def test_policy_anchor_splits_within_class_by_market_value() -> None:
+    """Cross-class from policy, within-class from market cap."""
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF", "IEF": "ETF"}
+    caps = {"AAPL": 3e12, "MSFT": 1e12, "TLT": 5e10, "IEF": 5e10}
+    anchor, _ = policy_weights(types, "Moderado", caps=caps)
+
+    check("larger cap takes the larger share of its class",
+          anchor["AAPL"] > anchor["MSFT"])
+    check("the split is proportional to market value",
+          abs(anchor["AAPL"] / anchor["MSFT"] - 3.0) < 1e-9,
+          f"ratio {anchor['AAPL'] / anchor['MSFT']:.4f}")
+    check("equal caps split equally", abs(anchor["TLT"] - anchor["IEF"]) < 1e-12)
+    check("the anchor sums to one", abs(anchor.sum() - 1.0) < 1e-12)
+
+
+def test_missing_caps_degrade_one_class_only() -> None:
+    """
+    A missing market cap must not mis-anchor the rest of the portfolio.
+
+    This is the same failure mode ``market_weights`` was written to avoid, but
+    contained: without cross-class normalization, a gap in one class falls back
+    to an equal split inside that class and leaves every other class untouched.
+    """
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF", "IEF": "ETF"}
+    full = {"AAPL": 3e12, "MSFT": 1e12, "TLT": 5e10, "IEF": 5e10}
+    gapped = dict(full, MSFT=None)
+
+    a_full, _ = policy_weights(types, "Moderado", caps=full)
+    a_gap, notes = policy_weights(types, "Moderado", caps=gapped)
+
+    check("the class with the gap falls back to an equal split",
+          abs(a_gap["AAPL"] - a_gap["MSFT"]) < 1e-12)
+    check("the other classes are untouched",
+          abs(a_gap["TLT"] - a_full["TLT"]) < 1e-12
+          and abs(a_gap["IEF"] - a_full["IEF"]) < 1e-12)
+    check("the substitution is reported, not silent",
+          any("Capitalización faltante" in n for n in notes), str(notes))
+    check("the anchor still sums to one", abs(a_gap.sum() - 1.0) < 1e-12)
+
+
+def test_policy_anchor_says_the_midpoints_are_not_an_saa() -> None:
+    """
+    Band midpoints are an inference, and must be labelled as one.
+
+    Same discipline as COMMODITY_BANDS: a number this system invented cannot be
+    presented as if it came from CCI's Investment Procedure.
+    """
+    types = {"AAPL": "STOCK", "TLT": "ETF"}
+    _, notes = policy_weights(types, "Moderado")
+    check("the midpoint assumption is disclosed",
+          any("puntos medios" in n and "Comité de Inversiones" in n for n in notes),
+          str(notes))
+
+
+def test_explicit_targets_override_the_midpoints() -> None:
+    """A real strategic allocation, once CCI supplies one, must win."""
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF"}
+    caps = {"AAPL": 1e12, "MSFT": 1e12, "TLT": 1e11}
+    anchor, _ = policy_weights(types, "Moderado", caps=caps,
+                               targets={"Equity": 0.40, "RentaFija_Soberana_IG": 0.60})
+
+    check("the class totals follow the supplied targets",
+          abs(anchor["AAPL"] + anchor["MSFT"] - 0.40) < 1e-12
+          and abs(anchor["TLT"] - 0.60) < 1e-12,
+          f"{anchor.to_dict()}")
+
+    # The ceiling still binds: Moderado permits 60% equity, so a 90% target
+    # must be pulled back rather than trusted.
+    greedy, notes = policy_weights(types, "Moderado", caps=caps,
+                                   targets={"Equity": 0.90,
+                                            "RentaFija_Soberana_IG": 0.10})
+    check("an over-target is pulled back to the mandate's ceiling",
+          abs(greedy["AAPL"] + greedy["MSFT"] - 0.60) < 1e-9,
+          f"equity {greedy['AAPL'] + greedy['MSFT']:.4f}")
+    check("pulling it back is reported",
+          any("techo del mandato" in n for n in notes), str(notes))
+
+
+def test_unbanded_class_gets_no_neutral_weight() -> None:
+    """No band means no policy to read, so the anchor takes no position."""
+    from screener import cci_regulation
+
+    types = {"AAPL": "STOCK", "TLT": "ETF", "WEIRD": "ETF"}
+    original = dict(cci_regulation.ASSET_CLASS)
+    try:
+        cci_regulation.ASSET_CLASS["WEIRD"] = "Clase_Sin_Banda"
+        anchor, notes = policy_weights(types, "Moderado")
+    finally:
+        cci_regulation.ASSET_CLASS.clear()
+        cci_regulation.ASSET_CLASS.update(original)
+
+    check("an unbanded class carries no anchor weight",
+          abs(anchor["WEIRD"]) < 1e-12, f"{anchor['WEIRD']}")
+    check("the anchor still sums to one", abs(anchor.sum() - 1.0) < 1e-12)
+    check("the missing band is reported",
+          any("no tiene banda declarada" in n for n in notes), str(notes))
+
+
+def test_all_equity_basket_reports_rather_than_pretends() -> None:
+    """The anchor cannot respect a 60% ceiling with nothing else to hold."""
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "NVDA": "STOCK"}
+    anchor, notes = policy_weights(types, "Moderado")
+    check("an equity-only basket still produces weights",
+          abs(anchor.sum() - 1.0) < 1e-12)
+    check("the incompatibility with the mandate is stated",
+          any("toda renta variable" in n for n in notes), str(notes))
+
+    try:
+        policy_weights({}, "Moderado")
+        check("an empty basket raises", False, "no exception")
+    except ValueError:
+        check("an empty basket raises", True)
 
 
 def test_equilibrium() -> None:
@@ -549,6 +761,15 @@ def test_feasibility_report_is_quiet_when_reachable() -> None:
 
 def main() -> int:
     for fn in [
+        test_policy_anchor_is_self_consistent,
+        test_policy_anchor_obeys_every_constraint_the_solver_applies,
+        test_policy_anchor_frees_the_equity_ceiling,
+        test_policy_anchor_splits_within_class_by_market_value,
+        test_missing_caps_degrade_one_class_only,
+        test_policy_anchor_says_the_midpoints_are_not_an_saa,
+        test_explicit_targets_override_the_midpoints,
+        test_unbanded_class_gets_no_neutral_weight,
+        test_all_equity_basket_reports_rather_than_pretends,
         test_covariance,
         test_market_weights_report_missing,
         test_equilibrium,

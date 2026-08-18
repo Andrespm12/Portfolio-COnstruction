@@ -677,11 +677,50 @@ def build_cells() -> list[dict]:
         "Aquí no hay archivo de por medio: `views` es una variable de Python "
         "que la celda anterior dejó en memoria, y esta la consume directo.\n",
         "\n",
-        "El equilibrio de mercado (π) sale de capitalización real vía "
-        "optimización inversa, la covarianza usa contracción Ledoit-Wolf sobre "
-        "retornos **diarios** — con ~52 barras semanales y más de 52 nombres la "
-        "matriz sería singular — y la optimización respeta las bandas del "
-        "Procedimiento de Inversión.\n",
+        "La covarianza usa contracción Ledoit-Wolf sobre retornos **diarios** "
+        "— con ~52 barras semanales y más de 52 nombres la matriz sería "
+        "singular — y la optimización respeta las bandas del Procedimiento de "
+        "Inversión.\n",
+        "\n",
+        "### El ancla: de dónde parte la cartera\n",
+        "\n",
+        "`π = λ · Σ · w` es una multiplicación: la `w` que le pases **es** la "
+        "cartera neutral. Con ocho views sobre veintitantos activos, esa `w` "
+        "decide como tres cuartas partes del resultado. Es la decisión más "
+        "grande de toda la asignación, y por eso el parámetro `ANCLA` está "
+        "arriba del todo.\n",
+        "\n",
+        "**`mercado`** era lo que hacía el sistema original: normalizar "
+        "capitalización de acciones contra patrimonio de ETFs. Dos problemas. "
+        "Primero, no son la misma unidad — la capitalización de una empresa es "
+        "lo que vale la empresa; el patrimonio de un ETF es cuánta plata hay "
+        "metida en ese envoltorio, y si el ETF es de renta variable está "
+        "contando otra vez acciones que ya están en la cesta. Segundo, y peor: "
+        "esa cuenta ancla cerca de 95% en renta variable. Ningún mandato de "
+        "aquí permite eso. El resultado es que el optimizador se pasa el "
+        "ejercicio empujando la cartera de vuelta contra el techo, y termina "
+        "pegado exactamente en el límite — o sea, **la banda decide la "
+        "asignación, no el modelo**.\n",
+        "\n",
+        "**`politica`** (lo que corre por defecto) parte de la cartera neutral "
+        "del propio mandato: cada clase en el punto medio de su banda, "
+        "renormalizado sobre las clases que realmente están en la cesta, y con "
+        "el techo de renta variable aplicado al ancla misma. Dentro de cada "
+        "clase el reparto sí es por capitalización, que es donde comparar "
+        "valores de mercado tiene sentido. La propiedad que importa: **sin "
+        "views, el optimizador te devuelve exactamente esta cartera**. Las "
+        "views se desvían de ahí, que es como debe funcionar.\n",
+        "\n",
+        "**Lo que tienes que confirmar:** el punto medio de una banda no es tu "
+        "asignación estratégica. Una asignación estratégica la decide el Comité "
+        "de Inversiones, y tus documentos dan bandas, no objetivos. El punto "
+        "medio es una lectura razonable del límite y es muchísimo mejor ancla "
+        "que capitalización mezclada, pero sigue siendo una inferencia mía. "
+        "Cuando el Comité tenga números reales, se pasan con "
+        "`policy_weights(..., targets={...})` y esto deja de ser un supuesto. "
+        "Ojo también con esto: como los puntos medios se renormalizan sobre las "
+        "clases presentes, el ancla se mueve según cómo quede armada la cesta. "
+        "Pasar `targets` también elimina ese efecto.\n",
         "\n",
         "### Tres arreglos frente al sistema original\n",
         "\n",
@@ -707,9 +746,14 @@ def build_cells() -> list[dict]:
         "# @markdown Menos nombres = covarianza mejor estimada; más = más "
         "diversificación.\n",
         "\n",
+        "# @markdown Cartera neutral de la que parten las views.\n",
+        'ANCLA = "politica"  # @param ["politica", "mercado"]\n',
+        "\n",
         "from screener.optimizer import (implied_equilibrium, market_weights,\n",
-        "                               optimize, posterior, shrunk_covariance,\n",
-        "                               allocation_table, select_basket)\n",
+        "                               optimize, policy_weights, posterior,\n",
+        "                               shrunk_covariance, allocation_table,\n",
+        "                               select_basket, LEVERAGE_BUFFER)\n",
+        "from screener.cci_regulation import REGULACIONES\n",
         "from screener.cci_regulation import classify_for_bands\n",
         "from screener.yahoo_adapter import daily_returns, fetch_market_caps\n",
         "\n",
@@ -733,12 +777,31 @@ def build_cells() -> list[dict]:
         "covarianza = shrunk_covariance(retornos)\n",
         "\n",
         "capitalizaciones = fetch_market_caps(list(covarianza.columns))\n",
-        "pesos_mkt, sin_cap = market_weights(capitalizaciones,\n",
-        "                                    list(covarianza.columns))\n",
-        "if sin_cap:\n",
-        "    print(f'Sin capitalizacion, excluidos del equilibrio: {sin_cap}')\n",
+        "_tipos_cesta = {t: tipos_todos.get(t, 'ETF') for t in covarianza.columns}\n",
+        "_presupuesto = (REGULACIONES[ESTRATEGIA_CCI]['leverage_max']\n",
+        "                * LEVERAGE_BUFFER)\n",
         "\n",
-        "pi = implied_equilibrium(pesos_mkt, covarianza)\n",
+        "if ANCLA == 'politica':\n",
+        "    pesos_ancla, _notas_ancla = policy_weights(\n",
+        "        _tipos_cesta, ESTRATEGIA_CCI, caps=capitalizaciones,\n",
+        "        total=_presupuesto)\n",
+        "    for _n in _notas_ancla:\n",
+        "        print(f'  {_n}')\n",
+        "else:\n",
+        "    pesos_ancla, sin_cap = market_weights(capitalizaciones,\n",
+        "                                          list(covarianza.columns))\n",
+        "    if sin_cap:\n",
+        "        print(f'Sin capitalizacion, excluidos del equilibrio: {sin_cap}')\n",
+        "\n",
+        "print(f'\\nAncla ({ANCLA}) por clase de activo:')\n",
+        "_cl_ancla = pd.Series({t: classify_for_bands(t, _tipos_cesta[t])\n",
+        "                       for t in pesos_ancla.index})\n",
+        "for _clase, _peso in pesos_ancla.groupby(_cl_ancla).sum().sort_values(\n",
+        "        ascending=False).items():\n",
+        "    if _peso > 0.0001:\n",
+        "        print(f'  {_peso:7.2%}  {_clase}')\n",
+        "\n",
+        "pi = implied_equilibrium(pesos_ancla, covarianza)\n",
         "er_posterior, cov_posterior = posterior(pi, covarianza, views)\n",
         "\n",
         "tipos = tipos_todos\n",
