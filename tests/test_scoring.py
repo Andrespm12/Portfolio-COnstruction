@@ -270,6 +270,169 @@ def test_excludes_leveraged_and_income_products():
           f"kept {len(should_keep)} ordinary securities")
 
 
+def _cross_section(drift_shift: float = 0.0, n: int = 8):
+    """
+    A scored cross-section whose whole return distribution can be shifted.
+
+    ``drift_shift`` is added to every name's weekly drift, so the *ranking* is
+    held fixed while the absolute quality of the entire universe moves. That
+    separation is the point: it is what lets a test tell a relative statement
+    from an absolute one.
+    """
+    bench = make_series(n=60, drift=0.003 + drift_shift, vol=0.015, seed=101)
+    bench_rets = simple_returns(bench)
+
+    rows = []
+    for i in range(n):
+        series = make_series(n=60, drift=0.001 * i + drift_shift,
+                             vol=0.012 + 0.004 * (i % 3), seed=200 + i)
+        inst = make_instrument(f"N{i}", series)
+        m = compute_metrics(inst, bench_rets, net_liq=1e7, participation=0.2,
+                            base_position_weight=0.03)
+        m.update({"corr_to_portfolio": 0.3, "diversification_benefit": 0.0,
+                  "existing_overlap": 0.0})
+        rows.append(ScoredInstrument(inst["ticker"], inst["ticker"], "STOCK",
+                                     ["SP500"], "Test", m,
+                                     diagnostics=diagnostics(inst, bench_rets)))
+    return rows
+
+
+def test_bands_are_purely_relative():
+    """
+    Standardizing the composite carries no information about absolute quality.
+
+    This is the fact an earlier version of ``RecommendationBands.__doc__``
+    denied -- it claimed that scoring on z rather than percentile stopped a
+    mediocre universe from producing a top decile of Overweights. Here every
+    single name in the cross-section loses money, and the bands still hand out
+    Overweights, because z is scale-free. The test exists to keep that claim
+    from being made again.
+    """
+    from screener.scoring import score_universe
+
+    rows = score_universe(_cross_section(-0.010))
+    returns = {r.ticker: r.raw_metrics["mom_12_1"] for r in rows}
+    assert all(v < 0 for v in returns.values()), (
+        f"fixture is not a losing universe: {returns}"
+    )
+
+    overweights = [r.ticker for r in rows if r.pre_gate_recommendation == OVERWEIGHT]
+    assert overweights, "fixture produced no Overweights, so it proves nothing"
+    worst = min(returns[t] for t in overweights)
+    print(f"PASS bands are relative: every name lost money "
+          f"({max(returns.values()):.0%} at best) yet the bands still rate "
+          f"{len(overweights)} Overweight, one of them down {worst:.0%}")
+
+
+def test_quality_floor_removes_overweights_in_a_falling_universe():
+    """
+    The gate that makes 'if nothing is good, nothing gets overweighted' true.
+
+    Same shifted cross-section as above, run through the full pipeline: with
+    the floor disabled the relative bands hand out Overweights in a universe
+    where every name lost money; with it enabled, none survive.
+    """
+    from screener import tuning
+
+    def overweights(**gate_changes):
+        tuning.reset_all()
+        if gate_changes:
+            tuning.override("GATES", **gate_changes)
+        try:
+            scored = run_scoring_pipeline(_cross_section(-0.010))
+            return [r.ticker for r in scored if r.recommendation == OVERWEIGHT]
+        finally:
+            tuning.reset_all()
+
+    without = overweights(min_momentum_for_overweight=None,
+                          min_sharpe_for_overweight=None)
+    with_floor = overweights()
+
+    assert without, "fixture must produce Overweights without the floor"
+    assert not with_floor, f"floor let {with_floor} through a losing universe"
+    print(f"PASS quality floor: {len(without)} Overweight(s) without it, "
+          f"none with it, in a universe where every name fell")
+
+
+def test_quality_floor_does_not_touch_a_healthy_universe():
+    """The mirror case: a rail that also fires when things are fine is a bug."""
+    from screener import tuning
+
+    def overweights(**gate_changes):
+        tuning.reset_all()
+        if gate_changes:
+            tuning.override("GATES", **gate_changes)
+        try:
+            scored = run_scoring_pipeline(_cross_section(0.0))
+            return [r.ticker for r in scored if r.recommendation == OVERWEIGHT]
+        finally:
+            tuning.reset_all()
+
+    without = overweights(min_momentum_for_overweight=None,
+                          min_sharpe_for_overweight=None)
+    with_floor = overweights()
+    assert without == with_floor, (
+        f"floor changed a healthy universe: {without} -> {with_floor}"
+    )
+    assert with_floor, "fixture produced no Overweights at all"
+    print(f"PASS quality floor is non-binding when the universe is good "
+          f"({len(with_floor)} Overweight(s) either way)")
+
+
+def test_quality_floor_catches_what_the_trend_gate_misses():
+    """
+    The specific gap: negative momentum while still above the 40-week average.
+
+    The trend gate requires *both* a broken moving average and negative
+    momentum, so a name that has fallen over the year but is bouncing above its
+    average slips through it. That name is the whole reason the floor is not
+    just a duplicate of the trend gate.
+    """
+    from screener.scoring import apply_risk_gates
+
+    bench = make_series(n=60, seed=41)
+    bench_rets = simple_returns(bench)
+
+    # A crash early in the window, then a slow grind back up. The grind is
+    # gentle enough that the 12M-1M return (bars 7 to 55) is still negative,
+    # but the last price sits above the average of the trailing 40 bars -- so
+    # the trend gate, which needs both conditions, cannot fire.
+    series = np.concatenate([
+        np.linspace(100.0, 50.0, 16),
+        np.linspace(50.0, 70.0, 44),
+    ])
+
+    inst = make_instrument("BOUNCE", series)
+    m = compute_metrics(inst, bench_rets, net_liq=1e7, participation=0.2,
+                        base_position_weight=0.03)
+    m.update({"corr_to_portfolio": 0.2, "diversification_benefit": 0.0,
+              "existing_overlap": 0.0})
+
+    assert m["above_40w_ma"] > 0, f"fixture is not above its MA: {m['above_40w_ma']}"
+    assert m["mom_12_1"] < 0, f"fixture momentum is not negative: {m['mom_12_1']}"
+
+    row = ScoredInstrument("BOUNCE", "BOUNCE", "STOCK", ["SP500"], "Test", m,
+                           diagnostics=diagnostics(inst, bench_rets))
+    row.composite_z = 2.0
+    row.recommendation = row.pre_gate_recommendation = OVERWEIGHT
+    row.block_coverage = {k: 1.0 for k in
+                          ("momentum", "risk_adjusted", "risk", "market_sensitivity",
+                           "liquidity", "valuation_carry", "portfolio_fit")}
+
+    apply_risk_gates([row])
+    fired = [g for g in row.gates_triggered if g.startswith("CALIDAD ABSOLUTA")]
+    assert not any(g.startswith("TREND") for g in row.gates_triggered), (
+        f"trend gate should not fire here: {row.gates_triggered}"
+    )
+    assert fired, f"quality floor did not fire: {row.gates_triggered}"
+    assert "momentum 12M-1M" in fired[0], (
+        f"the momentum half of the floor is what should catch this: {fired[0]}"
+    )
+    assert row.recommendation == MARKET_WEIGHT, row.recommendation
+    print(f"PASS quality floor caught a name the trend gate misses "
+          f"(12M-1M {m['mom_12_1']:+.0%}, but {m['above_40w_ma']:+.0%} above its 40W MA)")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failures = 0

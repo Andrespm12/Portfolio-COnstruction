@@ -239,6 +239,32 @@ def apply_risk_gates(rows: list[ScoredInstrument]) -> list[ScoredInstrument]:
             row.gates_triggered = ["INELIGIBLE: " + "; ".join(row.ineligibility_reasons)]
             continue
 
+        # Absolute quality floor. Everything upstream of this point is
+        # cross-sectional: the composite is standardized, so its top third is
+        # the top third of whatever was screened, in a bull market or a bear
+        # one. This is the only test in the model that asks whether a name is
+        # any good on its own terms rather than relative to its peers, and it
+        # is the reason a falling universe no longer yields a slate of
+        # Overweights.
+        floors: list[str] = []
+        mom_floor = GATES.min_momentum_for_overweight
+        mom_12_1 = m.get("mom_12_1")
+        if mom_floor is not None and mom_12_1 is not None and mom_12_1 < mom_floor:
+            floors.append(f"momentum 12M-1M {mom_12_1:+.1%} bajo el piso de {mom_floor:+.1%}")
+
+        sharpe_floor = GATES.min_sharpe_for_overweight
+        sharpe = m.get("sharpe_1y")
+        if sharpe_floor is not None and sharpe is not None and sharpe < sharpe_floor:
+            floors.append(f"Sharpe 1A {sharpe:.2f} bajo el piso de {sharpe_floor:.2f}")
+
+        if floors:
+            row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
+            gates.append(
+                "CALIDAD ABSOLUTA: " + "; ".join(floors)
+                + " -- puede seguir siendo lo mejor disponible, pero no es una "
+                "instrucción de tener más que el benchmark"
+            )
+
         # Falling knife: below the 40-week trend AND negative 12M-1M momentum.
         if GATES.trend_gate_enabled:
             above_ma, mom = m.get("above_40w_ma"), m.get("mom_12_1")

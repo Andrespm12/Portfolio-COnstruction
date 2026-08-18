@@ -337,6 +337,11 @@ const BLOCK_WHY = {
 const GATES = {
   maxDD:-.45, beta:1.30, corr:.85, existingW:.05,
   maxDays:3.0, volCeiling:.60, dupCorr:.95,
+  // Piso absoluto para un Overweight. Las bandas son transversales y por lo
+  // tanto siempre nombran un tercio superior, aunque todo el universo haya
+  // perdido dinero; este es el único punto del modelo donde un nombre se mide
+  // contra algo que no son sus pares. null para desactivar.
+  minMom:0.0, minSharpe:0.0,
 };
 const ELIG = {minPrice:5, minAdv:20e6, minBars:30, participation:.20, maxDays:3.0};
 const SIZING = {targetVol:.20, base:.030, ow:1.75, mw:1.00, uw:.35, min:.005, max:.080};
@@ -558,6 +563,15 @@ const cap=(cur,ceil)=>UNRANK[Math.min(RANK[cur],RANK[ceil])];
 function applyGates(rows){
   for(const r of rows){ const m=r.raw; const g=[];
     if(!r.eligible){ r.rec="UW"; r.gates=["NO ELEGIBLE: "+r.reasons.join("; ")]; continue; }
+    const floors=[];
+    if(GATES.minMom!==null&&fin(m.mom_12_1)&&m.mom_12_1<GATES.minMom)
+      floors.push(`momentum 12M−1M ${pf(m.mom_12_1,1)}`);
+    if(GATES.minSharpe!==null&&fin(m.sharpe_1y)&&m.sharpe_1y<GATES.minSharpe)
+      floors.push(`Sharpe 1A ${m.sharpe_1y.toFixed(2)}`);
+    if(floors.length){
+      r.rec=cap(r.rec,"MW");
+      g.push({t:"CALIDAD ABSOLUTA",m:"No supera el piso mínimo en términos absolutos. Puede seguir siendo lo mejor disponible del universo, pero eso no es una instrucción de tener más que el benchmark.",
+        x:floors.join(" · ")}); }
     if(fin(m.above_40w_ma)&&fin(m.mom_12_1)&&m.above_40w_ma<0&&m.mom_12_1<0){
       r.rec=cap(r.rec,"MW");
       g.push({t:"TENDENCIA",m:"Debajo de la media de 40 semanas con momentum 12M−1M negativo.",

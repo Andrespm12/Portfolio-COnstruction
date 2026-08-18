@@ -306,9 +306,24 @@ class RecommendationBands:
     """
     Composite-z thresholds mapping to portfolio stance.
 
-    Bands are set on the *z-score of the composite*, not on raw percentile, so
-    that a uniformly mediocre universe does not mechanically produce a top
-    decile of Overweights. If nothing is good, nothing gets overweighted.
+    These bands are **purely relative, and cannot be otherwise.** Standardizing
+    the composite subtracts the cross-section's mean and divides by its standard
+    deviation, so the distribution of z is the same whatever the underlying
+    quality: a threshold of +0.50 selects roughly the top third of *this*
+    universe whether every name in it doubled or every name halved. Using
+    percentile ranks instead would give the same answer -- z and percentile are
+    monotone transforms of each other, and neither carries absolute information.
+
+    An earlier version of this docstring claimed the opposite: that scoring on z
+    rather than percentile prevented "a uniformly mediocre universe from
+    mechanically producing a top decile of Overweights". That was wrong, and
+    wrong in the direction that flatters the model. Nothing in the standardizing
+    step knows whether the universe is good.
+
+    The absolute bar lives where it can actually be enforced: in
+    :class:`RiskGates`, which are applied afterwards and can only downgrade. See
+    ``min_momentum_for_overweight`` and ``min_sharpe_for_overweight`` -- those
+    are what make "if nothing is good, nothing gets overweighted" true.
     """
 
     overweight_z: float = 0.50
@@ -339,6 +354,34 @@ class RiskGates:
     one extreme block (typically momentum). These gates encode the constraints
     a risk manager would impose on top of the model.
     """
+
+    #: Absolute quality floor for an Overweight.
+    #:
+    #: The recommendation bands are cross-sectional and therefore scale-free
+    #: (see :class:`RecommendationBands`): they always name a top third, even
+    #: when the whole universe lost money. These two thresholds are the only
+    #: place in the model where a name is measured against something other than
+    #: its peers, and they are what stops a flat or falling market from
+    #: producing a full slate of Overweights.
+    #:
+    #: The bar is deliberately low -- not "good", just "not bad in absolute
+    #: terms": a positive 12-month-less-1-month return, and a Sharpe above zero,
+    #: meaning the name beat cash over the window. A name that did neither can
+    #: still be the best available and still be worth holding at Market Weight;
+    #: what it cannot be is an instruction to hold *more* of it than the
+    #: benchmark. Set either to None to disable.
+    #:
+    #: Note the deliberate overlap with ``trend_gate_enabled`` below: any name
+    #: caught by the trend gate also fails the momentum floor, since the trend
+    #: gate requires negative momentum *and* a broken moving average. The two
+    #: are kept separate because they say different things to a reader -- the
+    #: floor says "did not clear the bar", the trend gate says "and the trend
+    #: confirms it" -- and a name can fail the floor without being a falling
+    #: knife. Both capping at Market Weight is the intended behaviour; the
+    #: conviction penalty in the Black-Litterman bridge is applied once per
+    #: name, not once per gate, so nothing is double-counted.
+    min_momentum_for_overweight: float | None = 0.0
+    min_sharpe_for_overweight: float | None = 0.0
 
     #: Falling knife: below long-term trend AND negative long-horizon momentum.
     #: Cannot be Overweight no matter how cheap or high-carry it looks.

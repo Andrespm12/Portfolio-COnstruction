@@ -438,7 +438,16 @@ def test_written_payload_round_trips() -> None:
           "sin datos de cuenta" in payload["origen"])
     check("payload declares the IC as an assumption, not an estimate",
           "supuesto" in payload["calibracion"]["nota"])
-    check("the views survive the round trip unchanged", payload["views"] == views)
+    # Everything CCI reads survives the round trip; the only difference is the
+    # internal `_q_bruto` diagnostic, which write_views strips on purpose so
+    # the reviewed file carries no field their approval flow does not expect.
+    from screener.black_litterman import public_view
+    check("the views survive the round trip unchanged",
+          payload["views"] == [public_view(v) for v in views])
+    check("the round trip drops only the internal diagnostic key",
+          all(set(v) - set(p) == {"_q_bruto"}
+              for v, p in zip(views, payload["views"])),
+          str([set(v) - set(p) for v, p in zip(views, payload["views"])]))
 
     # The nested list is what CCI's solver consumes; prove it still does.
     import pandas as pd

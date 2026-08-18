@@ -34,7 +34,7 @@ MODULES = (
     "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
     "profiles.py", "black_litterman.py", "cci_regulation.py",
-    "optimizer.py",
+    "optimizer.py", "diagnostics.py",
 )
 
 
@@ -591,7 +591,8 @@ def build_cells() -> list[dict]:
     ))
     cells.append(code(
         "from screener.black_litterman import (ViewParams, build_basket,\n",
-        "                                      build_views, write_views)\n",
+        "                                      build_views, public_view,\n",
+        "                                      write_views)\n",
         "from screener.profiles import CCI_STRATEGIES, profile_for_strategy\n",
         "\n",
         "# @markdown Estrategia de destino en el sistema BL de CCI.\n",
@@ -633,9 +634,41 @@ def build_cells() -> list[dict]:
         "    print(f\"  {_v['tipo']:9s} {_quien:18s} Q {_v['Q']:+.2%}   \"\n",
         "          f\"convicción {_v['conviccion']:.2f}\")\n",
         "\n",
-        "views_df = pd.DataFrame(views)\n",
+        "# public_view quita la columna interna _q_bruto, que solo usa el\n",
+        "# diagnóstico de la celda siguiente y no viaja al archivo de CCI.\n",
+        "views_df = pd.DataFrame([public_view(_v) for _v in views])\n",
         "cesta_df = pd.DataFrame(cesta)\n",
         "views_df\n",
+    ))
+    # ----------------------------------------------------------- diagnostics
+    cells.append(md(
+        "## 10b · Diagnóstico del modelo\n",
+        "\n",
+        "Dos mediciones sobre el modelo mismo, no sobre el mercado. Ninguna "
+        "cambia una recomendación ni un peso: están para que sepas cuánto "
+        "confiar en lo de arriba.\n",
+        "\n",
+        "**Correlación entre bloques.** El modelo declara seis bloques y le "
+        "asigna un peso a cada uno, lo que equivale a decir que cada bloque "
+        "aporta información que los otros no tienen. Si dos bloques van "
+        "juntos al 0.90, sus pesos son una sola apuesta hecha dos veces y la "
+        "cartera está menos diversificada de lo que promete la tabla de "
+        "pesos. El número de *factores efectivos* resume eso: si dice 2 sobre "
+        "6, tienes seis columnas midiendo dos cosas.\n",
+        "\n",
+        "**Saturación de views.** La `Q` se recorta en ±5% porque así lo "
+        "calibra el documento técnico de CCI. El recorte es una baranda; si "
+        "casi todas las views terminan pegadas a ella, la baranda pasó a ser "
+        "la señal: nombres que el screener rankeó muy distinto llegan al "
+        "optimizador con el mismo retorno esperado y ese pedazo del ranking "
+        "se tira a la basura. Dos views en el tope es normal; seis es un "
+        "problema de calibración, y se arregla bajando el IC, no subiendo el "
+        "tope.\n",
+    ))
+    cells.append(code(
+        "from screener.diagnostics import run_diagnostics\n",
+        "\n",
+        "print(run_diagnostics(scored, views, _params))\n",
     ))
     # ------------------------------------------------------------- optimizer
     cells.append(md(

@@ -133,15 +133,27 @@ DEFAULT_PARAMS = ViewParams()
 # Signal translation
 # --------------------------------------------------------------------------
 
+def raw_expected_return(z: float, volatility: float, params: ViewParams) -> float:
+    """
+    The ``ic * z * sigma`` product *before* the ``max_abs_q`` clip.
+
+    Kept separate so :mod:`screener.diagnostics` can report how hard the clip
+    is biting. A clip that binds on most views has quietly replaced the
+    screener's ranking with a constant, and that is invisible if only the
+    post-clip number is ever recorded.
+    """
+    if not np.isfinite(z) or not np.isfinite(volatility) or volatility <= 0:
+        return 0.0
+    return float(params.information_coefficient * z * volatility)
+
+
 def expected_return(z: float, volatility: float, params: ViewParams) -> float:
     """
     Convert a cross-sectional z-score into an expected excess return.
 
     Risk-scaled and centered -- see the module docstring for why both matter.
     """
-    if not np.isfinite(z) or not np.isfinite(volatility) or volatility <= 0:
-        return 0.0
-    raw = params.information_coefficient * z * volatility
+    raw = raw_expected_return(z, volatility, params)
     return float(np.clip(raw, -params.max_abs_q, params.max_abs_q))
 
 
@@ -306,6 +318,7 @@ def build_views(scored: Sequence[ScoredInstrument],
                 "justificacion": _rationale(row, params, peer=peer,
                                             q=abs(q), conv=conv),
                 "origen": "screener",
+                "_q_bruto": abs(raw_expected_return(z_spread, spread_vol, params)),
             })
         else:
             if vol is None:
@@ -321,6 +334,7 @@ def build_views(scored: Sequence[ScoredInstrument],
                 "conviccion": round(conv, 4),
                 "justificacion": _rationale(row, params, q=q, conv=conv),
                 "origen": "screener",
+                "_q_bruto": raw_expected_return(row.composite_z, vol, params),
             })
 
     candidates.sort(key=lambda v: v["conviccion"], reverse=True)
@@ -413,6 +427,19 @@ def build_basket(scored: Sequence[ScoredInstrument], *,
 # Serialization
 # --------------------------------------------------------------------------
 
+def public_view(view: Mapping[str, Any]) -> dict:
+    """
+    A view with its internal diagnostic keys removed.
+
+    Keys prefixed with ``_`` (currently ``_q_bruto``) exist for
+    :mod:`screener.diagnostics` and never leave the process. The file CCI reads
+    must contain exactly the fields their approval flow and
+    ``black_litterman_core`` expect -- an unexpected key in a JSON a manager
+    signs off on is a question nobody should have to answer.
+    """
+    return {k: v for k, v in view.items() if not k.startswith("_")}
+
+
 def views_payload(views: Sequence[dict], *, strategy: str,
                   profile: RiskProfile, meta: Mapping[str, Any],
                   params: ViewParams = DEFAULT_PARAMS) -> dict:
@@ -434,7 +461,7 @@ def views_payload(views: Sequence[dict], *, strategy: str,
             "nota": ("IC es un supuesto declarado, no una estimación "
                      "calibrada contra backtest."),
         },
-        "views": list(views),
+        "views": [public_view(v) for v in views],
     }
 
 
@@ -474,7 +501,8 @@ def write_views(views: Sequence[dict], path: str | Path, **kwargs: Any) -> Path:
             f"ahí sobrescribiría decisiones firmadas. Usa '{DRIVE_PROPOSALS_DIR}/'."
         )
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = views_payload(views, **kwargs) if kwargs else {"views": list(views)}
+    payload = (views_payload(views, **kwargs) if kwargs
+               else {"views": [public_view(v) for v in views]})
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                     encoding="utf-8")
     return path
