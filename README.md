@@ -320,6 +320,52 @@ failure, straight into the equilibrium; `market_weights` returns the missing
 names so the run can report them, and `policy_weights` degrades a single class
 to an equal split rather than letting one gap move the whole portfolio.
 
+### Nobody chooses the number of positions
+
+Worth stating because it is a natural thing to assume and it is not true. There
+is no diversification target and no maximum-holdings constraint anywhere in the
+model. The count falls out of two steps:
+
+1. `select_basket` picks the *candidate* universe — `TOP_N_CARTERA` names by
+   score (25 by default) plus at least three per asset class so the bands are
+   reachable. That is a ceiling on what may be considered, not a target for what
+   is held.
+2. The optimizer puts weight wherever it improves `w'μ − (λ/2)w'Σw` subject to
+   the constraints. How many names end up non-zero is an outcome of that.
+
+So the answer to "why fifteen positions?" is "because that is what the
+mathematics produced," which is fine as far as it goes — and is exactly why the
+floor below is needed.
+
+### Positions too small to trade
+
+An optimizer has no notion of what is worth executing. On the reference run it
+returned XLF at **0.159%** and a second name at effectively zero: positions that
+cost a ticket, a line on every report and a reconciliation forever, in exchange
+for a risk contribution that rounds to nothing. On a US$5MM book, 0.159% is
+US$8,000.
+
+`min_position` (default 1%, `MIN_POSITION`) removes them. It is enforced by
+**re-solving with those names forced to zero**, not by deleting weights from the
+answer — deleting would leave the book short of its budget and could push a
+survivor past its individual cap or a class past its band, so the weights would
+no longer solve any stated problem while still being presented as the solution
+to one. Each pass is a genuine constrained optimization, and the audit stays
+clean:
+
+| | Positions | Gross | Smallest | Breaches |
+|:--|--:|--:|--:|--:|
+| No floor | 15 | 111.91% | 0.000% | 0 |
+| 1% floor | 13 | 111.75% | 1.99% | 0 |
+
+The loop only ever removes names, so it terminates on its own. If dropping them
+would make the problem infeasible, the last feasible portfolio is kept and the
+reason is written into the notes rather than an empty book being returned.
+
+This is a desk convention, not a regulatory limit — CCI's Investment Procedure
+sets ceilings, never floors — which is why it is a parameter rather than a
+constant.
+
 ### The basket must span the bands
 
 `select_basket` picks the optimizer's universe class-aware rather than as the

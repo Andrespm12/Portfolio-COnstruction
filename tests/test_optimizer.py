@@ -339,6 +339,129 @@ def test_all_equity_basket_reports_rather_than_pretends() -> None:
         check("an empty basket raises", True)
 
 
+def _solved(strategy: str = "Moderado", **kwargs):
+    """A posterior-driven allocation, the way the notebook builds one."""
+    data, scored, cov, _, types, caps = world(strategy)
+    types = {t: types[t] for t in cov.columns}
+    budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+    views = build_views(scored, data, strategy=strategy)
+    anchor, _ = policy_weights(types, strategy, caps=caps, total=budget)
+    er, pcov = posterior(implied_equilibrium(anchor, cov), cov, views)
+    return optimize(er, pcov, types, strategy, **kwargs), types, cov
+
+
+def binding_floor(alloc, headroom: float = 1.5) -> float:
+    """
+    A floor just above the smallest holding in an unconstrained solution.
+
+    Derived rather than hardcoded: whether this fixture happens to produce a
+    0.2% weight or a 1.5% one is a property of the fixture, and a test that
+    assumed the first would pass or fail for reasons unrelated to the code it
+    is meant to check.
+    """
+    held = alloc.weights[alloc.weights > 0]
+    return float(held.min()) * headroom
+
+
+def test_minimum_position_removes_unexecutable_weights() -> None:
+    """
+    A mean-variance optimizer has no notion of what is worth trading.
+
+    Left alone it returns whatever weight improves the objective, including
+    fractions of a percent that cost a ticket, a line on every report and a
+    reconciliation forever, for a risk contribution that rounds to nothing.
+    """
+    loose, _, _ = _solved(min_position=None)
+    floor = binding_floor(loose)
+    held_loose = loose.weights[loose.weights > 0]
+    check("the fixture has a smallest holding to squeeze out", len(held_loose) > 1)
+
+    tight, _, _ = _solved(min_position=floor)
+    survivors = tight.weights[tight.weights > 0]
+
+    check(f"nothing survives below the {floor:.2%} floor",
+          bool((survivors >= floor - 1e-9).all()),
+          str(survivors[survivors < floor].to_dict()))
+    check("the floor removed at least one position",
+          len(survivors) < len(held_loose),
+          f"{len(held_loose)} -> {len(survivors)}")
+    check("dropped names are named in the notes",
+          any("debajo del mínimo" in n for n in tight.notes), str(tight.notes))
+    check("the book is still invested after dropping them",
+          tight.gross_exposure > 0.9, f"{tight.gross_exposure:.4f}")
+
+
+def test_minimum_position_preserves_every_mandate_limit() -> None:
+    """
+    The reason this re-solves instead of deleting weights afterwards.
+
+    Zeroing a holding in the answer leaves the book short of its budget and can
+    push a surviving name past its individual cap or a class past its band --
+    the weights would no longer solve any stated problem while still being
+    presented as the solution to one. Each pass here is a real constrained
+    optimization, so the audit must stay clean.
+    """
+    for strategy in ("Conservador", "Moderado", "Agresivo"):
+        tight, types, _ = _solved(strategy, min_position=0.01)
+        check(f"{strategy}: still feasible with the floor", tight.feasible,
+              tight.status)
+        check(f"{strategy}: no band breaches after dropping names",
+              not tight.breaches, "; ".join(tight.breaches))
+
+        rules = REGULACIONES[strategy]
+        budget = rules["leverage_max"] * LEVERAGE_BUFFER
+        check(f"{strategy}: gross exposure still inside the budget",
+              tight.gross_exposure <= budget + 1e-6,
+              f"{tight.gross_exposure:.6f} > {budget:.6f}")
+        check(f"{strategy}: the book is still invested",
+              tight.gross_exposure >= min(1.0, budget) - 1e-6,
+              f"{tight.gross_exposure:.6f}")
+
+        classes = pd.Series({t: classify_for_bands(t, types[t])
+                             for t in tight.weights.index})
+        by_class = tight.weights.groupby(classes).sum()
+        equity = sum(by_class.get(c, 0.0) for c in EQUITY_CLASSES)
+        check(f"{strategy}: equity ceiling still holds",
+              equity <= rules["max_equity_total"] + 1e-6,
+              f"{equity:.4f} > {rules['max_equity_total']:.4f}")
+
+
+def test_minimum_position_is_a_parameter_not_a_constant() -> None:
+    """A desk convention, not a regulatory limit -- so it has to be tunable."""
+    sizes = {}
+    for floor in (None, 0.01, 0.05, 0.10):
+        alloc, _, _ = _solved(min_position=floor)
+        held = alloc.weights[alloc.weights > 0]
+        sizes[floor] = (len(held), float(held.min()) if len(held) else 0.0)
+
+    counts = [sizes[f][0] for f in (None, 0.01, 0.05, 0.10)]
+    check("a higher floor never leaves more positions than a lower one",
+          counts == sorted(counts, reverse=True), str(sizes))
+    for floor in (0.01, 0.05, 0.10):
+        check(f"a {floor:.0%} floor is respected", sizes[floor][1] >= floor - 1e-9,
+              f"smallest {sizes[floor][1]:.4%}")
+    check("min_position=None leaves the raw solution alone",
+          sizes[None][1] <= sizes[0.01][1] + 1e-12,
+          f"raw smallest {sizes[None][1]:.4%} vs floored {sizes[0.01][1]:.4%}")
+    print(f"    posiciones por piso: {[(k, v[0]) for k, v in sizes.items()]}")
+
+
+def test_impossible_floor_keeps_the_portfolio_rather_than_emptying_it() -> None:
+    """
+    A floor so high that nothing can satisfy it must not silently return an
+    empty book. Dropping names is only worth doing while a feasible portfolio
+    survives it; past that the honest move is to keep the last one and say so.
+    """
+    alloc, _, _ = _solved(min_position=0.95)
+    held = alloc.weights[alloc.weights > 0]
+    check("an impossible floor still returns a portfolio", len(held) > 0,
+          f"{len(held)} positions, status {alloc.status}")
+    check("an impossible floor is explained in the notes",
+          any("mínimo" in n for n in alloc.notes), str(alloc.notes))
+    check("the surviving portfolio still passes its audit",
+          not alloc.breaches, "; ".join(alloc.breaches))
+
+
 def test_equilibrium() -> None:
     _, _, cov, pi, _, _ = world()
     check("equilibrium is finite for every asset",
@@ -761,6 +884,10 @@ def test_feasibility_report_is_quiet_when_reachable() -> None:
 
 def main() -> int:
     for fn in [
+        test_minimum_position_removes_unexecutable_weights,
+        test_minimum_position_preserves_every_mandate_limit,
+        test_minimum_position_is_a_parameter_not_a_constant,
+        test_impossible_floor_keeps_the_portfolio_rather_than_emptying_it,
         test_policy_anchor_is_self_consistent,
         test_policy_anchor_obeys_every_constraint_the_solver_applies,
         test_policy_anchor_frees_the_equity_ceiling,

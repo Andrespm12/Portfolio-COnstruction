@@ -86,6 +86,7 @@ REFERENCIAS = {
 # --- Cartera --------------------------------------------------------------
 TOP_N_CARTERA = 25             # menos nombres = covarianza mejor estimada
 ANCLA = "politica"             # politica | mercado  (ver el documento maestro)
+POSICION_MINIMA = 0.01         # posición mínima ejecutable; 0 la desactiva
 
 # --- Salida ---------------------------------------------------------------
 EXPORTAR_JSON_PARA_BL = True
@@ -129,6 +130,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Nombres del ranking que entran a la optimización.")
     p.add_argument("--ancla", default=ANCLA, choices=("politica", "mercado"),
                    help="Cartera neutral de la que parten las views.")
+    p.add_argument("--posicion-minima", type=float, default=POSICION_MINIMA,
+                   help="Posición mínima ejecutable como fracción del libro "
+                        "(0.01 = 1%%). 0 la desactiva.")
     p.add_argument("--con-vol-implicita", action="store_true", default=CON_VOL_IMPLICITA)
     p.add_argument("--con-nombres", action="store_true", default=CON_NOMBRES_Y_SECTORES,
                    help="Baja nombres largos y sectores. Necesario con --tickers.")
@@ -391,7 +395,8 @@ def main(argv: list[str] | None = None) -> int:
     er_posterior, cov_posterior = posterior(pi, covarianza, views)
     clases = {t: classify_for_bands(t, tipos_todos.get(t, "ETF"))
               for t in covarianza.columns}
-    cartera = optimize(er_posterior, cov_posterior, tipos_todos, args.estrategia)
+    cartera = optimize(er_posterior, cov_posterior, tipos_todos, args.estrategia,
+                       min_position=args.posicion_minima or None)
 
     print(f"\n{args.estrategia}  |  estado: {cartera.status}")
     print(f"Exposición bruta   {cartera.gross_exposure:.1%}")
@@ -452,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
         ("IC supuesto (views)", args.ic),
         ("Nota sobre el IC", "supuesto declarado, no calibrado contra backtest"),
         ("Ancla del equilibrio", args.ancla),
+        ("Posición mínima",
+         f"{args.posicion_minima:.2%}" if args.posicion_minima else "sin mínimo"),
         ("Nota sobre el ancla",
          " | ".join(notas_ancla) or "capitalización de mercado / AUM"),
         ("Estado de la optimización", cartera.status),

@@ -749,6 +749,15 @@ def build_cells() -> list[dict]:
         "# @markdown Cartera neutral de la que parten las views.\n",
         'ANCLA = "politica"  # @param ["politica", "mercado"]\n',
         "\n",
+        "# @markdown Posición mínima ejecutable, como fracción del libro.\n",
+        "POSICION_MINIMA = 0.01  # @param {type:\"number\"}\n",
+        "# @markdown El optimizador no sabe qué vale la pena operar: si le "
+        "conviene, devuelve un 0.16% que cuesta una boleta, una línea en cada "
+        "reporte y una conciliación para siempre. Las posiciones bajo este "
+        "piso se eliminan **re-optimizando sin ellas**, no recortándolas del "
+        "resultado — así las bandas del mandato siguen cumpliéndose exactas. "
+        "Pon 0 para desactivarlo.\n",
+        "\n",
         "from screener.optimizer import (implied_equilibrium, market_weights,\n",
         "                               optimize, policy_weights, posterior,\n",
         "                               shrunk_covariance, allocation_table,\n",
@@ -808,7 +817,8 @@ def build_cells() -> list[dict]:
         "clases = {t: classify_for_bands(t, tipos.get(t, 'ETF'))\n",
         "          for t in covarianza.columns}\n",
         "\n",
-        "cartera = optimize(er_posterior, cov_posterior, tipos, ESTRATEGIA_CCI)\n",
+        "cartera = optimize(er_posterior, cov_posterior, tipos, ESTRATEGIA_CCI,\n",
+        "                   min_position=POSICION_MINIMA or None)\n",
         "\n",
         "print(f'{ESTRATEGIA_CCI}  |  estado: {cartera.status}')\n",
         "print(f'Exposicion bruta   {cartera.gross_exposure:.1%}')\n",

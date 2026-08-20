@@ -68,6 +68,28 @@ TAU = 0.025
 #: so a solution never sits exactly on the regulatory margin.
 LEVERAGE_BUFFER = 0.95
 
+#: Smallest holding worth executing, as a fraction of the portfolio.
+#:
+#: A mean-variance optimizer has no notion of what is worth trading. Left alone
+#: it returns whatever weight improves the objective, including 0.16% of the
+#: book -- a position that costs a ticket, a line on every report and a
+#: reconciliation forever, in exchange for a risk contribution that rounds to
+#: nothing. On a US$5MM book that is US$8,000, less than one share of some of
+#: the names being screened.
+#:
+#: This is a portfolio-construction judgement, not a regulatory limit: CCI's
+#: Investment Procedure sets ceilings, never floors. 1% is a common desk
+#: convention and nothing more; it is exposed as a parameter for that reason.
+MIN_POSITION = 0.01
+
+#: Cap on the drop-and-re-solve loop that enforces :data:`MIN_POSITION`.
+#: Each pass can only remove names, so it terminates on its own; the cap is
+#: there so a pathological basket cannot spin.
+MAX_MIN_POSITION_PASSES = 12
+
+#: Weights below this are solver noise rather than positions.
+WEIGHT_EPS = 1e-6
+
 TRADING_DAYS = 252
 
 
@@ -504,13 +526,17 @@ class Allocation:
 def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              asset_types: Mapping[str, str], strategy: str,
              risk_aversion: float = RISK_AVERSION,
-             solver: str | None = None) -> Allocation:
+             solver: str | None = None,
+             min_position: float | None = MIN_POSITION) -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
     Long-only, per-class bands, a total-equity ceiling, a per-name cap on single
     stocks, hard exclusions, and a gross-exposure budget that honours
     ``leverage_max`` with the documented buffer.
+
+    ``min_position`` drops holdings too small to be worth executing; see
+    :data:`MIN_POSITION`. Pass ``None`` to keep whatever the solver produces.
     """
     import cvxpy as cp
 
@@ -538,56 +564,63 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             "confirmar con Compliance antes de operar."
         )
 
-    w = cp.Variable(len(tickers))
-
     # Gross exposure. leverage_max of 1.0 collapses this to the fully invested
     # long-only case; above 1.0 it is a real budget, which CCI's original code
     # never applied.
     budget = float(rules["leverage_max"]) * LEVERAGE_BUFFER
-    constraints = [w >= 0, cp.sum(w) <= budget]
-    if rules["leverage_max"] <= 1.0:
-        constraints.append(cp.sum(w) == budget)
-    else:
-        # Stay invested: without a floor the optimizer can sit in cash and
-        # report a technically optimal empty book.
-        constraints.append(cp.sum(w) >= 1.0)
-
-    for i, ticker in enumerate(tickers):
-        if ticker in EXCLUSIONES_DURAS:
-            constraints.append(w[i] == 0)
-        if classes[ticker] == CLASE_EQUITY:
-            constraints.append(w[i] <= rules["max_equity_individual"])
-
-    equity_idx = [i for i, t in enumerate(tickers)
-                  if classes[t] in (CLASE_EQUITY, CLASE_ETF_RV)]
-    if equity_idx:
-        constraints.append(cp.sum(w[equity_idx]) <= rules["max_equity_total"])
-
-    for clase, (low, high) in bands_for(strategy).items():
-        idx = [i for i, t in enumerate(tickers) if classes[t] == clase]
-        if idx:
-            constraints.append(cp.sum(w[idx]) >= low)
-            constraints.append(cp.sum(w[idx]) <= high)
-
-    objective = cp.Maximize(mu @ w - (risk_aversion / 2) * cp.quad_form(w, cp.psd_wrap(sigma)))
-    problem = cp.Problem(objective, constraints)
 
     # CLARABEL ships with CVXPY. CCI's code asked for ECOS, which is optional
     # and absent from a stock Colab -- that is what killed their saved run.
     order = ([solver] if solver else
              [s for s in ("CLARABEL", "SCS", "OSQP", "ECOS")
               if s in cp.installed_solvers()])
-    status = "unsolved"
-    for candidate in order:
-        try:
-            problem.solve(solver=candidate)
-            status = problem.status
-            if w.value is not None:
-                break
-        except Exception as exc:  # noqa: BLE001 - try the next solver
-            notes.append(f"Solver {candidate} falló: {exc}")
 
-    if w.value is None:
+    def solve(banned: frozenset[str]) -> tuple[np.ndarray | None, str]:
+        """Solve the mandate's problem with ``banned`` names forced to zero."""
+        w = cp.Variable(len(tickers))
+        constraints = [w >= 0, cp.sum(w) <= budget]
+        if rules["leverage_max"] <= 1.0:
+            constraints.append(cp.sum(w) == budget)
+        else:
+            # Stay invested: without a floor the optimizer can sit in cash and
+            # report a technically optimal empty book.
+            constraints.append(cp.sum(w) >= 1.0)
+
+        for i, ticker in enumerate(tickers):
+            if ticker in EXCLUSIONES_DURAS or ticker in banned:
+                constraints.append(w[i] == 0)
+            if classes[ticker] == CLASE_EQUITY:
+                constraints.append(w[i] <= rules["max_equity_individual"])
+
+        equity_idx = [i for i, t in enumerate(tickers)
+                      if classes[t] in (CLASE_EQUITY, CLASE_ETF_RV)]
+        if equity_idx:
+            constraints.append(cp.sum(w[equity_idx]) <= rules["max_equity_total"])
+
+        for clase, (low, high) in bands_for(strategy).items():
+            idx = [i for i, t in enumerate(tickers) if classes[t] == clase]
+            if idx:
+                constraints.append(cp.sum(w[idx]) >= low)
+                constraints.append(cp.sum(w[idx]) <= high)
+
+        objective = cp.Maximize(
+            mu @ w - (risk_aversion / 2) * cp.quad_form(w, cp.psd_wrap(sigma)))
+        problem = cp.Problem(objective, constraints)
+
+        status = "unsolved"
+        for candidate in order:
+            try:
+                problem.solve(solver=candidate)
+                status = problem.status
+                if w.value is not None:
+                    return np.asarray(w.value).ravel(), status
+            except Exception as exc:  # noqa: BLE001 - try the next solver
+                notes.append(f"Solver {candidate} falló: {exc}")
+        return None, status
+
+    solution, status = solve(frozenset())
+
+    if solution is None:
         # A bare "infeasible" is not a diagnosis. Lead with the structural
         # reason when there is one, so the empty result explains itself.
         reasons = infeasible_reasons or [
@@ -599,8 +632,49 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                           pd.Series(dtype=float),
                           breaches=reasons, notes=notes)
 
-    weights = pd.Series(np.asarray(w.value).ravel(), index=tickers).clip(lower=0.0)
-    weights[weights < 1e-6] = 0.0
+    # --- Minimum position size ------------------------------------------
+    #
+    # Enforced by re-solving with the offending names forced to zero, not by
+    # zeroing them in the answer. Deleting a weight after the fact would leave
+    # the book short of its budget and could push a surviving name past its
+    # individual cap or a class past its band -- the weights would no longer be
+    # the solution to any stated problem, while still being presented as one.
+    # Each pass here is a genuine constrained optimization, so every limit in
+    # the Investment Procedure still holds exactly.
+    if min_position and min_position > 0:
+        banned: set[str] = set()
+        for _ in range(MAX_MIN_POSITION_PASSES):
+            held = pd.Series(solution, index=tickers)
+            too_small = [t for t, v in held.items()
+                         if t not in banned and WEIGHT_EPS < v < min_position]
+            if not too_small:
+                break
+            candidate_ban = banned | set(too_small)
+            retry, retry_status = solve(frozenset(candidate_ban))
+            if retry is None:
+                notes.append(
+                    f"No se pudo aplicar el mínimo de {min_position:.1%} a "
+                    f"{sorted(too_small)}: sin ellos la cartera no tiene "
+                    "solución factible, así que se conservan. Revisa si la "
+                    "cesta da para el número de posiciones que exige el mandato."
+                )
+                break
+            banned, solution, status = candidate_ban, retry, retry_status
+        else:
+            notes.append(
+                f"El mínimo de {min_position:.1%} no convergió en "
+                f"{MAX_MIN_POSITION_PASSES} pasadas; se reporta la última "
+                "solución factible."
+            )
+        if banned:
+            notes.append(
+                f"{len(banned)} posición(es) descartada(s) por quedar debajo "
+                f"del mínimo de {min_position:.1%}: {', '.join(sorted(banned))}. "
+                "El peso se redistribuyó re-optimizando, no repartiendo a mano."
+            )
+
+    weights = pd.Series(solution, index=tickers).clip(lower=0.0)
+    weights[weights < WEIGHT_EPS] = 0.0
 
     by_class = weights.groupby(pd.Series(classes)).sum().sort_values(ascending=False)
     variance = float(weights.values @ sigma @ weights.values)
