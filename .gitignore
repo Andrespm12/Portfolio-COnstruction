@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 .DS_Store
 tests/_js_output.json
+docs/node_modules/
+docs/*.pptx

@@ -1,0 +1,913 @@
+<h1>Documento Maestro — Sistema de Selección y Asignación de Activos</h1>
+<p><i>CCI Puesto de Bolsa · Mercado Internacional · Guía completa de funcionamiento</i></p>
+<p><i><b>Versión 2</b> — incorpora los cambios hechos a partir de la revisión externa del modelo. Reemplaza la versión anterior; las secciones marcadas con <b>[v2]</b> son las que cambiaron de fondo.</i></p>
+
+<hr>
+
+<h1>Resumen ejecutivo</h1>
+
+<p>El sistema hace dos cosas que antes se hacían por separado y a mano: <b>decide qué instrumentos merecen estar en la cartera</b> y <b>decide cuánto poner en cada uno</b>. Todo en un solo notebook de Google Colab, que se corre apretando un botón.</p>
+
+<p>La primera mitad es un <b>screener</b>. Baja precios de 447 candidatos entre acciones e ETFs, les calcula 25 medidas distintas, y los ordena de mejor a peor. No usa opiniones ni noticias: solo lo que dicen los precios y el volumen de los últimos dos años. El resultado es un ranking con una recomendación de Sobreponderar, Neutral o Subponderar para cada nombre.</p>
+
+<p>La segunda mitad es el <b>modelo Black-Litterman</b>. Toma ese ranking, lo traduce a expectativas de retorno, y arma la cartera final respetando todos los límites del Procedimiento de Inversión: bandas por clase de activo, máximo de renta variable, tope por emisor individual, exclusiones del Art. 170 y apalancamiento permitido.</p>
+
+<h2>Lo que hay que entender antes de cualquier otra cosa</h2>
+
+<p><b>El perfil de riesgo no es una etiqueta.</b> Eliges Conservador Defensivo, Conservador, Moderado o Agresivo, y eso reconfigura cuatro cosas a la vez: qué premia el puntaje, cuánto puntaje hace falta para recomendar comprar, qué techos de riesgo se aplican, y qué tan grande puede ser cada posición. El mismo instrumento, el mismo día, puede salir Sobreponderar en Agresivo y Subponderar en Conservador. Eso es intencional.</p>
+
+<p><b>El sistema no lee ninguna cuenta.</b> No sabe qué tienes, no sabe cuánto tienes, y no puede recomendarte algo por lo que ya tienes en el libro. Cada instrumento se evalúa por sus propios méritos.</p>
+
+<p><b>El sistema no ejecuta nada.</b> Produce una propuesta. Todas las decisiones pasan por el gestor.</p>
+
+<h2>Qué encontramos revisando el sistema anterior</h2>
+
+<p>Al integrar el screener con el modelo Black-Litterman existente, revisamos ese código contra su documento técnico y contra su propia salida guardada. Aparecieron tres problemas que impedían que funcionara:</p>
+
+<p><b>Uno.</b> El solver matemático que el código pedía (ECOS) no viene instalado en Colab. La última corrida guardada llegó hasta el paso de optimización, después de que el gestor ya había aprobado las views, y murió ahí sin producir ninguna cartera. Ahora se usa CLARABEL, que viene incluido.</p>
+
+<p><b>Dos.</b> El combinador de señales sumaba tres indicadores que viven en escalas distintas. El efecto práctico: un activo perfectamente neutral recibía una expectativa de retorno de <b>−1.40%</b> sin que ninguna señal lo justificara. En la corrida guardada, cuatro de las seis views generadas eran ese sesgo, no una señal real. Lo reprodujimos con los números exactos que imprimió el notebook.</p>
+
+<p><b>Tres.</b> El 70% del puntaje combinado era idéntico para todos los activos. El componente macro (50% del peso) es un solo número para toda la cesta, y el componente de posicionamiento (20%) resultó ser un valor fijo que el propio código comenta como "ficticio". Solo el 30% restante distinguía un bono soberano de una acción de semiconductores.</p>
+
+<p>También encontramos que el límite de apalancamiento estaba declarado pero nunca se aplicaba, y que la función de auditoría escribía "Auditoría OK" en disco sin comparar nada. Esa última nos parece la más delicada de todas: deja un documento afirmando cumplimiento que nada verificó.</p>
+
+<h2>[v2] Qué cambió después de la revisión del modelo</h2>
+
+<p>El modelo pasó por una revisión externa. Auditamos cada punto contra el código y contra datos reales, implementamos cinco, y en el camino los diagnósticos nuevos encontraron dos cosas que la revisión no vio. Esto es lo que cambió de fondo:</p>
+
+<p><b>Uno. Ahora hace falta ser bueno en términos absolutos para recomendar comprar.</b> El puntaje del sistema es <i>relativo</i>: siempre nombra un tercio superior, así el universo entero haya perdido dinero. La versión anterior de este documento decía lo contrario, y era falso — lo explicamos en detalle en la sección 6. El arreglo es un freno nuevo: para ser Sobreponderar, un instrumento tiene que tener momentum de 12 meses positivo y Sharpe sobre cero, o sea haberle ganado al efectivo. Corriendo el mismo universo re-trazado a distintos mercados:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Mercado</th><th>Sobreponderar sin el piso</th><th>Con el piso</th></tr>
+  <tr><th>Alcista, +20% al año</th><td>6</td><td>6</td></tr>
+  <tr><th>Plano, 0% al año</th><td>5</td><td>0</td></tr>
+  <tr><th>Bajista, −10% al año</th><td>3</td><td>0</td></tr>
+</table>
+
+<p>El caso plano era el hueco de verdad. El freno de "cuchillo cayendo" exige media móvil rota <i>y</i> momentum negativo, así que no hace nada cuando el mercado va de lado — pero con la tasa libre de riesgo en 4.25%, un año plano es Sharpe negativo. La fila alcista es el control: si el freno también mordiera cuando el universo sí es bueno, sería un error, no una protección.</p>
+
+<p><b>Dos. La cartera neutral de la que parte todo ya no es la capitalización de mercado.</b> Este es el cambio de mayor impacto y vale la pena entenderlo. La fórmula del equilibrio es una multiplicación: la cartera que le pases <i>es</i> el punto de partida. Con ocho views sobre veintitantos activos, cerca de tres cuartas partes del resultado final vienen de ahí — no es un detalle técnico, es la decisión más grande de toda la asignación.</p>
+
+<p>El sistema anterior normalizaba capitalización de acciones contra patrimonio de ETFs. Eso está mal por dos razones. La primera es que no son la misma unidad: la capitalización de una empresa es lo que vale la empresa, mientras que el patrimonio de un ETF es cuánta plata hay metida en ese envoltorio — y si el ETF es de renta variable, está contando otra vez acciones que ya están en la cesta. La segunda es peor: esa cuenta ancla cerca de 95% en renta variable, y ningún mandato de la casa permite eso.</p>
+
+<p>El efecto se ve solo: con el ancla vieja la cartera resuelta se iba contra el techo — en Conservador se pegaba <i>exactamente</i> a él. Renta variable total sobre la cesta de prueba de siete clases (17 nombres, 8 views):</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Estrategia</th><th>Techo de renta variable</th><th>Ancla de capitalización</th><th>Ancla de política</th></tr>
+  <tr><th>Conservador</th><td>50%</td><td>50.0%</td><td>18.4%</td></tr>
+  <tr><th>Moderado</th><td>60%</td><td>59.4%</td><td>27.4%</td></tr>
+  <tr><th>Agresivo</th><td>80%</td><td>62.8%</td><td>33.6%</td></tr>
+</table>
+
+<p><small>Estos son números de una cesta de prueba, no un pronóstico: se mueven con la composición. Lo que no se mueve es la dirección — el ancla de capitalización empuja contra el techo, la de política resuelve cómodamente adentro.</small></p>
+
+<p>Estar pegado al límite significa que <b>la banda estaba tomando la decisión de asignación y el modelo solo repartía lo que sobraba adentro</b>. Ahora el punto de partida es la cartera neutral del propio mandato, y el techo dejó de ser lo que decide.</p>
+
+<p><b>Tres. El bloque de sensibilidad al mercado se omite cuando no hay relación con el mercado que medir.</b> Aquí los datos nos movieron el arreglo. La sugerencia de la revisión era excluir renta fija y materias primas. Medido, la clase de activo resultó ser el criterio equivocado: LLY se explica por el S&amp;P con un R² de 0.005 y XLV con 0.021 — ambas acciones — mientras que el oro se explica mejor (0.187) que Apple (0.178). Una lista por clase de activo habría dejado adentro el peor caso y botado uno sano. El criterio ahora es estadístico.</p>
+
+<p>Qué pasaba si el bloque se quedaba: cuando la beta es prácticamente cero, el "alfa" deja de ser retorno que el mercado no explica y se convierte simplemente en el retorno del activo — que el bloque de momentum ya está puntuando. A LLY le acreditábamos un alfa de +70% contra un retorno total de +73%. El mismo rendimiento cobrado dos veces, con etiqueta de habilidad. Con el arreglo, TLT y DBA bajan de Neutral a Subponderar, que es donde sus retornos los ponen.</p>
+
+<p><b>Cuatro. La ventana de datos tenía cero holgura.</b> El sistema guardaba exactamente las 53 semanas que necesita la medida de momentum de 12 meses. Un viernes faltante — un feriado, un hueco de datos — y esa medida, que es la de mayor peso del modelo, se caía en silencio. Ahora se guardan 60. La otra mitad del arreglo: sin una ventana explícita, esas semanas de más habrían convertido cada estadística de "1 año" en una de 14 meses con todas las etiquetas diciendo un año. Ahora todo lo que dice "1 año" usa exactamente 52 observaciones, sin importar cuánta historia haya guardada.</p>
+
+<p><b>Cinco. El sistema ahora se mide a sí mismo.</b> Dos diagnósticos que corren en cada corrida y no cambian nada — están para que sepas cuánto confiar en lo de arriba. Los explicamos en la sección 10.</p>
+
+<p><b>Seis. Hay un piso de posición mínima.</b> Este no salió de la revisión sino de la mesa, y es de las correcciones más obvias en retrospectiva. El optimizador no tiene ninguna noción de qué vale la pena operar: si le conviene al objetivo, devuelve un 0.16% del libro. Eso es una boleta, una línea en cada reporte y una conciliación para siempre, a cambio de una contribución al riesgo que redondea a cero. Sobre un libro de US$5MM son US$8,000. Ahora todo lo que quede bajo 1% se elimina. La sección 9 explica el cómo, que importa más que el número.</p>
+
+<p><b>Siete. La selección del universo dejó de ser implícita y pasó a ser una política escrita.</b> Antes la respuesta a "¿por qué está este nombre y no aquel?" era, en el fondo, "porque alguien lo puso en una lista". Ahora hay cuatro reglas declaradas, en orden, y una lista igual de explícita de criterios <i>prohibidos</i> — cosas que sería tentador usar para filtrar y que meterían la respuesta dentro de la pregunta. El modelo publica esa política en cada corrida, junto con el nombre de cada rechazado y la regla que lo rechazó. La sección 3 la explica completa.</p>
+
+<p>De paso corregimos un número que veníamos repitiendo sin haberlo contado: el universo no son "unos 600 instrumentos". Son <b>447 candidatos</b> — 317 acciones únicas y 130 ETFs. Nadie lo había sumado.</p>
+
+<h2>Lo que todavía necesita una decisión humana</h2>
+
+<p>Hay dos números en el sistema que <b>no salen de ningún dato</b>, los pusimos nosotros, y alguien tiene que validarlos antes de operar con esto:</p>
+
+<p><b>El coeficiente de información (0.08).</b> Es qué tanto le creemos al ranking del screener como predictor de retornos. Está puesto conservadoramente bajo. Calibrarlo de verdad requiere guardar las recomendaciones del sistema durante varios meses y compararlas contra lo que efectivamente pasó.</p>
+
+<p><b>El techo de materias primas.</b> El Procedimiento de Inversión no tiene una banda para oro ni commodities, y el optimizador original solo restringe las clases que aparecen listadas — o sea que una posición en oro podía tomar el libro entero sin violar ninguna regla escrita. Le pusimos un techo por perfil (5%, 10%, 15% y 25%), pero ese número lo inventamos. Compliance tiene que dar el real.</p>
+
+<p><b>[v2] La asignación estratégica.</b> El punto de partida nuevo usa el punto medio de cada banda como la posición neutral de cada clase. Es una lectura razonable de un límite y es muchísimo mejor que lo que había, pero <b>un punto medio no es una asignación estratégica</b>. Una asignación estratégica la decide el Comité de Inversiones, y los documentos de la casa dan bandas, no objetivos. El código acepta los números reales el día que existan. Mientras tanto hay que saber una cosa: como los puntos medios se reparten sobre las clases que estén en la cesta, el punto de partida se mueve según cómo quede armada la cesta — algo que una asignación estratégica de verdad no haría. Pasar los objetivos reales elimina también ese efecto.</p>
+
+<hr>
+
+<h1>Índice</h1>
+
+<ol>
+  <li>El problema que resuelve</li>
+  <li>Vista de pájaro: las siete etapas</li>
+  <li>Etapa 1 — Elegir el universo (la política de selección) <b>[reescrita en v2]</b></li>
+  <li>Etapa 2 — Bajar los datos</li>
+  <li>Etapa 3 — Las 25 medidas, agrupadas en seis bloques</li>
+  <li>Etapa 4 — Poner a competir a todos (el puntaje)</li>
+  <li>Etapa 5 — Los frenos de riesgo</li>
+  <li>Etapa 6 — Cómo se determinan las views</li>
+  <li>Etapa 7 — La cartera final</li>
+  <li>Los diagnósticos: el sistema midiéndose a sí mismo <b>[nuevo en v2]</b></li>
+  <li>Los cuatro perfiles, lado a lado</li>
+  <li>Las reglas regulatorias dentro del código</li>
+  <li>Qué modificar y dónde (tabla de referencia)</li>
+  <li>Mapa de archivos</li>
+  <li>Qué mirar cuando algo sale raro</li>
+  <li>Limitaciones honestas</li>
+</ol>
+
+<hr>
+
+<h1>1. El problema que resuelve</h1>
+
+<p>Elegir instrumentos para una cartera tiene dos preguntas que suelen mezclarse: <i>¿qué compro?</i> y <i>¿cuánto compro de cada cosa?</i>. Son preguntas distintas y se contestan con herramientas distintas.</p>
+
+<p>La primera es de selección. Requiere comparar cientos de instrumentos entre sí bajo criterios consistentes. Un humano no puede hacer eso a mano sin sesgarse hacia lo que conoce.</p>
+
+<p>La segunda es de construcción de cartera. Requiere pensar en correlaciones, en cuánto riesgo aporta cada posición al total, y en los límites que impone el mandato. Ahí la intuición falla feo: dos posiciones de 5% no son lo mismo si una es un bono soberano y la otra una acción de semiconductores.</p>
+
+<p>El sistema separa las dos preguntas. El screener contesta la primera. Black-Litterman contesta la segunda. La frontera es nítida y vale la pena memorizarla para mañana:</p>
+
+<p style="margin-left:40px"><b>El screener decide sobre qué nombres hay una opinión y qué tan fuerte es. Black-Litterman decide los pesos.</b></p>
+
+<hr>
+
+<h1>2. Vista de pájaro: las siete etapas</h1>
+
+<p>De principio a fin, el notebook hace esto:</p>
+
+<ol>
+  <li><b>Elige el universo</b> — qué instrumentos entran a competir.</li>
+  <li><b>Baja los datos</b> — dos años de precios diarios y volumen de Yahoo Finance.</li>
+  <li><b>Calcula 25 medidas</b> por instrumento, agrupadas en seis bloques temáticos.</li>
+  <li><b>Los pone a competir</b> — convierte cada medida en una nota relativa al resto.</li>
+  <li><b>Aplica frenos de riesgo</b> — límites duros que solo pueden bajar una recomendación, nunca subirla.</li>
+  <li><b>Genera las views</b> — traduce el ranking a expectativas de retorno con su nivel de confianza.</li>
+  <li><b>Arma la cartera</b> — optimización con todos los límites regulatorios.</li>
+</ol>
+
+<p>El resultado: un archivo de Excel con nueve hojas, y opcionalmente un archivo para el sistema Black-Litterman existente.</p>
+
+<hr>
+
+<h1>3. Etapa 1 — Elegir el universo</h1>
+
+<h2>[v2] La política de selección</h2>
+
+<p>Esta sección se reescribió entera. La pregunta que la motivó fue directa: <i>¿cuál es el criterio para decidir qué acciones entran a evaluarse y cuáles no, más allá de que estén en el S&amp;P, el Nasdaq o el Dow?</i> La respuesta honesta era que no había uno escrito — había una lista, y la lista era el criterio. Eso no es una política, es un hábito.</p>
+
+<p>Ahora sí hay una política, y está en el código, no en la cabeza de nadie. Son <b>cuatro reglas que corren en orden</b>, y el orden importa: cuando un nombre falla, el sistema reporta la <i>primera</i> regla que lo botó, para que el motivo que te den sea accionable.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>#</th><th>Regla</th><th>Qué pregunta</th><th>Por qué</th></tr>
+  <tr>
+    <td>1</td><td><b>Listado y pertenencia</b></td>
+    <td>¿Cotiza en EE.UU. y es miembro de algún índice del universo, o ETF de la lista curada?</td>
+    <td>Es la definición de alcance del mandato. No es una opinión sobre el activo.</td>
+  </tr>
+  <tr>
+    <td>2</td><td><b>Tipo de producto</b></td>
+    <td>¿Es apalancado, inverso, de un solo subyacente, covered-call o ETN?</td>
+    <td>Su retorno depende del <i>camino</i> del precio, no del punto de llegada. Las métricas no son comparables con las de una acción normal, así que meterlos produce un orden sin sentido.</td>
+  </tr>
+  <tr>
+    <td>3</td><td><b>Suficiencia de datos</b></td>
+    <td>¿Tiene historia para calcular el modelo <i>completo</i>? Hoy son 53 barras semanales — 12 meses justos.</td>
+    <td>Un nombre de historia corta no es peor: es <b>no medible sobre la misma base</b>. Dejarlo entrar compara un compuesto de tres métricas contra uno de seis, y el de tres casi siempre gana por accidente.</td>
+  </tr>
+  <tr>
+    <td>4</td><td><b>Negociabilidad</b></td>
+    <td>¿Cumple precio mínimo, volumen diario mínimo y días para liquidar?</td>
+    <td>Define si la posición se puede construir y deshacer sin pagar impacto. Es el único de los cuatro que <b>depende del perfil</b>.</td>
+  </tr>
+</table>
+
+<p>El umbral de la regla 3 no es un número que alguien eligió: <b>se deriva del modelo vigente</b>. El sistema recorre las métricas activas, pregunta cuántas barras necesita cada una, y toma el máximo. Hoy manda el momentum de 12 meses con 53. Si mañana le bajas el peso a cero, el piso baja solo. Es la diferencia entre una constante y una política.</p>
+
+<h2>[v2] Lo que la política prohíbe explícitamente</h2>
+
+<p>Esta es la mitad que normalmente no se escribe, y es la que más protege. Hay tres criterios que <b>no</b> se pueden usar para armar el universo, cada uno con su razón:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Prohibido</th><th>Por qué</th></tr>
+  <tr>
+    <td><b>Desempeño</b> — retorno, momentum, Sharpe, volatilidad, drawdown, beta</td>
+    <td>Quitar a los perdedores <i>antes</i> de puntuar hace que los que quedan parezcan promedio. Es meter la respuesta dentro de la pregunta, y el ranking resultante no significa nada.</td>
+  </tr>
+  <tr>
+    <td><b>Sector</b> — balancear el universo por industria</td>
+    <td>La nota es transversal: la composición del universo define contra quién se mide cada nombre. Equilibrarla a mano es decidir el resultado por la puerta de atrás.</td>
+  </tr>
+  <tr>
+    <td><b>Tamaño</b> — capitalización de mercado</td>
+    <td>Más allá del piso de liquidez que ya impone la regla 4, filtrar por tamaño es una apuesta de factor disfrazada de higiene.</td>
+  </tr>
+</table>
+
+<p>La regla general detrás de las tres: <b>el universo se define por lo que se puede medir y operar, nunca por lo que se espera que rinda.</b> Todo lo que tenga que ver con qué tan bueno se ve un activo es trabajo del ranking, y el ranking viene después.</p>
+
+<h2>[v2] Cuántos activos son, en realidad</h2>
+
+<p>Veníamos diciendo "unos 600 instrumentos" en todos los documentos. Nadie lo había contado. Los conté:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Fuente</th><th>Nombres</th></tr>
+  <tr><td>Acciones — S&amp;P 500 (subconjunto curado por sector) + Nasdaq-100 + Dow Jones, sin duplicar</td><td>317</td></tr>
+  <tr><td>ETFs curados — amplios, sectoriales, de estilo, renta fija, internacional, materias primas</td><td>130</td></tr>
+  <tr><th>Candidatos</th><th>447</th></tr>
+</table>
+
+<p>De esos 447, tres de las cuatro reglas casi no botan a nadie — y eso no es un defecto, es que el problema ya viene resuelto aguas arriba. La regla 1 no puede botar a nadie porque el conjunto de partida <i>es</i> la lista de índices. La regla 2 tampoco, porque los apalancados ya se sacaron a mano de la lista de ETFs (el filtro por nombre queda como red de seguridad para cuando alguien meta tickers propios). Y la regla 3 solo afecta a lo que listó hace menos de un año, que de un índice grande es casi nada: para entrar al S&amp;P hay que llevar años cotizando.</p>
+
+<p><b>La que manda es la regla 4, la de negociabilidad, y muerde distinto según el perfil:</b></p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Perfil</th><th>Volumen diario mínimo</th><th>Precio mínimo</th><th>Universo evaluado (estimado)</th></tr>
+  <tr><th>Agresivo</th><td>US$10 MM</td><td>US$5</td><td>~425–435</td></tr>
+  <tr><th>Moderado</th><td>US$20 MM</td><td>US$5</td><td>~410–425</td></tr>
+  <tr><th>Conservador</th><td>US$50 MM</td><td>US$10</td><td>~380–400</td></tr>
+  <tr><th>Cons. Defensivo</th><td>US$100 MM</td><td>US$10</td><td>~310–350</td></tr>
+</table>
+
+<p>En acciones el filtro casi no se siente: la mediana del S&amp;P negocia entre US$150 y US$300 millones diarios, así que US$20 MM no le hace cosquillas a nadie y US$50 MM bota solo la cola pequeña. A US$100 MM sí empieza a doler.</p>
+
+<p>En ETFs es al revés, y ahí es donde se ve el filtro trabajar. De los ~4,000 ETFs listados en EE.UU., apenas unos 200 negocian más de US$100 MM diarios. Los 130 de la lista están sesgados hacia los líquidos, pero la cola — materias primas específicas, países individuales, factores de nicho — se cae rápido. Un caso concreto ya medido: <b>DBA negocia US$30.6 MM diarios</b>, o sea que entra en Moderado y Agresivo, y se cae en Conservador y Cons. Defensivo.</p>
+
+<p><b>Los rangos de la tabla son razonamiento, no medición.</b> El volumen real por ticker solo se conoce con datos en vivo. Por eso el modelo publica el número exacto en cada corrida: la sección <i>4b · Política de selección del universo</i> imprime las reglas en orden, los conteos de candidatos y admitidos, y la lista de cada rechazado con la regla que lo rechazó. Lo mismo va a la hoja <b>Universo</b> del Excel. La primera corrida con datos en vivo te da el número real, no esta estimación.</p>
+
+<h2>Del universo a la cartera</h2>
+
+<p>Conviene tener claro que ese universo de ~400 <b>no es la cartera</b>. Es lo que se evalúa. El embudo completo:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Etapa</th><th>Nombres</th><th>Qué la determina</th></tr>
+  <tr><td>Candidatos</td><td>447</td><td>Las listas curadas</td></tr>
+  <tr><td>Universo evaluado</td><td>~310–435</td><td>La política de selección, sobre todo la liquidez del perfil</td></tr>
+  <tr><td>Cesta del optimizador</td><td>25</td><td>Top del ranking, con mínimo 3 por clase para que las bandas sean alcanzables</td></tr>
+  <tr><th>Cartera ejecutada</th><th>8–15</th><th>Lo que resuelve el optimizador, después del piso de 1%</th></tr>
+</table>
+
+<h2>Usar tu propia lista</h2>
+
+<p><b>Puedes pasarle tus propios tickers.</b> Hay un campo para escribirlos separados por coma. Si haces eso, activa también la opción de bajar nombres largos — sin ellos, el filtro de productos apalancados no tiene con qué trabajar y podría colarse un ETF que no quieres. El sistema te lo advierte en la corrida, pero vale saberlo de antemano.</p>
+
+<hr>
+
+<h1>4. Etapa 2 — Bajar los datos</h1>
+
+<p>Se bajan dos años de precios diarios y volumen. De ahí salen dos series distintas, y la distinción importa más de lo que parece:</p>
+
+<p><b>El precio ajustado</b> se usa para todo lo que tenga que ver con rendimientos. Está corregido por dividendos y splits. Si usáramos el precio crudo, el día que una acción paga dividendo el precio cae y el sistema lo leería como una pérdida, cuando en realidad el inversionista recibió efectivo.</p>
+
+<p><b>El precio crudo</b> se usa para el filtro de precio mínimo, para el máximo y mínimo de 52 semanas, y para calcular el volumen negociado en dólares. Ahí lo que importa es a qué precio se transa de verdad la acción, no un precio retroajustado.</p>
+
+<p>Mezclar las dos series corrompería dos medidas concretas: qué tan cerca está el precio de su máximo del año, y en qué punto del rango anual se encuentra. Ambas comparan un precio contra una banda, y los dos lados de esa comparación tienen que venir de la misma serie.</p>
+
+<h2>Qué se pierde frente a IBKR</h2>
+
+<p>Yahoo publica la cadena de opciones de hoy, pero no un histórico de volatilidad implícita. Eso significa que <b>una de las 25 medidas no se puede calcular</b>: el percentil de volatilidad implícita a 52 semanas.</p>
+
+<p>El sistema <b>la omite en vez de rellenarla con cero</b>, y esa decisión es importante. Si la rellenáramos con cero, todos los instrumentos cargarían el mismo lastre artificial y el bloque completo se convertiría en ruido con apariencia de señal. Al omitirla, el motor redistribuye el peso entre las medidas que sí están.</p>
+
+<p>Hay una celda que imprime exactamente qué medidas faltaron y en qué proporción, <b>antes</b> de que veas un solo ranking. Vale la pena mirarla siempre.</p>
+
+<h2>[v2] Cuántas semanas se guardan, y por qué "1 año" quiere decir un año</h2>
+
+<p>La medida de momentum de 12 meses mira el retorno de 48 semanas saltándose las 4 más recientes, así que necesita 53 semanas de historia. El sistema guardaba exactamente 53. Cero holgura: un viernes faltante y la medida de mayor peso del modelo devolvía "no disponible", en silencio, y el bloque de momentum se recalculaba sin ella.</p>
+
+<p>Ahora se guardan 60 semanas. Pero eso crea el problema opuesto, y es sutil: las medidas de riesgo — volatilidad, Sharpe, peor caída, beta — se calculaban con todas las semanas que hubiera. Con 60 semanas guardadas se habrían convertido en estadísticas de 14 meses, mientras la etiqueta, la columna del reporte y este documento seguían diciendo "1 año".</p>
+
+<p>Entonces se separaron las dos cosas: el momentum lee toda la historia guardada, y todo lo que dice "1 año" usa exactamente 52 observaciones sin importar cuánta historia haya. La garantía está probada en su forma fuerte — 60 semanas y la misma serie cortada a 53 producen valores idénticos en las 25 medidas.</p>
+
+<hr>
+
+<h1>5. Etapa 3 — Las 25 medidas, agrupadas en seis bloques</h1>
+
+<p>Cada bloque contesta una pregunta distinta sobre el instrumento. Los pesos que aparecen abajo son los del perfil Moderado; cambian con el perfil.</p>
+
+<h2>Momentum y tendencia — 25%</h2>
+<p>¿Viene subiendo? Seis medidas: retorno de 12 meses excluyendo el último mes, retorno de 6 meses, retorno de 3 meses, distancia al máximo de 52 semanas, posición respecto a la media móvil de 40 semanas, y si esa media viene subiendo o aplanándose.</p>
+<p>Lo de excluir el último mes es deliberado: en el corto plazo los precios tienden a rebotar contra la tendencia, así que incluir el mes más reciente ensucia la señal en vez de mejorarla.</p>
+
+<h2>Retorno ajustado por riesgo — 21%</h2>
+<p>¿El retorno compensó el riesgo? Cuatro medidas: Sharpe, Sortino, Calmar y el porcentaje de semanas positivas.</p>
+<p>Sortino y Calmar están junto a Sharpe a propósito. Sharpe castiga toda la volatilidad, incluida la de las subidas — pero nadie sufre porque su posición suba rápido. Sortino solo mira las caídas. Calmar divide el retorno anual entre la peor caída, que es lo que en la práctica determina si un cliente aguanta la posición o llama a vender.</p>
+
+<h2>Volatilidad y caídas — 17%</h2>
+<p>¿Cuánto duele tenerlo? Cuatro medidas: volatilidad anualizada, peor caída pico a valle, desviación de los retornos negativos, e índice de úlcera (que mide profundidad <i>y</i> duración de las caídas, no solo la profundidad).</p>
+<p>Este bloque es el freno del bloque de momentum. Sin él, el sistema tendería a cargar sistemáticamente en lo que más ha subido, que suele ser también lo más volátil.</p>
+<p>Este bloque se puntúa <b>por separado entre ETFs y acciones individuales</b>. Un ETF diversificado es estructuralmente menos volátil que una acción. Compararlos en la misma bolsa le regalaría a todos los ETFs una nota alta de riesgo por pura construcción, sin que eso signifique nada.</p>
+
+<h2>Sensibilidad al mercado y calidad del alfa — 14%</h2>
+<p>¿Lo que rinde es propio o es solo mercado? Cuatro medidas: captura de subidas menos captura de bajadas, alfa de Jensen anualizado, porción de la varianza que no explica el mercado, y beta.</p>
+<p>La lógica: exposición al mercado se compra en SPY por 3 puntos básicos. Lo que justifica tomar riesgo de un nombre individual es que aporte algo que el índice no da.</p>
+
+<p><b>[v2] Este bloque completo se omite cuando el índice no explica al instrumento.</b> Las cuatro medidas están definidas contra una relación con el mercado; si esa relación no existe estadísticamente, no hay nada que interpretar. El sistema lo verifica con la significancia de la beta, no con la clase de activo — y esa distinción resultó ser todo el asunto: LLY se explica por el S&amp;P con un R² de 0.005, XLV con 0.021, mientras el oro se explica mejor (0.187) que Apple (0.178). Excluir "renta fija y materias primas" habría dejado adentro exactamente el peor caso.</p>
+
+<p>Lo que se rompía si el bloque se quedaba: con beta cerca de cero, el alfa deja de ser "retorno que el mercado no explica" y pasa a ser el retorno del activo, que ya lo puntúa el bloque de momentum. Es el mismo rendimiento contado dos veces, con una etiqueta que se lee como habilidad.</p>
+
+<p>También probamos dejar solo beta y la porción no explicada, y salió peor de lo que parece: como los pesos se redistribuyen sobre las medidas que quedan, quitar dos de cuatro no reduce la influencia del bloque, solo cambia quién la decide. Beta y porción no explicada son las dos la misma cosa dicha de dos maneras, así que los activos descorrelacionados barrían las dos y el bloque se quedaba sin ningún término de retorno adentro. Con eso, TLT quedaba quinto en "calidad del alfa" en un año en que perdió 4.9%, y DBA segundo con un retorno de +2.0%.</p>
+
+<h2>Liquidez y capacidad de operar — 11%</h2>
+<p>¿Se puede entrar y salir? Tres medidas: volumen diario promedio en dólares, cuántos días tomaría liquidar una posición, y qué tan estable es ese volumen.</p>
+<p>La tercera importa más de lo que suena. Un nombre cuya liquidez aparece solo en días de resultados tiene un promedio que exagera la profundidad disponible un día cualquiera.</p>
+
+<h2>Valuación y carry — 12%</h2>
+<p>Cuatro medidas: dividend yield, volatilidad implícita menos realizada, percentil de volatilidad implícita, y posición dentro del rango anual.</p>
+<p>Este es el bloque más débil de los seis, y conviene decirlo. Yahoo no da ratios fundamentales como P/E o EV/EBITDA, así que se usan aproximaciones de mercado. Con Yahoo, además, dos de las cuatro medidas no están disponibles. Si en algún momento se conecta una fuente de fundamentales, este es el bloque que más mejora.</p>
+
+<hr>
+
+<h1>6. Etapa 4 — Poner a competir a todos</h1>
+
+<p>Aquí está la idea central del sistema, y si mañana explicas una sola cosa técnica, que sea esta.</p>
+
+<p>Cada medida cruda no dice nada por sí sola. Un Sharpe de 1.2 no es "bueno" o "malo" en abstracto: depende de contra qué se compare. Entonces el sistema convierte cada medida en <b>una nota relativa al resto del universo ese día</b>.</p>
+
+<p>La nota se llama z-score y se lee así: cero es el promedio del universo, +1 es notablemente mejor que el promedio, −1 notablemente peor. En la práctica casi todo cae entre −2 y +2.</p>
+
+<p>Antes de calcular la nota se recortan los extremos (el 5% de arriba y el 5% de abajo). Un solo nombre con un retorno de 300% comprimiría a todos los demás en un pañuelo y haría que las diferencias reales entre ellos desaparecieran.</p>
+
+<p>Después las notas se promedian dentro de cada bloque, y los seis bloques se promedian con los pesos del perfil. Eso da un <b>puntaje compuesto</b>, que se convierte en:</p>
+<ul>
+  <li>Un <b>puntaje de 0 a 100</b>, que es simplemente el lugar en la fila.</li>
+  <li>Un <b>z compuesto</b>, que es qué tan lejos del promedio está.</li>
+  <li>Una <b>recomendación</b>: Sobreponderar, Neutral o Subponderar, según umbrales que dependen del perfil.</li>
+</ul>
+
+<h2>[v2] Una corrección importante a la versión anterior de este documento</h2>
+
+<p>La versión 1 decía aquí: <i>"si el universo entero está mediocre, no habrá muchos Sobreponderar; los umbrales están puestos sobre el z, no sobre el percentil"</i>. <b>Eso es falso</b>, y lo estaba también en un comentario del código. Conviene explicar por qué, porque es el tipo de error que suena bien y no lo es.</p>
+
+<p>Calcular la nota relativa consiste en restarle a cada instrumento el promedio del universo y dividir entre la dispersión del universo. Después de esa cuenta, la forma de la distribución es la misma <b>siempre</b>: si todos subieron 40% o si todos cayeron 40%, un umbral de +0.50 sigue nombrando aproximadamente el tercio superior. Usar percentiles habría dado exactamente lo mismo — z y percentil son la misma información ordenada de dos maneras. Nada en ese paso sabe si el universo es bueno o malo.</p>
+
+<p>Dicho de otro modo: el sistema siempre te va a decir cuáles son los mejores del grupo. Que los mejores del grupo valgan la pena es una pregunta distinta, y hasta ahora nadie la estaba haciendo.</p>
+
+<p><b>Dónde vive ahora la pregunta absoluta:</b> en los frenos de riesgo, que se aplican después de puntuar y solo pueden bajar una recomendación. Para ser Sobreponderar hay que tener momentum de 12 meses positivo y Sharpe sobre cero. Es una vara deliberadamente baja — no pide "bueno", pide "no malo en términos absolutos": que haya subido, y que le haya ganado al efectivo.</p>
+
+<p>Un nombre que no cumple eso puede seguir siendo lo mejor disponible del universo y seguir mereciendo un Neutral. Lo que no puede ser es una instrucción de tener <i>más</i> que el índice. Esa distinción es la que faltaba.</p>
+
+<hr>
+
+<h1>7. Etapa 5 — Los frenos de riesgo</h1>
+
+<p>Después de puntuar, se aplican límites duros. Estos <b>solo pueden bajar</b> una recomendación, nunca subirla. Son las restricciones que un jefe de riesgo pondría encima del modelo:</p>
+
+<ul>
+  <li><b>[v2] Calidad absoluta.</b> Para ser Sobreponderar hay que tener momentum de 12 meses positivo y Sharpe sobre cero. Es el único punto del modelo donde un nombre se mide contra algo que no son sus pares, y es lo que hace que en un mercado plano o cayendo no salga una tanda de recomendaciones de compra. Ver la sección 6.</li>
+  <li><b>Cuchillo cayendo.</b> Si el precio está por debajo de su media de largo plazo <i>y</i> el momentum de 12 meses es negativo, no puede ser Sobreponderar por barato que se vea.</li>
+  <li><b>Amplificador.</b> Caída histórica profunda combinada con beta alta baja la recomendación a Neutral.</li>
+  <li><b>Capacidad.</b> Si no se puede liquidar la posición en el plazo definido, no es una idea accionable.</li>
+  <li><b>Techo de volatilidad.</b> Por encima de cierto nivel no se permite Sobreponderar. Hay dos razones: las estadísticas estimadas con 52 observaciones semanales dejan de ser confiables, y el dimensionamiento por volatilidad inversa reduce la posición a algo tan chico que llamarla "alta convicción" no significa nada.</li>
+  <li><b>Redundancia.</b> Dos instrumentos que se mueven casi idénticos son la misma apuesta con distinto envoltorio. Solo el mejor puntuado conserva el Sobreponderar. Sin esto, el sistema recomendaría IWM y VTWO al mismo tiempo, que son el mismo índice.</li>
+</ul>
+
+<p>Un nombre puede activar varios frenos a la vez y eso está bien: son razones distintas y el reporte las lista todas. El castigo a la convicción se aplica <b>una vez por nombre</b>, no una vez por freno, así que nada se cobra doble.</p>
+
+<hr>
+
+<h1>8. Etapa 6 — Cómo se determinan las views</h1>
+
+<p>Esta es la parte que conecta las dos mitades, y la que más vale la pena entender bien.</p>
+
+<h2>Qué es una view</h2>
+
+<p>Black-Litterman parte de asumir que el mercado, en promedio, tiene razón. Calcula qué retornos están implícitos en los pesos actuales del mercado — eso se llama el equilibrio. Después le permites al gestor decir "yo creo que <i>esto</i> va a rendir distinto a lo que el mercado supone". Eso es una view, y el modelo la mezcla con el equilibrio de forma matemáticamente ordenada.</p>
+
+<p>Una view tiene dos números:</p>
+<ul>
+  <li><b>Q</b> — cuánto crees que va a rendir de más o de menos.</li>
+  <li><b>Convicción</b> — qué tanto le crees a esa opinión.</li>
+</ul>
+
+<p>Son cosas separadas y el sistema las trata como tales. Puedes tener una opinión fuerte con poca confianza, o una opinión modesta con mucha confianza.</p>
+
+<h2>De dónde sale Q</h2>
+
+<p>El problema: el puntaje del screener es un <b>ranking</b>, no un pronóstico de retorno. Decir "este nombre está en el percentil 90" no es lo mismo que decir "este nombre va a rendir 4%". Hay que traducir, y la traducción es esta:</p>
+
+<p style="margin-left:40px"><b>Q = 0.08 × (z compuesto) × (volatilidad del instrumento)</b></p>
+
+<p>Dos propiedades de esa fórmula, y las dos son deliberadas:</p>
+
+<p><b>Está escalada por riesgo.</b> A igual posición en el ranking, un instrumento más volátil recibe una expectativa de retorno mayor. Suena raro pero es exactamente lo que necesita el optimizador: como divide retorno esperado entre riesgo, una fórmula plana lo llevaría a sobreponderar sistemáticamente lo de baja volatilidad.</p>
+
+<p><b>Está centrada.</b> Un instrumento en la mitad del ranking (z = 0) recibe Q = 0 exacto. Ni positivo ni negativo. Esto es precisamente lo que estaba roto en el sistema anterior, donde un activo neutral recibía −1.40% por un problema de escalas.</p>
+
+<p>El resultado se recorta a ±5%, que es la banda que especifica el documento técnico del Procedimiento.</p>
+
+<p><b>El 0.08 es un supuesto, no una medición.</b> Representa cuánta correlación asumimos entre el ranking del screener y los retornos que efectivamente ocurren. Lo pusimos bajo a propósito. Está declarado como supuesto en el archivo exportado, en la justificación que ve el gestor, y en la hoja de parámetros del Excel — para que nadie lo confunda con un dato.</p>
+
+<h2>De dónde sale la convicción</h2>
+
+<p>La convicción alimenta la matriz de incertidumbre del modelo. No mide <i>qué tan fuerte</i> es la señal — eso ya está en Q. Mide <b>qué tanta confianza tenemos en la estimación</b>, y se construye con tres cosas:</p>
+
+<ul>
+  <li><b>Fuerza de la señal.</b> Qué tan lejos del promedio está el nombre. Satura: un z de 3 no vale el triple que un z de 1, porque ambos ya dicen "claramente en un extremo".</li>
+  <li><b>Acuerdo entre bloques.</b> Cuántos de los seis bloques apuntan en la misma dirección que el puntaje total. Un nombre que puntúa +1.5 porque los seis coinciden es una cosa muy distinta de uno que puntúa +1.5 porque un bloque lo carga y cinco lo contradicen. La segunda merece mucha menos confianza aunque el Q sea idéntico.</li>
+  <li><b>Cobertura de datos.</b> Qué proporción de las medidas estaba efectivamente disponible.</li>
+</ul>
+
+<p>Y un castigo: <b>si se activó cualquier freno de riesgo, la convicción se reduce a la mitad</b>. Ese castigo siempre muerde, incluso en los nombres más fuertes — que son precisamente aquellos para los que existen los frenos.</p>
+
+<h2>Ejemplo completo con números reales</h2>
+
+<p>Una corrida del perfil Moderado. El nombre mejor puntuado fue JPM:</p>
+
+<ul>
+  <li>Puntaje: 100 de 100</li>
+  <li>z compuesto: +1.53</li>
+  <li>Volatilidad anualizada: 21.5%</li>
+</ul>
+
+<p>Retorno esperado:</p>
+<p style="margin-left:40px"><b>Q = 0.08 × 1.53 × 0.215 = +2.63%</b></p>
+
+<p>Convicción:</p>
+<ul>
+  <li>Fuerza de señal: 0.77 (z de 1.53, saturando)</li>
+  <li>Acuerdo entre bloques: 83% de los bloques a favor → factor 0.92</li>
+  <li>Cobertura de datos: 87% → factor 0.95</li>
+  <li>Frenos activos: ninguno → factor 1.00</li>
+</ul>
+<p style="margin-left:40px"><b>Convicción = 0.85 × 0.77 × 0.92 × 0.95 = 0.57</b></p>
+
+<p>Y el desglose por bloque que produjo ese puntaje:</p>
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Bloque</th><th>Nota</th><th>Lectura</th></tr>
+  <tr><td>Retorno ajustado por riesgo</td><td>+1.59</td><td>muy fuerte</td></tr>
+  <tr><td>Sensibilidad y alfa</td><td>+1.37</td><td>muy fuerte</td></tr>
+  <tr><td>Momentum</td><td>+1.22</td><td>fuerte</td></tr>
+  <tr><td>Liquidez</td><td>+0.83</td><td>buena</td></tr>
+  <tr><td>Volatilidad y caídas</td><td>+0.07</td><td>neutral</td></tr>
+  <tr><td>Valuación y carry</td><td>−1.12</td><td>en contra</td></tr>
+</table>
+
+<p>Ese último renglón es el que explica por qué la convicción es 0.57 y no más alta: cinco bloques a favor, uno claramente en contra. La justificación que acompaña cada view escribe esto en texto, para que el gestor vea de inmediato qué la sostiene y qué la debilita.</p>
+
+<h2>Views absolutas y relativas</h2>
+
+<p>Si el instrumento tiene declarado un ETF de referencia (una acción contra su sector, por ejemplo AAPL contra QQQ), el sistema genera una <b>view relativa</b>: "AAPL va a rendir X más que QQQ". En ese caso el Q se calcula con la diferencia de puntajes entre los dos y con la volatilidad del <i>spread</i>, no la de una pata sola. Dos nombres que se mueven juntos tienen un spread estrecho y no pueden sostener el mismo Q que dos independientes.</p>
+
+<p>Si no tiene referencia, se genera una <b>view absoluta</b> sobre el instrumento solo.</p>
+
+<h2>Cuáles no llegan a ser view</h2>
+
+<p>Se descartan tres tipos:</p>
+<ul>
+  <li>Los que están en la mitad del ranking (|z| menor a 0.35). No aportan información.</li>
+  <li>Los que quedan con convicción menor a 0.20. Es el mismo filtro que ya usaba el sistema anterior para evitar rotación innecesaria.</li>
+  <li>Todo lo que sobre después de las 8 mejores por convicción.</li>
+</ul>
+
+<hr>
+
+<h1>9. Etapa 7 — La cartera final</h1>
+
+<p>Con las views listas, el modelo hace cuatro cosas:</p>
+
+<p><b>[v2] Calcula el punto de partida.</b> Aquí es donde ocurrió el cambio de mayor impacto del modelo, así que vale detenerse.</p>
+
+<p>La fórmula del equilibrio es literalmente una multiplicación: <i>retorno implícito = aversión al riesgo × matriz de riesgo × cartera de partida</i>. Lo que le pases como cartera de partida <b>es</b> la cartera neutral del modelo. Con ocho views sobre veintitantos activos, cerca de tres cuartas partes de los pesos finales salen de ahí. No es un parámetro más: es la decisión más grande de toda la asignación.</p>
+
+<p><b>Lo que hacía antes.</b> Normalizaba la capitalización de las acciones contra el patrimonio de los ETFs. Dos problemas. No son la misma unidad — la capitalización de una empresa es lo que vale la empresa, el patrimonio de un ETF es cuánta plata hay en ese envoltorio, y un ETF de acciones cuenta otra vez papeles que ya están en la cesta. Y sobre todo: esa cuenta ancla cerca de 95% en renta variable, cuando ningún mandato de la casa pasa de 80%.</p>
+
+<p>El resultado era que la cartera se iba contra el techo de renta variable: pegada <i>exactamente</i> a él en Conservador, y a un pelo en Moderado. Eso quiere decir que <b>la banda regulatoria estaba haciendo la asignación de activos</b>, y el modelo solo decidía cómo repartir por dentro. El ranking del screener apenas llegaba a la cartera. (En Agresivo no llega al techo ni con el ancla vieja, y por una razón distinta: a 80% de renta variable la penalización por riesgo ya pesa más que el retorno esperado.)</p>
+
+<p><b>Lo que hace ahora.</b> Parte de la cartera neutral del propio mandato: cada clase de activo en el punto medio de su banda, repartido sobre las clases que efectivamente están en la cesta, y con el techo de renta variable aplicado al punto de partida mismo. Dentro de cada clase el reparto sí es por capitalización — ahí comparar valores de mercado sí tiene sentido, porque estás comparando acciones contra acciones.</p>
+
+<p>La propiedad que confirma que está bien hecho: <b>sin views, el optimizador te devuelve exactamente esa cartera</b>. Verificado en las cuatro estrategias. O sea que cuando el modelo no tiene nada que decir, el resultado es la asignación del mandato, y las views se desvían de ahí. Así es como debe funcionar.</p>
+
+<p>El notebook tiene un parámetro llamado <b>ANCLA</b> para correr las dos y comparar. Por defecto viene en "politica".</p>
+
+<p>Un detalle que se mantiene: si no se consigue la capitalización de algún nombre, <b>el sistema lo reporta</b>. El código anterior le asignaba mil millones por defecto, lo que significa que un ETF de 80 mil millones que fallara al descargar pesaría lo mismo que uno chico, sin ninguna advertencia. Con el ancla nueva el daño además queda contenido: un dato faltante hace que <i>esa clase</i> se reparta en partes iguales, sin mover el resto de la cartera.</p>
+
+<p><b>Estima la matriz de correlaciones.</b> Con retornos diarios y una técnica de contracción llamada Ledoit-Wolf, que estabiliza la estimación cuando hay más instrumentos que observaciones.</p>
+
+<p><b>Mezcla equilibrio y views.</b> Esa es la parte propiamente Black-Litterman. Las views con más convicción mueven más el resultado.</p>
+
+<p><b>Optimiza con todos los límites.</b> Maximiza retorno esperado menos una penalización por riesgo, sujeto a: bandas por clase de activo, máximo de renta variable total, tope por acción individual, exclusiones duras del Art. 170, prohibición de cortos, y presupuesto de apalancamiento con el buffer de 95%.</p>
+
+<h2>[v2] Cuántas posiciones tiene la cartera</h2>
+
+<p>Vale aclararlo porque es lo primero que uno asume y no es así: <b>nadie elige el número de posiciones</b>. No hay un objetivo de diversificación ni un máximo de nombres en ninguna parte del modelo. El número sale de dos pasos:</p>
+
+<ol>
+  <li>La función que arma la cesta escoge el universo <i>candidato</i>: los 25 mejores por puntaje más al menos tres de cada clase de activo, para que las bandas sean alcanzables. Eso es un techo de qué se considera, no una meta de qué se tiene.</li>
+  <li>El optimizador pone peso donde mejore el objetivo, sujeto a las restricciones. Cuántos nombres terminan con peso distinto de cero es una <b>consecuencia</b> de esa cuenta.</li>
+</ol>
+
+<p>Así que la respuesta a "¿por qué quince posiciones?" es "porque eso dio la matemática". Lo cual está bien, y es exactamente por qué hacía falta lo que sigue.</p>
+
+<h2>[v2] El piso de posición mínima</h2>
+
+<p>Un optimizador de media-varianza no sabe qué vale la pena operar. En la corrida de referencia devolvió XLF en <b>0.159%</b> y otro nombre en prácticamente cero. Nadie va a abrir una posición de esas: cuesta una boleta, una línea en cada reporte y una conciliación para siempre, a cambio de una contribución al riesgo que redondea a nada. Sobre un libro de US$5MM, ese 0.159% son US$8,000.</p>
+
+<p>El parámetro <b>POSICION_MINIMA</b> (1% por defecto) las elimina. Y aquí lo importante no es el número sino <b>cómo</b> se aplica.</p>
+
+<p>Lo obvio sería borrar esos pesos del resultado. Sería un error. Si borras un peso después del hecho, el libro queda corto de presupuesto, y puedes empujar a otro nombre por encima de su tope individual o a una clase fuera de su banda. Los pesos dejarían de ser la solución de ningún problema planteado, pero se seguirían presentando como si lo fueran — que es precisamente la clase de cosa que una revisión de modelo existe para atrapar.</p>
+
+<p>Lo que hace el sistema es <b>forzar esos nombres a cero y volver a optimizar</b>. Cada pasada es una optimización restringida de verdad, así que todos los límites del Procedimiento siguen cumpliéndose exactos:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>&nbsp;</th><th>Posiciones</th><th>Exposición bruta</th><th>Posición menor</th><th>Incumplimientos</th></tr>
+  <tr><th>Sin piso</th><td>15</td><td>111.91%</td><td>0.000%</td><td>0</td></tr>
+  <tr><th>Piso de 1%</th><td>13</td><td>111.75%</td><td>1.99%</td><td>0</td></tr>
+</table>
+
+<p>El ciclo solo puede quitar nombres, así que termina solo. Y si quitarlos dejara el problema sin solución, el sistema <b>conserva la última cartera factible y escribe el motivo</b> en las notas: devolver un libro vacío porque no se pudo cumplir una preferencia de construcción sería peor que las posiciones de 0.16% que se quería eliminar.</p>
+
+<p><b>Esto es criterio de mesa, no límite regulatorio.</b> El Procedimiento de Inversión pone techos, nunca pisos. Por eso quedó como parámetro y no como constante: si el Comité dice 2%, es cambiar un número. Y por eso también queda registrado en la hoja de Parámetros de cada Excel, para que dentro de seis meses se sepa con qué piso se corrió.</p>
+
+<h2>Una cosa que rompimos y arreglamos</h2>
+
+<p>Vale la pena contarla porque explica un comportamiento que puedes encontrar.</p>
+
+<p>Al principio la cesta que se le pasaba al optimizador era simplemente el top 25 del ranking. Pero el ranking premia momentum y retorno ajustado por riesgo, y ahí la renta variable domina — así que el top 25 salía casi todo acciones y ETFs de equity. Moderado topa renta variable en 60%, pero el libro tiene que estar invertido al 100%. No existe solución. El optimizador devolvía "infactible" y <b>la hoja de Cartera salía vacía sin decir por qué</b>.</p>
+
+<p>Ahora la cesta se arma consciente de clases: toma el top por puntaje y además garantiza representantes de cada clase de activo disponible en el universo. Y si aun así no hay solución, el sistema <b>escribe el motivo en la hoja</b> en vez de dejarla en blanco.</p>
+
+<p>Si corres con lista personalizada y no incluyes nada de renta fija ni efectivo, va a volver a no haber cartera — legítimamente esta vez. La diferencia es que ahora te dice qué clases faltan.</p>
+
+<hr>
+
+<h1>10. [v2] Los diagnósticos: el sistema midiéndose a sí mismo</h1>
+
+<p>Dos mediciones que corren en cada corrida (sección 10b del notebook). <b>Ninguna cambia una recomendación ni un peso.</b> Están para contestar una pregunta que antes nadie hacía: ¿cuánto hay que confiar en lo que acaba de salir?</p>
+
+<h2>Correlación entre bloques</h2>
+
+<p>El modelo declara seis bloques y le pone un peso a cada uno. Eso es una afirmación: que cada bloque aporta información que los otros no tienen. Si dos bloques se mueven juntos al 0.90, sus pesos son <b>una sola apuesta hecha dos veces</b>, y la cartera está menos diversificada de lo que promete la tabla de pesos.</p>
+
+<p>El diagnóstico imprime la matriz completa y un número resumen: los <b>factores efectivos</b>. Si dice 2 sobre 6, tienes seis columnas midiendo dos cosas. También suma cuánto peso del puntaje total está metido en pares que se solapan.</p>
+
+<p>Cuando un bloque no se puede medir, se excluye y se dice por qué, en vez de reportar ruido: si está puntuado en menos de la mitad del universo, o si no tiene ninguna variación entre nombres.</p>
+
+<h2>Saturación de views</h2>
+
+<p>La Q se recorta en ±5% porque así lo calibra el documento técnico. Ese recorte es una baranda de seguridad. El problema aparece si <b>casi todas las views terminan pegadas a ella</b>: nombres que el screener rankeó muy distinto llegan al optimizador con el mismo retorno esperado, y ese pedazo del ranking se tira a la basura justo en el último paso.</p>
+
+<p>El diagnóstico cuenta cuántas views tocan el tope, muestra cuánto habrían sido sin el recorte, y avisa específicamente cuando el recorte borró una distinción que el modelo sí había hecho. Dos views en el tope es la baranda haciendo su trabajo; seis es un problema de calibración.</p>
+
+<p>Y la corrección correcta en ese caso es <b>bajar el coeficiente de información, no subir el tope</b>. El tope viene de la calibración del Procedimiento; el 0.08 es nuestro supuesto. Si algo tiene que ceder, que ceda lo nuestro.</p>
+
+<hr>
+
+<h1>11. Los cuatro perfiles, lado a lado</h1>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr>
+    <th>Parámetro</th><th>Cons. Defensivo</th><th>Conservador</th><th>Moderado</th><th>Agresivo</th>
+  </tr>
+  <tr><th>Peso de momentum</th><td>8%</td><td>12%</td><td>25%</td><td>36%</td></tr>
+  <tr><th>Peso de volatilidad/caídas</th><td>34%</td><td>28%</td><td>17%</td><td>8%</td></tr>
+  <tr><th>Peso de liquidez</th><td>16%</td><td>14%</td><td>11%</td><td>9%</td></tr>
+  <tr><th>z mínimo para Sobreponderar</th><td>+1.00</td><td>+0.80</td><td>+0.50</td><td>+0.30</td></tr>
+  <tr><th>z para caer a Subponderar</th><td>−0.20</td><td>−0.30</td><td>−0.50</td><td>−0.70</td></tr>
+  <tr><th>Volatilidad máxima para Sobreponderar</th><td>22%</td><td>30%</td><td>60%</td><td>90%</td></tr>
+  <tr><th>Beta máxima</th><td>0.85</td><td>1.00</td><td>1.30</td><td>1.80</td></tr>
+  <tr><th>Peso máximo por posición</th><td>3.5%</td><td>5.0%</td><td>8.0%</td><td>12.0%</td></tr>
+  <tr><th>Volumen diario mínimo</th><td>$100MM</td><td>$50MM</td><td>$20MM</td><td>$10MM</td></tr>
+</table>
+
+<p>Dos lecturas para mañana:</p>
+
+<p><b>Los umbrales son asimétricos a propósito.</b> El perfil defensivo exige una desviación estándar completa de ventaja para recomendar comprar, pero le basta una quinta parte para hacerse a un lado. El agresivo invierte esa asimetría. Eso codifica algo real: un mandato conservador prefiere equivocarse quedándose fuera.</p>
+
+<p><b>El techo de volatilidad se afloja pero nunca desaparece.</b> Ni siquiera en Agresivo. Por encima de 90% anualizado, las estadísticas calculadas con 52 observaciones semanales tienen un margen de error tan ancho que el número puntual no sirve para ordenar — sin importar el mandato.</p>
+
+<p>Hay una celda que corre los cuatro perfiles sobre los mismos datos y los compara. Es la vista más útil del notebook: un nombre que aguanta Sobreponderar en los cuatro es una señal robusta; uno que solo sobrevive en Agresivo te está diciendo que su puntaje depende de que le perdones la volatilidad.</p>
+
+<p>En esa tabla puede aparecer <b>n/e</b>. No es un error: cada perfil tiene su propio piso de liquidez, así que un instrumento puede ser elegible para uno y no para otro. El sistema te dice cuál lo rechazó y por qué.</p>
+
+<hr>
+
+<h1>12. Las reglas regulatorias dentro del código</h1>
+
+<p>El Procedimiento de Inversión está codificado como datos, separado de la matemática. Esa separación es a propósito y es la que insiste el propio documento técnico: las reglas delimitan fronteras de riesgo, nunca son el punto de partida de los pesos.</p>
+
+<p>Lo que está codificado:</p>
+<ul>
+  <li>Bandas mínimas y máximas por clase de activo, para cada una de las cuatro estrategias.</li>
+  <li>Máximo de renta variable total.</li>
+  <li>Máximo por acción individual.</li>
+  <li>Apalancamiento permitido y máximo de derivados.</li>
+  <li>Exclusiones duras del Art. 170 RIV.</li>
+</ul>
+
+<p>La clasificación de cada instrumento en su clase de activo (soberano IG, corporativo IG, no IG, efectivo, renta variable, materias primas) la hace el código a partir de una tabla, sin necesidad del Google Sheet.</p>
+
+<p>Dos decisiones de clasificación que conviene revisar con Compliance:</p>
+<ul>
+  <li><b>EMB (deuda soberana emergente) se clasifica como No IG.</b> Es nominalmente soberana, pero su perfil de crédito y de caídas se parece más al high yield, y esa es la banda que gobierna ese riesgo.</li>
+  <li><b>Materias primas.</b> Ya mencionado en el resumen: la banda que le pusimos es nuestra, no del Procedimiento.</li>
+</ul>
+
+<h2>La auditoría</h2>
+
+<p>Después de optimizar, el sistema compara la cartera resultante contra cada límite y reporta lo que se rompa. El código anterior tenía una función con ese nombre que escribía "Auditoría OK" sin comparar nada.</p>
+
+<p>Esa diferencia importa más de lo que parece: una auditoría que no puede fallar deja un documento afirmando cumplimiento que nada verificó. Ante un examen regulatorio, eso es peor que no tener documento.</p>
+
+<hr>
+
+<h1>13. Qué modificar y dónde</h1>
+
+<p>Tabla de referencia rápida. La columna de la izquierda es lo que quieres cambiar; la del medio, dónde se toca.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Si quieres cambiar…</th><th>Se toca en…</th><th>Nota</th></tr>
+  <tr>
+    <td>Qué instrumentos se evalúan</td>
+    <td>Celda de Parámetros, campo de universo o lista personalizada</td>
+    <td>No hace falta tocar código</td>
+  </tr>
+  <tr>
+    <td>Las reglas de selección del universo</td>
+    <td><code>screener/seleccion.py</code>, lista <code>CRITERIOS</code></td>
+    <td>[v2] Cambiar el <i>orden</i> cambia qué motivo se reporta en un rechazo. Los criterios de <code>PROHIBIDOS</code> están ahí para que agregarlos sea una decisión consciente, no un descuido</td>
+  </tr>
+  <tr>
+    <td>El piso de historia (53 barras)</td>
+    <td>No se toca: se deriva del modelo</td>
+    <td>[v2] Sale del máximo de barras que pide cualquier métrica activa. Bájale el peso al momentum de 12 meses y el piso baja solo</td>
+  </tr>
+  <tr>
+    <td>El volumen diario mínimo</td>
+    <td><code>screener/profiles.py</code>, <code>min_adv_usd</code> del perfil</td>
+    <td>[v2] Es el filtro que de verdad define el tamaño del universo. Va de US$10 MM en Agresivo a US$100 MM en Cons. Defensivo</td>
+  </tr>
+  <tr>
+    <td>El perfil de riesgo</td>
+    <td>Celda de Parámetros, campo PERFIL</td>
+    <td>Cambia pesos, umbrales, frenos y tamaños de una vez</td>
+  </tr>
+  <tr>
+    <td>Cuánto le creemos al screener (el 0.08)</td>
+    <td>Celda de Views, campo IC_SUPUESTO</td>
+    <td>Subirlo hace las views más agresivas</td>
+  </tr>
+  <tr>
+    <td>Cuántas views se generan</td>
+    <td>Celda de Views, campo MAX_VIEWS</td>
+    <td>El sistema anterior usaba 8, o 3 si detectaba divergencia macro</td>
+  </tr>
+  <tr>
+    <td>Qué acción se compara contra qué ETF</td>
+    <td>Celda de Views, diccionario REFERENCIAS</td>
+    <td>Equivale a la columna activo_referencia del Google Sheet</td>
+  </tr>
+  <tr>
+    <td>Cuántos nombres entran a la cartera</td>
+    <td>Celda de Cartera, campo TOP_N_CARTERA</td>
+    <td>Menos nombres = correlaciones mejor estimadas</td>
+  </tr>
+  <tr>
+    <td>[v2] El punto de partida del equilibrio</td>
+    <td>Celda de Cartera, campo ANCLA</td>
+    <td>"politica" (por defecto) o "mercado". Correr las dos y comparar es la forma de ver cuánto pesa esta decisión</td>
+  </tr>
+  <tr>
+    <td>[v2] La posición mínima ejecutable</td>
+    <td>Celda de Cartera, campo POSICION_MINIMA</td>
+    <td>1% por defecto. 0 lo desactiva. Criterio de mesa, no del Procedimiento</td>
+  </tr>
+  <tr>
+    <td>[v2] El piso absoluto para Sobreponderar</td>
+    <td>Celda de Ajuste fino, override('GATES', …)</td>
+    <td>Campos min_momentum_for_overweight y min_sharpe_for_overweight. Ponerlos en None lo desactiva</td>
+  </tr>
+  <tr>
+    <td>[v2] La asignación estratégica por clase</td>
+    <td>Función policy_weights, parámetro targets</td>
+    <td>El día que el Comité dé objetivos reales, entran por aquí y dejan de usarse los puntos medios</td>
+  </tr>
+  <tr>
+    <td>Los pesos de los seis bloques</td>
+    <td>Celda de Ajuste fino, función set_block_weights</td>
+    <td>Acepta tamaños relativos y normaliza solo</td>
+  </tr>
+  <tr>
+    <td>Un freno de riesgo puntual</td>
+    <td>Celda de Ajuste fino, función override('GATES', …)</td>
+    <td>Ej: quitar el techo de volatilidad</td>
+  </tr>
+  <tr>
+    <td>El volumen mínimo exigido</td>
+    <td>Celda de Ajuste fino, override('ELIGIBILITY', …)</td>
+    <td>Ojo: bajarlo mete nombres menos líquidos</td>
+  </tr>
+  <tr>
+    <td>Las bandas regulatorias</td>
+    <td>Archivo cci_regulation.py</td>
+    <td>Esto es política, no calibración. Debería venir de Compliance</td>
+  </tr>
+  <tr>
+    <td>La clasificación de un instrumento</td>
+    <td>Archivo cci_regulation.py, tabla ASSET_CLASS</td>
+    <td>Ej: mover EMB de No IG a soberano</td>
+  </tr>
+  <tr>
+    <td>Los perfiles mismos</td>
+    <td>Archivo profiles.py</td>
+    <td>Cambio permanente, afecta todas las corridas</td>
+  </tr>
+</table>
+
+<p>Regla práctica: <b>lo que se ajusta seguido está en el notebook; lo que es política de la casa está en los archivos.</b> Si te encuentras editando archivos cada semana, algo está mal ubicado.</p>
+
+<p>Una advertencia sobre el orden: la función que arma la cartera vuelve a aplicar el perfil cada vez que se llama, así que sobrescribe los ajustes manuales de la celda de Ajuste fino. Si quieres que un ajuste manual sobreviva, la celda lo explica.</p>
+
+<hr>
+
+<h1>14. Mapa de archivos</h1>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Archivo</th><th>Qué hace</th></tr>
+  <tr><th>config.py</th><td>Definición de los seis bloques, sus 25 medidas, pesos base, umbrales y frenos. Todo lo que es juicio vive aquí.</td></tr>
+  <tr><th>universe.py</th><td>Quién está en cada índice, qué productos se excluyen, filtros de elegibilidad. Las listas curadas: 317 acciones y 130 ETFs.</td></tr>
+  <tr><th>seleccion.py</th><td>[v2] La política de selección del universo: las cuatro reglas en orden, los criterios prohibidos, el piso de barras derivado del modelo, y el reporte de rechazados con su motivo.</td></tr>
+  <tr><th>yahoo_adapter.py</th><td>Baja los datos de Yahoo y los convierte al formato que espera el motor.</td></tr>
+  <tr><th>metrics.py</th><td>Calcula las 25 medidas a partir de precios y volumen.</td></tr>
+  <tr><th>scoring.py</th><td>Recorta extremos, calcula las notas relativas, agrega por bloque, aplica frenos, dimensiona.</td></tr>
+  <tr><th>profiles.py</th><td>Los cuatro perfiles y su correspondencia con las estrategias de CCI.</td></tr>
+  <tr><th>black_litterman.py</th><td>Traduce el ranking a views: calcula Q y convicción.</td></tr>
+  <tr><th>cci_regulation.py</th><td>El Procedimiento de Inversión como datos: clases, bandas, exclusiones.</td></tr>
+  <tr><th>optimizer.py</th><td>Punto de partida del equilibrio, mezcla bayesiana, optimización restringida y auditoría.</td></tr>
+  <tr><th>diagnostics.py</th><td>[v2] Las mediciones sobre el modelo mismo: solape entre bloques y saturación de views.</td></tr>
+  <tr><th>report.py</th><td>Genera el CSV, el reporte y el resumen de consola.</td></tr>
+  <tr><th>tuning.py</th><td>Permite cambiar pesos y frenos en caliente sin reiniciar.</td></tr>
+</table>
+
+<p>Hay además una carpeta de pruebas con <b>624 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
+
+<p>Un ejemplo de esta ronda que ilustra para qué sirven: al agregar la omisión del bloque de sensibilidad al mercado, una prueba nueva falló y destapó que <b>las pruebas viejas estaban corriendo sobre datos mal armados</b>. Los instrumentos de prueba tenían todos el mismo volumen y el mismo dividendo, y como el puntaje relativo no se puede calcular cuando todos los valores son idénticos, los bloques de liquidez y valuación venían vacíos sin que nadie lo notara. Varias pruebas sobre el ranking estaban pasando sobre un universo que no podía producir ninguna recomendación.</p>
+
+<hr>
+
+<h1>15. Qué mirar cuando algo sale raro</h1>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Síntoma</th><th>Qué está pasando</th><th>Qué hacer</th></tr>
+  <tr>
+    <td>La hoja Cartera trae una fila que dice "SIN CARTERA"</td>
+    <td>No hay solución posible con esa cesta y ese mandato</td>
+    <td>Lee el motivo en esa misma fila. Casi siempre falta renta fija o efectivo en el universo</td>
+  </tr>
+  <tr>
+    <td>[v2] Cero o muy pocos Sobreponderar</td>
+    <td>Probablemente el piso de calidad absoluta. En un mercado plano o cayendo es el resultado correcto, no una falla</td>
+    <td>Mira los frenos en la columna correspondiente: si dicen "CALIDAD ABSOLUTA", es que nada le ganó al efectivo. Es información, no un error</td>
+  </tr>
+  <tr>
+    <td>[v2] Un nombre sin nota en Sensibilidad al mercado</td>
+    <td>El índice no lo explica lo suficiente para estimar beta y alfa</td>
+    <td>Nada. El puntaje se redistribuye entre los otros bloques. El R² queda visible en el reporte para ver el motivo</td>
+  </tr>
+  <tr>
+    <td>[v2] Los factores efectivos salen muy por debajo de 6</td>
+    <td>Los bloques se están solapando: parte del puntaje es una misma apuesta contada dos veces</td>
+    <td>No invalida la corrida. Léelo como que la cartera está menos diversificada de lo que sugiere la tabla de pesos</td>
+  </tr>
+  <tr>
+    <td>[v2] Muchas views pegadas al tope de ±5%</td>
+    <td>El recorte pasó a ser la señal: nombres muy distintos llegan con el mismo retorno esperado</td>
+    <td>Bajar IC_SUPUESTO hasta que el tope deje de morder. No subir el tope: ese viene del Procedimiento</td>
+  </tr>
+  <tr>
+    <td>[v2] La cartera trae menos posiciones de las que esperabas</td>
+    <td>El piso de posición mínima descartó las que quedaban bajo 1%</td>
+    <td>Mira las NOTAS de la corrida: dicen cuáles se quitaron. Si quieres verlas, corre con POSICION_MINIMA = 0</td>
+  </tr>
+  <tr>
+    <td>Aparecen n/e en la comparación</td>
+    <td>Ese nombre no pasa el piso de liquidez de ese perfil</td>
+    <td>Nada. Es información, y el sistema imprime el motivo</td>
+  </tr>
+  <tr>
+    <td>La hoja Cobertura muestra 0% en varias medidas</td>
+    <td>Yahoo no da volatilidad implícita histórica</td>
+    <td>Esperado. Solo revisa que los otros bloques estén completos</td>
+  </tr>
+  <tr>
+    <td>Se generaron cero views</td>
+    <td>Nadie superó el filtro de convicción mínima</td>
+    <td>Es un resultado válido. La cartera saldrá del equilibrio de mercado puro</td>
+  </tr>
+  <tr>
+    <td>La auditoría reporta incumplimientos</td>
+    <td>Algo se rompió, y esta vez sí lo detecta</td>
+    <td>No operar. Revisar bandas y cesta antes de seguir</td>
+  </tr>
+</table>
+
+<hr>
+
+<h1>16. Limitaciones honestas</h1>
+
+<p>Cosas que conviene decir en la reunión antes de que las pregunten:</p>
+
+<p><b>El coeficiente de información no está calibrado.</b> Es un supuesto declarado. Para calibrarlo de verdad hay que guardar las recomendaciones durante varios meses y compararlas contra los retornos reales. Hasta entonces, es nuestro juicio.</p>
+
+<p><b>Los pesos de los perfiles tampoco están optimizados contra un backtest.</b> Están escogidos para que cada perfil sea internamente coherente y para que la dirección de cada diferencia sea defendible. La dirección la sostenemos; los números exactos son discutibles.</p>
+
+<p><b>El techo de materias primas es nuestro, no del Procedimiento.</b> Necesita el número real.</p>
+
+<p><b>[v2] Los puntos medios de las bandas no son una asignación estratégica.</b> Es el supuesto que más pesa en el resultado, porque de ahí sale la mayor parte de la cartera. Es defendible y es mucho mejor que lo que había, pero sigue siendo una inferencia nuestra sobre lo que el Comité querría. Además, como se reparte sobre las clases que estén en la cesta, el punto de partida se mueve según cómo quede armada la cesta.</p>
+
+<p><b>El bloque de valuación es el más débil.</b> Sin fundamentales, usa aproximaciones de mercado, y con Yahoo pierde dos de sus cuatro medidas.</p>
+
+<h2>[v2] Dos cosas que encontraron los diagnósticos</h2>
+
+<p>Ninguna de las dos salió en la revisión externa. Las encontró el sistema midiéndose a sí mismo, que era exactamente para lo que se construyó.</p>
+
+<p><b>Los seis bloques no miden seis cosas distintas.</b> El conteo de factores efectivos sale bastante por debajo de seis. Una parte de ese solape es estructural y se puede señalar con el dedo: la <i>posición en el rango anual</i> (que vive en el bloque de valuación y puntúa al revés — estar arriba del rango resta) es casi el espejo exacto de la <i>distancia al máximo de 52 semanas</i> (que vive en momentum y puntúa a favor). Son la misma información con el signo cambiado, en dos bloques distintos, así que esos bloques se cancelan parcialmente entre sí por pura construcción.</p>
+
+<p>Puede que haya sido intencional — el código llama a esa medida un "contrapeso de reversión a la media". Pero el efecto práctico es que el bloque de valuación funciona en buena parte como momentum invertido, no como valuación. <b>No lo tocamos</b>: cambiarlo altera lo que el modelo pretende medir, y esa es una decisión de la casa, no un arreglo de implementación. Queda señalado para que se decida a conciencia.</p>
+
+<p><b>Yahoo no da volatilidad implícita.</b> Ya se sabía que faltaba una medida; medido, es peor: dos de las cuatro medidas del bloque de valuación (la mitad del peso declarado del bloque) no existen por esa vía. El bloque se recalcula sobre dividend yield y posición en el rango. Funciona, pero entrega menos de lo que promete el nombre.</p>
+
+<p><b>El modelo solo mira precios y volumen.</b> No sabe de resultados trimestrales, cambios de gerencia, litigios ni fusiones. Es una herramienta de apoyo, no un reemplazo del criterio.</p>
+
+<p><b>Un screening de hace dos semanas describe un mercado que ya no existe.</b> Los datos son en vivo, pero el archivo que generas no. Vuelve a correrlo.</p>
+
+<hr>
+
+<h1>Anexo — Resumen de cambios de la versión 1 a la versión 2</h1>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Qué</th><th>Antes</th><th>Ahora</th><th>Sección</th></tr>
+  <tr>
+    <th>Umbral para Sobreponderar</th>
+    <td>Solo relativo al universo</td>
+    <td>Relativo <i>más</i> un piso absoluto: momentum positivo y Sharpe sobre cero</td>
+    <td>6 y 7</td>
+  </tr>
+  <tr>
+    <th>Punto de partida del equilibrio</th>
+    <td>Capitalización de acciones normalizada contra patrimonio de ETFs</td>
+    <td>Cartera neutral del mandato; capitalización solo dentro de cada clase</td>
+    <td>9</td>
+  </tr>
+  <tr>
+    <th>Bloque de sensibilidad al mercado</th>
+    <td>Siempre se calculaba, aunque el índice no explicara al activo</td>
+    <td>Se omite cuando la beta no es estadísticamente significativa</td>
+    <td>5</td>
+  </tr>
+  <tr>
+    <th>Semanas de historia</th>
+    <td>53, el mínimo exacto — cero holgura</td>
+    <td>60 guardadas; las estadísticas de "1 año" fijadas a 52 observaciones</td>
+    <td>4</td>
+  </tr>
+  <tr>
+    <th>Posición mínima</th>
+    <td>Ninguna — salían posiciones de 0.16% y de casi cero</td>
+    <td>1% por defecto, aplicado re-optimizando sin esos nombres</td>
+    <td>9</td>
+  </tr>
+  <tr>
+    <th>Medición del modelo</th>
+    <td>No existía</td>
+    <td>Solape entre bloques y saturación de views, en cada corrida</td>
+    <td>10</td>
+  </tr>
+  <tr>
+    <th>Selección del universo</th>
+    <td>Implícita — "está en la lista" era todo el criterio</td>
+    <td>Política escrita: cuatro reglas en orden, tres criterios prohibidos, piso de barras derivado del modelo, y cada rechazo reportado con su motivo</td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <th>Tamaño del universo</th>
+    <td>"Unos 600" — nunca se contó</td>
+    <td>447 candidatos medidos: 317 acciones y 130 ETFs</td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <th>Salida en Excel</th>
+    <td>Ocho hojas</td>
+    <td>Nueve — se agrega <i>Universo</i>, con el detalle de admitidos y rechazados</td>
+    <td>3</td>
+  </tr>
+  <tr>
+    <th>Pruebas automáticas</th>
+    <td>439</td>
+    <td>624, más la comprobación de paridad entre los dos motores</td>
+    <td>14</td>
+  </tr>
+</table>
+
+<p>Lo que <b>no</b> cambió: los cuatro perfiles y sus pesos, la fórmula de Q y de la convicción, las bandas regulatorias, la separación entre screener y Black-Litterman, y el hecho de que el sistema no lee cuentas ni ejecuta nada — en particular, la <b>cantidad</b> de posiciones se sigue decidiendo por la matemática, no por una meta: el piso de 1% solo descarta lo que no es ejecutable.</p>
+
+<p>Sobre el universo hay que ser preciso: <b>las listas de instrumentos son las mismas</b> — no se agregó ni se quitó un solo ticker. Lo que cambió es que ahora está escrito <i>por qué</i> están, cuáles son las reglas para entrar, y cuáles serían tentadoras pero están prohibidas.</p>
+
+<h2>Lo que se dejó fuera a propósito</h2>
+
+<p>La revisión traía otros tres puntos que decidimos no implementar, y conviene poder explicar por qué:</p>
+
+<ul>
+  <li><b>Rehacer los bloques para que no se solapen.</b> Primero hay que medir el solape sobre datos reales — para eso está el diagnóstico nuevo. Rehacer el modelo antes de tener la medición sería adivinar.</li>
+  <li><b>Meter datos fundamentales.</b> Es un proyecto aparte, no un ajuste. Requiere una fuente de datos y decidir sobre qué subconjunto de nombres se pide.</li>
+  <li><b>Control de rotación entre corridas.</b> Choca de frente con la decisión de que el sistema no lea la cuenta: para saber cuánto rotaría habría que saber qué hay en el libro. Es una decisión de diseño, no algo que se pueda resolver por código.</li>
+</ul>
+
+<hr>
+
+<p style="color:#666"><i>Este documento describe el sistema tal como quedó al momento de escribirlo. Si se modifican los perfiles, las bandas, la fórmula de las views o el punto de partida del equilibrio, hay que actualizarlo — un documento desactualizado sobre un modelo de riesgo es un problema en sí mismo.</i></p>
