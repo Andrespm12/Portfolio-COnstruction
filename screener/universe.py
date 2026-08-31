@@ -28,7 +28,7 @@ import csv
 import re
 from pathlib import Path
 
-from .config import ELIGIBILITY, EXCLUDED_PRODUCT_PATTERNS
+from .config import ELIGIBILITY, EXCLUDED_PRODUCT_PATTERNS, EligibilityRules
 
 #: Date the hardcoded membership lists were captured. Refresh quarterly --
 #: index reconstitution happens on a known calendar.
@@ -199,15 +199,25 @@ def classify_asset_type(description: str, sections: list[str] | None = None) -> 
 # Eligibility screen
 # --------------------------------------------------------------------------
 
-def screen_eligibility(instrument: dict, metrics: dict) -> tuple[bool, list[str]]:
+def screen_eligibility(instrument: dict, metrics: dict,
+                       rules: EligibilityRules | None = None) -> tuple[bool, list[str]]:
     """
     Apply hard filters. Returns ``(is_eligible, [reasons_for_failure])``.
 
     Runs before scoring: an ineligible name is removed from the cross-section
     entirely so it cannot distort the z-score distribution of its peers.
+
+    ``rules`` defaults to the module-level ``ELIGIBILITY``, which
+    :func:`screener.profiles.apply_profile` rebinds so a profile's floors take
+    effect process-wide. Passing it explicitly is for callers that need to
+    evaluate one instrument against a profile other than the active one --
+    comparing the same name across mandates, for instance. Before this
+    parameter existed the argument was accepted nowhere and the global was the
+    only path, so a caller that thought it was passing rules was silently
+    screening against whichever profile happened to be applied.
     """
     reasons: list[str] = []
-    rules = ELIGIBILITY
+    rules = rules if rules is not None else ELIGIBILITY
 
     excluded, pattern = is_excluded_product(instrument.get("name", ""))
     if excluded:

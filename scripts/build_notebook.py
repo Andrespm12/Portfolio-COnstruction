@@ -34,7 +34,7 @@ MODULES = (
     "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
     "profiles.py", "black_litterman.py", "cci_regulation.py",
-    "optimizer.py", "diagnostics.py",
+    "optimizer.py", "diagnostics.py", "seleccion.py",
 )
 
 

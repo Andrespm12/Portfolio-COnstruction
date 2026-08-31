@@ -33,6 +33,7 @@ from .portfolio import (
 )
 from .report import console_summary, write_csv, write_markdown
 from .scoring import ScoredInstrument, detect_duplicates, run_scoring_pipeline
+from .seleccion import evaluar, resumen as resumen_seleccion
 from .universe import index_tags, is_excluded_product, screen_eligibility
 
 
@@ -109,6 +110,7 @@ def run(market_data: dict, portfolio: dict,
 
     # ---- Metrics ---------------------------------------------------------
     rows: list[ScoredInstrument] = []
+    decisiones: list = []
     for inst in instruments:
         ticker = (inst.get("ticker") or "").upper()
         if not ticker:
@@ -133,7 +135,10 @@ def run(market_data: dict, portfolio: dict,
             "_adv_usd": diag.get("adv_usd"),
             "_bars": diag.get("bars"),
         }
-        eligible, reasons = screen_eligibility(inst, gate_inputs)
+        decision = evaluar(inst, gate_inputs)
+        eligible, reasons = decision.admitido, (
+            [] if decision.admitido else [decision.detalle])
+        decisiones.append(decision)
 
         rows.append(ScoredInstrument(
             ticker=ticker,
@@ -183,6 +188,10 @@ def run(market_data: dict, portfolio: dict,
         "history_desc": market_data.get("history_desc", "weekly bars, 1 year"),
         "as_of": market_data.get("as_of"),
         "excluded": [(r.ticker, r.ineligibility_reasons) for r in ineligible],
+        # Rastro completo de la política de selección: una decisión por
+        # candidato, admitido o no. Es lo que hace visible una exclusión.
+        "seleccion": decisiones,
+        "seleccion_resumen": resumen_seleccion(decisiones),
     }
     return scored, meta
 

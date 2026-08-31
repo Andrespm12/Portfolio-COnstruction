@@ -344,6 +344,13 @@ const GATES = {
   minMom:0.0, minSharpe:0.0,
 };
 const ELIG = {minPrice:5, minAdv:20e6, minBars:30, participation:.20, maxDays:3.0};
+/* Barras mínimas para que el modelo se calcule COMPLETO, no las 30 sueltas de
+   arriba. Con 30 barras mom_12_1 (peso 0.35 del bloque de momentum),
+   above_40w_ma y ma_slope_13w no existen: el bloque se calcula con la mitad de
+   su peso y ese nombre se puntúa contra otros que tienen el 100%. No es peor
+   momentum, es momentum medido sobre otra base. Espeja
+   screener/seleccion.barras_requeridas(). */
+const MIN_BARRAS_MODELO = 53;
 const SIZING = {targetVol:.20, base:.030, ow:1.75, mw:1.00, uw:.35, min:.005, max:.080};
 const BANDS = {ow:.50, uw:-.50, minBlocks:5};
 /* Observaciones detrás de toda estadística etiquetada "1Y". Separado a
@@ -696,7 +703,7 @@ function runModel(md,pf){
     const reasons=[];
     if(fin(dg.last_price)&&dg.last_price<ELIG.minPrice) reasons.push(`precio $${dg.last_price.toFixed(2)} bajo el mínimo`);
     if(fin(dg.adv_usd)&&dg.adv_usd<ELIG.minAdv) reasons.push(`ADV $${(dg.adv_usd/1e6).toFixed(1)}MM bajo el mínimo`);
-    if(dg.bars<ELIG.minBars) reasons.push(`solo ${dg.bars} observaciones`);
+    if(dg.bars<MIN_BARRAS_MODELO) reasons.push(`${dg.bars} barras, el modelo necesita ${MIN_BARRAS_MODELO} para calcularse completo`);
 
     rows.push({ticker:t, name:it.name||t, asset_type:it.asset_type||"STOCK",
       sector:it.sector||"", raw, dg, z:{}, blocks:{}, cov:{}, dupes:[], gates:[],
