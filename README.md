@@ -14,7 +14,7 @@ Five deliverables:
 3. **`web/`** — a standalone page that runs the whole model in the browser and
    re-pulls from IBKR on demand.
 4. **`notebooks/`** — a Colab notebook that runs the same engine over a
-   ~600-name universe on live Yahoo Finance data, with **no account data and no
+   447-name candidate universe on live Yahoo Finance data, with **no account data and no
    broker session**, under one of four risk profiles.
 5. **[`PROMPT_BL_INTEGRATION.md`](PROMPT_BL_INTEGRATION.md)**, `screener/black_litterman.py`
    and `screener/optimizer.py` — the analysis prompt, the bridge that turns
@@ -71,7 +71,8 @@ Outputs land in `output/screen_results.csv` and `output/screen_report.md`.
 `notebooks/screener_colab.ipynb` runs the **same engine** as this repo — the
 `screener` package is embedded as a gzipped tarball and verified by SHA256 at
 startup — but sources its data from Yahoo Finance instead of IBKR. That trade
-buys two things the IBKR path cannot give: a universe of ~600 names instead of a
+buys two things the IBKR path cannot give: a candidate universe of 447 names
+(317 stocks + 130 ETFs, before the selection policy filters it) instead of a
 21-name captured snapshot, and prices that are live rather than frozen at
 capture time.
 
@@ -283,16 +284,20 @@ basket. And it ignores the mandate — that calculation anchors near 95% equity,
 which no strategy here permits.
 
 The second problem is the visible one. Under the market anchor the solved
-portfolio sat on the equity ceiling *exactly*:
+portfolio runs into the equity ceiling; under the policy anchor it lands well
+inside. Total equity weight on the seven-class test basket (17 names, 8 views):
 
 | Strategy | Ceiling | Market anchor | Policy anchor |
 |:--|--:|--:|--:|
-| Conservador | 50% | 50.0% | 19.0% |
-| Moderado | 60% | 60.0% | — |
-| Agresivo | 80% | 80.0% | — |
+| Conservador | 50% | 50.0% | 18.4% |
+| Moderado | 60% | 59.4% | 27.4% |
+| Agresivo | 80% | 62.8% | 33.6% |
 
-Pinned to the limit means the band was making the asset-allocation decision and
-the model was only choosing what was left over inside it.
+Pinned to the limit — as Conservador is, exactly — means the band was making the
+asset-allocation decision and the model was only choosing what was left over
+inside it. (These are fixture numbers, not a forecast: they move with the basket.
+Reproduce them by re-solving `world()` from `tests/test_optimizer.py` under both
+anchors.)
 
 `policy_weights` anchors on the mandate instead: each class at its band midpoint,
 renormalized over the classes actually in the basket, with the equity ceiling

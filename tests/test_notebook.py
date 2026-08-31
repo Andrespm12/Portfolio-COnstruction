@@ -290,9 +290,10 @@ def test_cells_execute() -> None:
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the eight documented sheets",
+    check("workbook has the nine documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
-                                 "Cartera", "Cesta", "Cobertura", "Parametros"},
+                                 "Cartera", "Cesta", "Universo", "Cobertura",
+                                 "Parametros"},
           f"got {wb.sheetnames}")
 
     # The whole point of the JSON/Excel split: a human reads the views in the

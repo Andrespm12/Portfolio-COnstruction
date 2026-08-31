@@ -167,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
     from screener.profiles import PROFILES, get_profile, profile_for_strategy
     from screener.report import console_summary
     from screener.run_screen import run_standalone
+    from screener.seleccion import CRITERIOS, barras_requeridas, politica_declarada
+    from screener.seleccion import tabla as tabla_seleccion
     from screener.tuning import reset_all
     from screener.yahoo_adapter import (
         coverage_report, daily_returns, default_universe, fetch_market_caps,
@@ -247,6 +249,25 @@ def main(argv: list[str] | None = None) -> int:
         position_usd=args.posicion_usd, rf=args.rf,
     )
     print(console_summary(scored, meta))
+
+    # ---------------------------------------------------------- 4b. universo
+    titulo("4b · POLÍTICA DE SELECCIÓN DEL UNIVERSO")
+    print(politica_declarada())
+    print()
+    _sel = meta["seleccion_resumen"]
+    print(f"Candidatos evaluados por la política: {_sel['candidatos']}")
+    print(f"  admitidos al ranking:              {_sel['admitidos']}")
+    for _c in CRITERIOS:
+        if _sel.get(_c.clave):
+            print(f"  rechazados por {_c.titulo.lower():24s} {_sel[_c.clave]}")
+    universo_df = tabla_seleccion(meta["seleccion"])
+    _fuera = universo_df[universo_df["admitido"] == "no"]
+    if not _fuera.empty:
+        print("\nRechazados, con motivo:")
+        for _r in _fuera.head(20).itertuples():
+            print(f"  {_r.ticker:8s} [{_r.criterio}] {_r.motivo[:70]}")
+        if len(_fuera) > 20:
+            print(f"  ... y {len(_fuera) - 20} más (la hoja Universo del Excel los trae todos)")
 
     import screener.config as _cfg
     modelo = _cfg.FACTOR_MODEL           # ya con el perfil aplicado
@@ -457,6 +478,9 @@ def main(argv: list[str] | None = None) -> int:
         ("IC supuesto (views)", args.ic),
         ("Nota sobre el IC", "supuesto declarado, no calibrado contra backtest"),
         ("Ancla del equilibrio", args.ancla),
+        ("Universo — candidatos", meta["seleccion_resumen"]["candidatos"]),
+        ("Universo — admitidos", meta["seleccion_resumen"]["admitidos"]),
+        ("Universo — barras mínimas", barras_requeridas()),
         ("Posición mínima",
          f"{args.posicion_minima:.2%}" if args.posicion_minima else "sin mínimo"),
         ("Nota sobre el ancla",
@@ -498,6 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         views_excel.to_excel(xl, sheet_name="Views BL", index=False)
         cartera_df.to_excel(xl, sheet_name="Cartera", index=False)
         cesta_df.to_excel(xl, sheet_name="Cesta", index=False)
+        universo_df.to_excel(xl, sheet_name="Universo", index=False)
         cov.to_excel(xl, sheet_name="Cobertura", index=False)
         parametros.to_excel(xl, sheet_name="Parametros", index=False)
 
@@ -507,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
                 ancho = max((len(str(c.value)) for c in col if c.value), default=8)
                 hoja.column_dimensions[col[0].column_letter].width = min(46, ancho + 3)
 
-    print(f"{archivo_excel}  —  {len(scored)} nombres, 8 hojas")
+    print(f"{archivo_excel}  —  {len(scored)} nombres, 9 hojas")
 
     if not args.sin_json:
         write_views(views, archivo_views, strategy=args.estrategia,

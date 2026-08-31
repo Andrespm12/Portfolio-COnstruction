@@ -122,7 +122,7 @@ def build_cells() -> list[dict]:
         "| | IBKR | Yahoo |\n",
         "|---|---|---|\n",
         "| Precio, máx/mín 52s, volumen, dividendos | ✅ | ✅ |\n",
-        "| Universo | 21 nombres del snapshot | ~600, o el que definas |\n",
+        "| Universo | 21 nombres del snapshot | 447 candidatos, o el que definas |\n",
         "| Datos | congelados en la captura | en vivo |\n",
         "| Vol implícita (`iv_hv_spread`) | ✅ | opcional, lento |\n",
         "| Percentil de IV a 52s (`iv_percentile`) | ✅ | **no existe** |\n",
@@ -204,8 +204,9 @@ def build_cells() -> list[dict]:
     cells.append(md(
         "## 2 · Parámetros\n",
         "\n",
-        "`Universo completo` son ~600 nombres (S&P + Nasdaq-100 + Dow + ETFs "
-        "curados) y tarda 1-3 min en bajar.\n",
+        "`Universo completo` son 447 candidatos (317 acciones del S&P + "
+        "Nasdaq-100 + Dow, sin duplicar, y 130 ETFs curados) y tarda 1-3 min "
+        "en bajar. De ahí, la política de selección decide cuáles se evalúan.\n",
     ))
     cells.append(code(
         "# @markdown ### Universo y ventana\n",
@@ -338,6 +339,8 @@ def build_cells() -> list[dict]:
     cells.append(code(
         "from screener.run_screen import run_standalone\n",
         "from screener.report import console_summary\n",
+        "from screener.seleccion import (CRITERIOS, politica_declarada,\n",
+        "                               tabla as tabla_seleccion)\n",
         "\n",
         "# Sin libro: ninguna cuenta se lee y el bloque Portfolio Fit no esta\n",
         "# en el modelo. El perfil reconfigura pesos, umbrales, gates,\n",
@@ -349,6 +352,21 @@ def build_cells() -> list[dict]:
         "    rf=TASA_LIBRE_RIESGO,\n",
         ")\n",
         "print(console_summary(scored, meta))\n",
+        "\n",
+        "# Politica de seleccion del universo: quien entro, quien no, y por que.\n",
+        "print()\n",
+        "print(politica_declarada())\n",
+        "_sel = meta['seleccion_resumen']\n",
+        "print(f\"\\nCandidatos: {_sel['candidatos']}  ->  admitidos: {_sel['admitidos']}\")\n",
+        "for _c in CRITERIOS:\n",
+        "    if _sel.get(_c.clave):\n",
+        "        print(f'  rechazados por {_c.titulo.lower()}: {_sel[_c.clave]}')\n",
+        "universo = tabla_seleccion(meta['seleccion'])\n",
+        "_fuera = universo[universo['admitido'] == 'no']\n",
+        "if not _fuera.empty:\n",
+        "    print()\n",
+        "    for _r in _fuera.head(25).itertuples():\n",
+        "        print(f'  {_r.ticker:8s} [{_r.criterio}] {_r.motivo[:66]}')\n",
     ))
 
     # -------------------------------------------------------------- results
@@ -969,6 +987,7 @@ def build_cells() -> list[dict]:
         "    views_excel.to_excel(_xl, sheet_name='Views BL', index=False)\n",
         "    cartera_df.to_excel(_xl, sheet_name='Cartera', index=False)\n",
         "    cesta_df.to_excel(_xl, sheet_name='Cesta', index=False)\n",
+        "    universo.to_excel(_xl, sheet_name='Universo', index=False)\n",
         "    _cov.to_excel(_xl, sheet_name='Cobertura', index=False)\n",
         "    parametros.to_excel(_xl, sheet_name='Parametros', index=False)\n",
         "\n",
