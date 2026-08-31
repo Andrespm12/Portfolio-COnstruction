@@ -139,19 +139,22 @@ class Criterio:
     trunca_un_bloque: bool = False
 
 
+#: En el orden en que se evalúan, que es también el orden en que se atribuye el
+#: motivo cuando un nombre falla más de uno: alcance, tipo, medibilidad,
+#: operabilidad.
 CRITERIOS: tuple[Criterio, ...] = (
+    Criterio(
+        "mercado",
+        "Listado y pertenencia",
+        "Listado en EE.UU. y miembro de al menos un índice del universo, o "
+        "ETF de la lista. Es la definición de alcance del mandato.",
+    ),
     Criterio(
         "producto",
         "Tipo de producto",
         "Apalancados, inversos, de un solo subyacente, covered-call y ETNs. "
         "Su retorno depende del camino del precio, no del punto de llegada, "
         "así que las métricas no son comparables con las de una acción normal.",
-    ),
-    Criterio(
-        "mercado",
-        "Listado y pertenencia",
-        "Listado en EE.UU. y miembro de al menos un índice del universo, o "
-        "ETF de la lista. Es la definición de alcance del mandato.",
     ),
     Criterio(
         "historia",
@@ -223,6 +226,18 @@ def evaluar(instrumento: Mapping[str, Any], metricas: Mapping[str, Any], *,
     ticker = str(instrumento.get("ticker", "")).upper()
     barras = _barras(instrumento)
 
+    # El orden es un embudo, y determina qué motivo se reporta cuando un nombre
+    # falla varios criterios a la vez: alcance -> tipo -> medibilidad -> operable.
+    # Importa porque el rastro debe dar la razón *de fondo*. Un ticker que nunca
+    # estuvo en el universo y además tiene historia corta se rechaza por lo
+    # primero: decir "historia corta" sugeriría que con más datos entraría, y no
+    # es cierto.
+    ok, motivos = screen_eligibility(dict(instrumento), dict(metricas), reglas)
+    de_mercado = ("not US-listed", "exchange", "not a member")
+    fuera_de_alcance = [m for m in motivos if m.startswith(de_mercado)]
+    if fuera_de_alcance:
+        return Decision(ticker, False, "mercado", "; ".join(fuera_de_alcance), barras)
+
     excluido, patron = is_excluded_product(instrumento.get("name", "") or "")
     if excluido:
         return Decision(ticker, False, "producto",
@@ -234,12 +249,13 @@ def evaluar(instrumento: Mapping[str, Any], metricas: Mapping[str, Any], *,
                         f"{barras} barras, el modelo necesita {minimo} para "
                         "calcularse completo", barras)
 
-    ok, motivos = screen_eligibility(dict(instrumento), dict(metricas), reglas)
     if not ok:
-        de_mercado = ("not US-listed", "exchange", "not a member")
-        criterio = ("mercado" if any(m.startswith(de_mercado) for m in motivos)
-                    else "negociabilidad")
-        return Decision(ticker, False, criterio, "; ".join(motivos), barras)
+        # Lo que quede de screen_eligibility después de descartar alcance y
+        # producto es precio, volumen y capacidad de liquidación.
+        resto = [m for m in motivos
+                 if not m.startswith(de_mercado) and "excluded product" not in m]
+        return Decision(ticker, False, "negociabilidad",
+                        "; ".join(resto) or "; ".join(motivos), barras)
 
     return Decision(ticker, True, "", "", barras)
 

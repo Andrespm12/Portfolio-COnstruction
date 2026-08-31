@@ -312,6 +312,38 @@ def test_el_rastro_cubre_a_todos_los_candidatos() -> None:
           str(list(t.columns)))
 
 
+def test_el_motivo_reportado_es_el_de_fondo() -> None:
+    """
+    Cuando un nombre falla varios criterios, el rastro debe dar la razón de
+    fondo, no la primera que se topó el código.
+
+    Un ticker que nunca estuvo en el universo y además tiene historia corta se
+    rechaza por lo primero. Decir "historia corta" sugeriría que con más datos
+    entraría, y no es cierto: no está en el alcance del mandato.
+    """
+    bench = make_series(n=40, seed=41)
+    inst = make_instrument("RARO", serie_ligada(bench, seed=42))
+    inst["indices"] = []
+    d = evaluar(inst, metricas_de(inst, simple_returns(bench)))
+
+    check("fuera del universo y con poca historia se atribuye al alcance",
+          d.criterio == "mercado", f"dijo {d.criterio}")
+    check("y el motivo lo dice", "not a member" in d.detalle, d.detalle)
+
+    # Un apalancado que sí está en el universo: el motivo es el producto.
+    largo = make_series(n=60, seed=43)
+    lev = make_instrument("LEVX", serie_ligada(largo, seed=44))
+    lev["name"] = "PROSHARES ULTRAPRO QQQ 3X"
+    d2 = evaluar(lev, metricas_de(lev, simple_returns(largo)))
+    check("un apalancado dentro del universo se atribuye al producto",
+          d2.criterio == "producto", f"dijo {d2.criterio}")
+
+    check("el orden declarado coincide con el de evaluación",
+          [c.clave for c in CRITERIOS] ==
+          ["mercado", "producto", "historia", "negociabilidad"],
+          str([c.clave for c in CRITERIOS]))
+
+
 def main() -> int:
     for fn in [
         test_la_seleccion_es_ciega_al_desempeno,
@@ -322,6 +354,7 @@ def main() -> int:
         test_producto_excluido_se_rechaza_antes_que_nada,
         test_negociabilidad_usa_las_reglas_del_perfil,
         test_el_rastro_cubre_a_todos_los_candidatos,
+        test_el_motivo_reportado_es_el_de_fondo,
     ]:
         fn()
 
