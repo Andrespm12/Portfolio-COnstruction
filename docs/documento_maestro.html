@@ -100,7 +100,7 @@
   <li>Etapa 3 — Las 25 medidas, agrupadas en seis bloques</li>
   <li>Etapa 4 — Poner a competir a todos (el puntaje)</li>
   <li>Etapa 5 — Los frenos de riesgo</li>
-  <li>Etapa 6 — Cómo se determinan las views</li>
+  <li>Etapa 6 — Cómo se determinan las views <b>[par automático nuevo en v3]</b></li>
   <li>Etapa 7 — La cartera final</li>
   <li>Los diagnósticos: el sistema midiéndose a sí mismo <b>[nuevo en v2]</b></li>
   <li>Los cuatro perfiles, lado a lado</li>
@@ -444,7 +444,39 @@
 
 <p>Si el instrumento tiene declarado un ETF de referencia (una acción contra su sector, por ejemplo AAPL contra QQQ), el sistema genera una <b>view relativa</b>: "AAPL va a rendir X más que QQQ". En ese caso el Q se calcula con la diferencia de puntajes entre los dos y con la volatilidad del <i>spread</i>, no la de una pata sola. Dos nombres que se mueven juntos tienen un spread estrecho y no pueden sostener el mismo Q que dos independientes.</p>
 
-<p>Si no tiene referencia, se genera una <b>view absoluta</b> sobre el instrumento solo.</p>
+<h2>[v3] Cuando no hay referencia declarada: el par automático</h2>
+
+<p>Antes, un nombre que no estuviera en el diccionario <code>REFERENCIAS</code> caía a view absoluta sin más, por obvio que fuera el par. Ese diccionario tiene diez tickers escritos a mano, así que era un criterio bastante estrecho para un universo de cientos de nombres.</p>
+
+<p>Ahora, si no hay referencia declarada —o la declarada no llegó al ranking— el sistema <b>busca contraparte</b> entre los nombres de la cesta. Las referencias declaradas siguen mandando donde existen; esto solo cubre el hueco.</p>
+
+<p><b>Lo importante es cuándo se niega a emparejar</b>, porque un par mal escogido es peor que ninguno. Una view relativa existe para quitar riesgo común, así que la prueba es directa: <i>¿el spread es más tranquilo que la pata suelta?</i> Solo se acepta el par si la reduce al menos 15%.</p>
+
+<p>Eso no es prudencia decorativa. La varianza suma: si emparejas contra un nombre poco relacionado, el spread queda <b>más</b> volátil que la pata, y como Q = IC × z × volatilidad, el modelo devolvería <i>más</i> retorno esperado para una opinión peor fundada. Medido sobre series con estructura de factores conocida:</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Par</th><th>Correlación</th><th>Vol. de la pata</th><th>Vol. del spread</th><th>Cobertura</th><th>Veredicto</th></tr>
+  <tr><td>Muy ligado al sector</td><td>+0.93</td><td>15.3%</td><td>5.8%</td><td><b>+62%</b></td><td>acepta</td></tr>
+  <tr><td>Ligado, con ruido propio</td><td>+0.59</td><td>21.3%</td><td>17.3%</td><td><b>+19%</b></td><td>acepta</td></tr>
+  <tr><td>Suelto</td><td>+0.13</td><td>16.8%</td><td>19.7%</td><td><b>−17%</b></td><td>rechaza</td></tr>
+  <tr><td>Clon del sector</td><td>+1.00</td><td>12.8%</td><td>0.0%</td><td>+100%</td><td>rechaza: mismo activo</td></tr>
+</table>
+
+<p>La tercera fila es la que justifica el filtro: sin él, ese par habría entrado con un Q 17% más grande <i>precisamente por estar mal cubierto</i>.</p>
+
+<p>Hay dos filtros más, y cada uno tapa una forma distinta de equivocarse:</p>
+<ul>
+  <li><b>No puede ser el mismo activo.</b> Correlación por encima de 0.95, o un nombre ya marcado como duplicado, queda fuera: el spread entre dos envoltorios del mismo índice no tiene nada que decir.</li>
+  <li><b>El ranking tiene que sobrevivir la resta.</b> La diferencia de z entre las dos patas debe seguir pasando la misma vara que pasa una view absoluta. Emparejar dos nombres que el screener rankeó igual no dice nada, por bien que cubran.</li>
+</ul>
+
+<p>Entre los candidatos que pasan, gana <b>el que mejor cubre</b>, con los ETFs desempatando. Ordenarlos por Q habría sido un error sutil: como Q crece con la volatilidad del spread, escogería sistemáticamente los peores pares — sería optimizar contra el propio filtro.</p>
+
+<p>La justificación que ve el gestor <b>dice si el par lo eligió un humano o el modelo</b>, y cuánto cubrió. Se puede apagar por completo (<code>PARES_AUTOMATICOS</code>, o <code>--sin-pares-automaticos</code>), y entonces vuelve al comportamiento anterior exacto.</p>
+
+<p>Un detalle que no se ve pero manda: <b>la contraparte solo puede salir de la cesta del optimizador.</b> El motor Black-Litterman descarta en silencio cualquier view que nombre un ticker fuera de su universo de covarianza, así que un par contra un nombre que no llega a la cesta no debilitaría la view — la borraría, y encima gastaría uno de los ocho cupos. Por eso la cesta ahora se arma antes que las views, en los dos puntos de entrada.</p>
+
+<p>Si no hay referencia declarada y ningún candidato cubre lo suficiente, se genera una <b>view absoluta</b> sobre el instrumento solo. La corrida lo dice explícitamente en vez de callarse.</p>
 
 <h2>Cuáles no llegan a ser view</h2>
 
@@ -650,7 +682,17 @@
   <tr>
     <td>Qué acción se compara contra qué ETF</td>
     <td>Celda de Views, diccionario REFERENCIAS</td>
-    <td>Equivale a la columna activo_referencia del Google Sheet</td>
+    <td>Equivale a la columna activo_referencia del Google Sheet. Lo declarado aquí siempre manda sobre el par automático</td>
+  </tr>
+  <tr>
+    <td>[v3] Buscar par para lo que REFERENCIAS no cubre</td>
+    <td>Celda de Views, campo PARES_AUTOMATICOS</td>
+    <td>Encendido por defecto. Apagarlo devuelve el comportamiento anterior: solo lo declarado va relativo</td>
+  </tr>
+  <tr>
+    <td>[v3] Cuánto debe cubrir un par para aceptarse</td>
+    <td>ViewParams, campo min_hedge_benefit</td>
+    <td>15% por defecto. Es el filtro que impide que un par mal escogido infle el Q. Bajarlo mete pares peor cubiertos</td>
   </tr>
   <tr>
     <td>Cuántos nombres entran a la cartera</td>
@@ -726,7 +768,7 @@
   <tr><th>metrics.py</th><td>Calcula las 25 medidas a partir de precios y volumen.</td></tr>
   <tr><th>scoring.py</th><td>Recorta extremos, calcula las notas relativas, agrega por bloque, aplica frenos, dimensiona.</td></tr>
   <tr><th>profiles.py</th><td>Los cuatro perfiles y su correspondencia con las estrategias de CCI.</td></tr>
-  <tr><th>black_litterman.py</th><td>Traduce el ranking a views: calcula Q y convicción.</td></tr>
+  <tr><th>black_litterman.py</th><td>Traduce el ranking a views: calcula Q y convicción, y [v3] busca contraparte para las views relativas que REFERENCIAS no declara.</td></tr>
   <tr><th>cci_regulation.py</th><td>El Procedimiento de Inversión como datos: clases, bandas, exclusiones.</td></tr>
   <tr><th>optimizer.py</th><td>Punto de partida del equilibrio, mezcla bayesiana, optimización restringida y auditoría.</td></tr>
   <tr><th>diagnostics.py</th><td>[v2] Las mediciones sobre el modelo mismo: solape entre bloques y saturación de views.</td></tr>
@@ -734,7 +776,7 @@
   <tr><th>tuning.py</th><td>Permite cambiar pesos y frenos en caliente sin reiniciar.</td></tr>
 </table>
 
-<p>Hay además una carpeta de pruebas con <b>624 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
+<p>Hay además una carpeta de pruebas con <b>645 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
 
 <p>Un ejemplo de esta ronda que ilustra para qué sirven: al agregar la omisión del bloque de sensibilidad al mercado, una prueba nueva falló y destapó que <b>las pruebas viejas estaban corriendo sobre datos mal armados</b>. Los instrumentos de prueba tenían todos el mismo volumen y el mismo dividendo, y como el puntaje relativo no se puede calcular cuando todos los valores son idénticos, los bloques de liquidez y valuación venían vacíos sin que nadie lo notara. Varias pruebas sobre el ranking estaban pasando sobre un universo que no podía producir ninguna recomendación.</p>
 
@@ -887,9 +929,15 @@
     <td>3</td>
   </tr>
   <tr>
+    <th>[v3] Views relativas</th>
+    <td>Solo si el nombre estaba en REFERENCIAS — diez tickers escritos a mano</td>
+    <td>Si no hay referencia declarada, el modelo busca contraparte en la cesta y solo la acepta si el spread es 15% más tranquilo que la pata</td>
+    <td>8</td>
+  </tr>
+  <tr>
     <th>Pruebas automáticas</th>
     <td>439</td>
-    <td>624, más la comprobación de paridad entre los dos motores</td>
+    <td>645, más la comprobación de paridad entre los dos motores</td>
     <td>14</td>
   </tr>
 </table>
