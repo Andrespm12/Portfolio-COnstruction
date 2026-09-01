@@ -15,7 +15,12 @@ Uso
     python3 scripts/correr_modelo.py --universo etfs --top-n 30
     python3 scripts/correr_modelo.py --tickers SPY,QQQ,TLT,GLD,AAPL,MSFT
     python3 scripts/correr_modelo.py --ancla mercado      # comparar anclas
+    python3 scripts/correr_modelo.py --sin-pares-automaticos
     python3 scripts/correr_modelo.py --salida ./corridas/2026-08
+
+Tiene que correr desde el repo: importa el paquete ``screener/`` que está un
+nivel arriba de este archivo. El notebook, en cambio, lleva el motor embebido
+y no necesita nada al lado.
 
 Requisitos
 ----------
@@ -27,8 +32,12 @@ Qué produce
 -----------
 En el directorio de salida (por defecto, el actual):
 
-    screening.xlsx                              8 hojas, se explica solo
+    screening.xlsx                              9 hojas, se explica solo
     {Estrategia}_screener_propuestas_{fecha}.json   entrada para el BL de CCI
+
+Las nueve hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Cesta,
+Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
+Parametros.
 
 El JSON va a ``propuestas/``, nunca a ``aprobadas/``: esa carpeta es solo para
 views que un gestor ya revisó y firmó, y el propio ``write_views`` se niega a
