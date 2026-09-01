@@ -83,6 +83,11 @@ REFERENCIAS = {
     "XOM": "XLE", "CVX": "XLE",
 }
 
+#: Buscar contraparte para los nombres que REFERENCIAS no cubre. El par solo se
+#: acepta si el spread es más tranquilo que la pata suelta; si no, la view queda
+#: absoluta. Ver find_peer() en black_litterman.py.
+PARES_AUTOMATICOS = True
+
 # --- Cartera --------------------------------------------------------------
 TOP_N_CARTERA = 25             # menos nombres = covarianza mejor estimada
 ANCLA = "politica"             # politica | mercado  (ver el documento maestro)
@@ -126,6 +131,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--ic", type=float, default=IC_SUPUESTO,
                    help="Coeficiente de información supuesto para traducir el ranking a Q.")
     p.add_argument("--max-views", type=int, default=MAX_VIEWS)
+    p.add_argument("--sin-pares-automaticos", dest="pares_automaticos",
+                   action="store_false", default=PARES_AUTOMATICOS,
+                   help="Solo emparejar lo declarado en REFERENCIAS; el resto "
+                        "queda como view absoluta.")
     p.add_argument("--top-n", type=int, default=TOP_N_CARTERA,
                    help="Nombres del ranking que entran a la optimización.")
     p.add_argument("--ancla", default=ANCLA, choices=("politica", "mercado"),
@@ -349,9 +358,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---------------------------------------------------------------- 6. views
     titulo("6 · VIEWS BLACK-LITTERMAN")
-    params = ViewParams(information_coefficient=args.ic, max_views=args.max_views)
+    params = ViewParams(information_coefficient=args.ic, max_views=args.max_views,
+                        auto_pair=args.pares_automaticos)
+
+    # La cesta se calcula aquí, antes de las views, porque el pool de pares
+    # tiene que ser exactamente el universo de la covarianza: posterior()
+    # descarta en silencio cualquier view que nombre un ticker fuera de él, así
+    # que un par contra un nombre que no llega a la cesta no debilita la view,
+    # la borra — y encima gasta uno de los cupos de max_views.
+    cartera_tickers = select_basket(scored, args.estrategia,
+                                    top_n=args.top_n, min_per_class=3)
     views = build_views(scored, market_data, strategy=args.estrategia,
-                        reference_map=REFERENCIAS, params=params)
+                        reference_map=REFERENCIAS,
+                        pair_pool=cartera_tickers, params=params)
     cesta = build_basket(scored, strategy=args.estrategia, reference_map=REFERENCIAS)
 
     print(f"{len(views)} views para {args.estrategia} "
@@ -359,8 +378,21 @@ def main(argv: list[str] | None = None) -> int:
     for v in views:
         quien = (v["activo"] if v["tipo"] == "absoluto"
                  else f"{v['activo_long']} / {v['activo_short']}")
+        marca = {"declarado": " (REFERENCIAS)", "automatico": " (par automático)"}
         print(f"  {v['tipo']:9s} {quien:18s} Q {v['Q']:+.2%}   "
-              f"convicción {v['conviccion']:.2f}")
+              f"convicción {v['conviccion']:.2f}"
+              f"{marca.get(v.get('_pairing', ''), '')}")
+
+    autom = [v for v in views if v.get("_pairing") == "automatico"]
+    if autom:
+        print(f"\n{len(autom)} par(es) los eligió el modelo, no REFERENCIAS. "
+              f"Cada uno pasó el filtro de cobertura (el spread es al menos "
+              f"{ViewParams().min_hedge_benefit:.0%} menos volátil que la pata "
+              f"suelta); el motivo va escrito en la justificación de la view.")
+    elif args.pares_automaticos:
+        print("\nNingún par automático: ningún candidato de la cesta cubría lo "
+              "suficiente. Las views quedan absolutas, que es el resultado "
+              "correcto cuando no hay con qué cubrir.")
 
     # public_view quita la columna interna _q_bruto, que solo usa el
     # diagnóstico de abajo y no viaja al archivo de CCI.
@@ -378,8 +410,6 @@ def main(argv: list[str] | None = None) -> int:
     # y riesgo-retorno, donde la renta variable domina, y con una cesta 100%
     # equity el techo del mandato queda por debajo del libro invertido — el
     # solver responde 'infactible' y la cartera sale vacía.
-    cartera_tickers = select_basket(scored, args.estrategia,
-                                    top_n=args.top_n, min_per_class=3)
     clases_cesta = sorted({classify_for_bands(t, tipos_todos.get(t, "ETF"))
                            for t in cartera_tickers})
     print(f"Cesta: {len(cartera_tickers)} nombres en {len(clases_cesta)} clases")
@@ -477,6 +507,13 @@ def main(argv: list[str] | None = None) -> int:
         ("Portafolio", "ninguno — screen independiente"),
         ("IC supuesto (views)", args.ic),
         ("Nota sobre el IC", "supuesto declarado, no calibrado contra backtest"),
+        ("Pares automáticos", "sí" if args.pares_automaticos else "no"),
+        ("Views con par declarado",
+         sum(1 for v in views if v.get("_pairing") == "declarado")),
+        ("Views con par automático",
+         sum(1 for v in views if v.get("_pairing") == "automatico")),
+        ("Cobertura mínima exigida al par",
+         f"{ViewParams().min_hedge_benefit:.0%} menos volatilidad que la pata"),
         ("Ancla del equilibrio", args.ancla),
         ("Universo — candidatos", meta["seleccion_resumen"]["candidatos"]),
         ("Universo — admitidos", meta["seleccion_resumen"]["admitidos"]),

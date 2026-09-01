@@ -29,12 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from screener.black_litterman import (  # noqa: E402
     BASKET_COLUMNS, DEFAULT_PARAMS, ViewParams, block_agreement, build_basket,
     build_views, conviction, default_views_filename, expected_return,
-    spread_volatility, views_payload, write_views,
+    find_peer, public_view, spread_volatility, views_payload, write_views,
 )
 from screener.profiles import (  # noqa: E402
     CCI_STRATEGIES, PROFILES, profile_for_strategy,
 )
 from screener.run_screen import run_standalone  # noqa: E402
+from screener.scoring import ScoredInstrument  # noqa: E402
 from screener.tuning import reset_all  # noqa: E402
 from screener.yahoo_adapter import build_market_data  # noqa: E402
 from test_yahoo_adapter import make_yf_frame  # noqa: E402
@@ -315,6 +316,211 @@ def test_relative_views_need_both_legs_scored() -> None:
               for v in legs))
 
 
+# --------------------------------------------------------------------------
+# Dynamic pairing
+# --------------------------------------------------------------------------
+
+def _paired_world():
+    """
+    Return series with a real factor structure, which the standard fixture lacks.
+
+    ``make_yf_frame`` draws every name independently, so no pair of its names
+    hedges another and the pairing gates correctly refuse all of them. That is
+    the right answer there but it cannot show the search accepting anything, so
+    this builds legs with a known beta on a common market.
+    """
+    from screener.black_litterman import _returns_by_ticker
+    from screener.metrics import simple_returns
+
+    rng = np.random.default_rng(11)
+    market = np.cumprod(1 + rng.normal(0.002, 0.020, 61)) * 100.0
+    mr = simple_returns(market)
+
+    def leg(beta: float, idio: float, seed: int) -> np.ndarray:
+        noise = np.random.default_rng(seed).normal(0, idio, mr.size)
+        return np.cumprod(np.r_[1.0, 1 + beta * mr + noise]) * 100.0
+
+    closes = {
+        "SECTOR": market,
+        "TIGHT": leg(1.10, 0.008, 21),     # rho ~0.93 -- a clean hedge
+        "LOOSE": np.cumprod(                # independent -- pairing adds risk
+            1 + np.random.default_rng(23).normal(0.002, 0.022, 61)) * 100.0,
+        # Same bet in another wrapper. Not an exact multiple of the market:
+        # that would make the spread identically zero and be refused for
+        # having no volatility at all, which is not the case under test.
+        "CLONE": leg(1.00, 0.0015, 24),
+    }
+    data = {"instruments": [{"ticker": t, "history": {"close": list(c)}}
+                            for t, c in closes.items()]}
+    return _returns_by_ticker(data)
+
+
+def _row(ticker: str, z: float, vol: float, asset_type: str = "STOCK",
+         duplicates: list[str] | None = None) -> ScoredInstrument:
+    return ScoredInstrument(
+        ticker=ticker, name=ticker, asset_type=asset_type, indices=[],
+        sector=None, raw_metrics={"volatility_1y": vol},
+        block_scores={"momentum": z}, block_coverage={"momentum": 1.0},
+        composite_z=z, score_0_100=50.0,
+        duplicates=duplicates or [],
+    )
+
+
+def test_pairing_requires_the_spread_to_be_quieter_than_the_leg() -> None:
+    """
+    The gate that makes automatic pairing safe rather than merely automatic.
+
+    Pairing against an unrelated name does not leave Q unchanged -- variance
+    adds, so the spread is *more* volatile than the leg, and since
+    ``Q = ic * z * sigma`` the model would report more expected return for a
+    worse-founded view. Refusing that case is the whole point.
+    """
+    returns = _paired_world()
+    from screener.black_litterman import hedge_benefit
+
+    tight = hedge_benefit(_row("TIGHT", 1.2, 0.153), _row("SECTOR", 0.0, 0.128),
+                          returns)
+    loose = hedge_benefit(_row("LOOSE", 1.2, 0.168), _row("SECTOR", 0.0, 0.128),
+                          returns)
+    check("a correlated pair removes most of the leg's volatility",
+          tight is not None and tight > 0.50, f"{tight}")
+    check("an uncorrelated pair ADDS volatility, and is measured as negative",
+          loose is not None and loose < 0.0, f"{loose}")
+
+    params = ViewParams()
+    pool = [_row("SECTOR", 0.0, 0.128, "ETF"), _row("LOOSE", 0.1, 0.168)]
+    check("the loose peer is refused, leaving the view absolute",
+          find_peer(_row("TIGHT", 1.2, 0.153), [pool[1]], returns, params) is None)
+    check("the hedging peer is accepted",
+          find_peer(_row("TIGHT", 1.2, 0.153), pool, returns, params)
+          is not None)
+
+
+def test_pairing_refuses_duplicates_and_near_duplicates() -> None:
+    from screener.black_litterman import pair_correlation
+
+    returns = _paired_world()
+    params = ViewParams()
+
+    corr = pair_correlation("CLONE", "SECTOR", returns)
+    check("the near-duplicate fixture really is one",
+          corr is not None and corr > params.max_pair_corr, f"{corr}")
+    check("a peer correlated above max_pair_corr is refused",
+          find_peer(_row("CLONE", 1.2, 0.128),
+                    [_row("SECTOR", 0.0, 0.128, "ETF")],
+                    returns, params) is None)
+
+    flagged = _row("TIGHT", 1.2, 0.153, duplicates=["SECTOR"])
+    check("a peer already flagged as a duplicate is never chosen",
+          find_peer(flagged, [_row("SECTOR", 0.0, 0.128, "ETF")],
+                    returns, params) is None)
+
+
+def test_pairing_needs_the_ranking_to_survive_the_subtraction() -> None:
+    """Two names the screener ranked alike have nothing to say as a spread."""
+    returns = _paired_world()
+    params = ViewParams()
+    row = _row("TIGHT", 1.2, 0.153)
+    check("a peer at the same z is refused however well it hedges",
+          find_peer(row, [_row("SECTOR", 1.2, 0.128, "ETF")],
+                    returns, params) is None)
+    check("a peer far enough away in the ranking is accepted",
+          find_peer(row, [_row("SECTOR", 0.0, 0.128, "ETF")],
+                    returns, params) is not None)
+
+
+def test_declared_references_still_win() -> None:
+    scored, _, data, _ = screen("Agresivo")
+    params = ViewParams(max_views=40, min_conviction=0.0, min_abs_z=0.0)
+    views = build_views(scored, data, strategy="Agresivo",
+                        reference_map=REFERENCIAS, params=params)
+    declared = {v["_pairing"] for v in views if v["tipo"] == "relativo"}
+    pairs = {frozenset((v["activo_long"], v["activo_short"]))
+             for v in views if v["_pairing"] == "declarado"}
+    expected = {frozenset((t, r)) for t, r in REFERENCIAS.items()}
+    check("declared pairs are still emitted and still labelled as declared",
+          "declarado" in declared)
+    check("every declared pair matches the reference map",
+          pairs <= expected, f"{pairs - expected}")
+
+
+def test_auto_pair_off_reproduces_the_previous_behaviour() -> None:
+    """The switch has to be a real off, not a softer on."""
+    scored, _, data, _ = screen("Moderado")
+    off = ViewParams(auto_pair=False, max_views=40, min_conviction=0.0,
+                     min_abs_z=0.0)
+    views = build_views(scored, data, strategy="Moderado",
+                        reference_map=REFERENCIAS, params=off)
+    found = [v for v in views if v.get("_pairing") == "automatico"]
+    check("auto_pair=False emits no found pairs at all", not found, f"{found}")
+
+    relatives = [v for v in views if v["tipo"] == "relativo"]
+    check("declared pairs are unaffected by the switch", len(relatives) > 0)
+
+
+def test_pair_pool_keeps_peers_inside_the_optimizer_universe() -> None:
+    """
+    A peer outside the covariance universe does not weaken a view -- it deletes
+    it. ``posterior`` drops any view naming an unknown leg, so the name would
+    burn one of the max_views slots and vanish.
+    """
+    returns = _paired_world()
+    params = ViewParams()
+    row = _row("TIGHT", 1.2, 0.153)
+    sector = _row("SECTOR", 0.0, 0.128, "ETF")
+
+    check("with the peer in the pool, a pair is found",
+          find_peer(row, [sector], returns, params) is not None)
+
+    scored, _, data, _ = screen("Moderado")
+    small = [r.ticker for r in scored][:3]
+    views = build_views(scored, data, strategy="Moderado", reference_map={},
+                        pair_pool=small,
+                        params=ViewParams(max_views=40, min_conviction=0.0,
+                                          min_abs_z=0.0))
+    outside = [v for v in views if v["tipo"] == "relativo"
+               and v["activo_short"] not in small
+               and v["activo_long"] not in small]
+    check("no found peer comes from outside the declared pool",
+          not outside, f"{outside}")
+
+
+def test_found_pairs_say_so_on_the_approval_screen() -> None:
+    returns = _paired_world()
+    params = ViewParams()
+    peer = find_peer(_row("TIGHT", 1.2, 0.153),
+                     [_row("SECTOR", 0.0, 0.128, "ETF")], returns, params)
+    check("a peer is found for the rationale test", peer is not None)
+
+    data = {"instruments": [{"ticker": t, "history": {"close": list(c)}}
+                            for t, c in (("SECTOR", np.cumprod(
+                                1 + np.random.default_rng(11).normal(
+                                    0.002, 0.020, 61)) * 100.0),)]}
+    from screener.black_litterman import _rationale
+    text = _rationale(_row("TIGHT", 1.2, 0.153), params,
+                      peer=_row("SECTOR", 0.0, 0.128, "ETF"),
+                      q=0.02, conv=0.5, pairing="automatico", benefit=0.62)
+    check("the rationale flags that the model chose the pair, not a human",
+          "PAR AUTOMÁTICO" in text and "SECTOR" in text, text)
+    check("the rationale quantifies the hedge it bought",
+          "62%" in text, text)
+
+    declared = _rationale(_row("AAPL", 1.2, 0.153), params,
+                          peer=_row("QQQ", 0.0, 0.128, "ETF"),
+                          q=0.02, conv=0.5, pairing="declarado")
+    check("a declared pair is labelled differently",
+          "REFERENCIAS" in declared and "PAR AUTOMÁTICO" not in declared,
+          declared)
+
+
+def test_internal_pairing_key_never_ships() -> None:
+    scored, _, data, _ = screen("Moderado")
+    views = build_views(scored, data, strategy="Moderado",
+                        reference_map=REFERENCIAS)
+    check("_pairing is stripped from the exported view",
+          all("_pairing" not in public_view(v) for v in views))
+
+
 def test_spread_volatility() -> None:
     _, _, data, _ = screen("Moderado")
     from screener.black_litterman import _returns_by_ticker
@@ -438,16 +644,20 @@ def test_written_payload_round_trips() -> None:
           "sin datos de cuenta" in payload["origen"])
     check("payload declares the IC as an assumption, not an estimate",
           "supuesto" in payload["calibracion"]["nota"])
-    # Everything CCI reads survives the round trip; the only difference is the
-    # internal `_q_bruto` diagnostic, which write_views strips on purpose so
-    # the reviewed file carries no field their approval flow does not expect.
-    from screener.black_litterman import public_view
+    # Everything CCI reads survives the round trip; the only differences are
+    # the internal diagnostics -- `_q_bruto` for the saturation check and
+    # `_pairing` for where a relative view's peer came from -- which
+    # write_views strips on purpose so the reviewed file carries no field
+    # their approval flow does not expect.
     check("the views survive the round trip unchanged",
           payload["views"] == [public_view(v) for v in views])
-    check("the round trip drops only the internal diagnostic key",
-          all(set(v) - set(p) == {"_q_bruto"}
+    check("the round trip drops only the internal diagnostic keys",
+          all(set(v) - set(p) <= {"_q_bruto", "_pairing"}
               for v, p in zip(views, payload["views"])),
           str([set(v) - set(p) for v, p in zip(views, payload["views"])]))
+    dropped = {k for v, p in zip(views, payload["views"]) for k in set(v) - set(p)}
+    check("every dropped key is underscore-prefixed, so the strip stays generic",
+          all(k.startswith("_") for k in dropped), str(dropped))
 
     # The nested list is what CCI's solver consumes; prove it still does.
     import pandas as pd
@@ -613,6 +823,14 @@ def main() -> int:
         test_neutral_names_produce_no_view,
         test_relative_views_use_the_declared_reference,
         test_relative_views_need_both_legs_scored,
+        test_pairing_requires_the_spread_to_be_quieter_than_the_leg,
+        test_pairing_refuses_duplicates_and_near_duplicates,
+        test_pairing_needs_the_ranking_to_survive_the_subtraction,
+        test_declared_references_still_win,
+        test_auto_pair_off_reproduces_the_previous_behaviour,
+        test_pair_pool_keeps_peers_inside_the_optimizer_universe,
+        test_found_pairs_say_so_on_the_approval_screen,
+        test_internal_pairing_key_never_ships,
         test_spread_volatility,
         test_strategy_mapping,
         test_view_schema_matches_cci,

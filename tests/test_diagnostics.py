@@ -426,7 +426,8 @@ def test_q_bruto_never_reaches_the_json() -> None:
     check("public_view strips private keys",
           all(not k.startswith("_") for k in public_view(views[0])))
     check("public_view keeps everything else",
-          set(public_view(views[0])) == set(views[0]) - {"_q_bruto"})
+          set(public_view(views[0]))
+          == set(views[0]) - {"_q_bruto", "_pairing"})
 
     with tempfile.TemporaryDirectory() as tmp:
         path = write_views(views, Path(tmp) / "propuestas" / "p.json",
