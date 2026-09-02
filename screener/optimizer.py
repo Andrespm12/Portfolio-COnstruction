@@ -68,6 +68,40 @@ TAU = 0.025
 #: so a solution never sits exactly on the regulatory margin.
 LEVERAGE_BUFFER = 0.95
 
+#: Whether the desk uses the leverage its mandates permit. Off: every strategy
+#: solves fully invested at 100% gross, regardless of what ``leverage_max``
+#: allows.
+#:
+#: This is a **desk decision, not a regulatory limit**, and it lives here rather
+#: than in :data:`~screener.cci_regulation.REGULACIONES` on purpose. That table
+#: is a verbatim copy of the Investment Procedure; editing it to read 1.0 would
+#: destroy the record of what the mandate actually permits and leave nothing
+#: showing that a choice was ever made. Keeping the two apart means the run can
+#: report both -- what is allowed, and what was used.
+#:
+#: With leverage off the budget is 1.0 exactly, not ``1.0 * LEVERAGE_BUFFER``.
+#: The buffer exists so a solution never sits on a *regulatory* margin; with no
+#: leverage there is no margin to stand off from, and applying it anyway would
+#: strand 5% of every book in nothing at all -- not even cash, which is already
+#: an asset class here with its own band and weight.
+ALLOW_LEVERAGE = False
+
+#: Gross exposure when leverage is off: fully invested, long only.
+NO_LEVERAGE_BUDGET = 1.0
+
+
+def gross_budget(strategy: str, *, allow_leverage: bool = ALLOW_LEVERAGE) -> float:
+    """
+    Gross exposure the book must reach, given the mandate and desk policy.
+
+    Single source of truth: the solver, the feasibility check and the reports
+    all read this, so none of them can disagree about how much has to be
+    invested.
+    """
+    if not allow_leverage:
+        return NO_LEVERAGE_BUDGET
+    return float(REGULACIONES[strategy]["leverage_max"]) * LEVERAGE_BUFFER
+
 #: Smallest holding worth executing, as a fraction of the portfolio.
 #:
 #: A mean-variance optimizer has no notion of what is worth trading. Left alone
@@ -476,7 +510,7 @@ def feasibility_report(classes: Mapping[str, str], strategy: str,
     class, not a numerical problem.
     """
     rules = REGULACIONES[strategy]
-    required = budget if budget is not None else rules["leverage_max"] * LEVERAGE_BUFFER
+    required = budget if budget is not None else gross_budget(strategy)
     bands = bands_for(strategy)
 
     present = set(classes.values())
@@ -527,13 +561,19 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              asset_types: Mapping[str, str], strategy: str,
              risk_aversion: float = RISK_AVERSION,
              solver: str | None = None,
-             min_position: float | None = MIN_POSITION) -> Allocation:
+             min_position: float | None = MIN_POSITION,
+             allow_leverage: bool = ALLOW_LEVERAGE) -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
     Long-only, per-class bands, a total-equity ceiling, a per-name cap on single
-    stocks, hard exclusions, and a gross-exposure budget that honours
-    ``leverage_max`` with the documented buffer.
+    stocks, hard exclusions, and a gross-exposure budget.
+
+    ``allow_leverage`` is off by default: the book solves fully invested at 100%
+    gross for every strategy, whatever ``leverage_max`` permits. See
+    :data:`ALLOW_LEVERAGE` for why that lives here and not in the regulation
+    table. Pass ``True`` to use the mandate's leverage with its documented
+    buffer.
 
     ``min_position`` drops holdings too small to be worth executing; see
     :data:`MIN_POSITION`. Pass ``None`` to keep whatever the solver produces.
@@ -553,9 +593,18 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     classes = {t: classify_for_bands(t, asset_types.get(t, "ETF")) for t in tickers}
 
     notes: list[str] = []
-    budget_required = float(rules["leverage_max"]) * LEVERAGE_BUFFER
-    infeasible_reasons = feasibility_report(classes, strategy, budget_required)
+    budget = gross_budget(strategy, allow_leverage=allow_leverage)
+    infeasible_reasons = feasibility_report(classes, strategy, budget)
     notes.extend(infeasible_reasons)
+
+    permitted = float(rules["leverage_max"])
+    if not allow_leverage and permitted > 1.0:
+        notes.append(
+            f"Apalancamiento desactivado por política de mesa: la cartera "
+            f"resuelve invertida al {budget:.0%}. El mandato {strategy} permite "
+            f"hasta {permitted:.0%}, y ese límite sigue vigente en el "
+            f"Procedimiento — solo no se está usando."
+        )
 
     orphaned = unbanded_classes(classes, strategy)
     if orphaned:
@@ -563,11 +612,6 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             f"Clases sin banda declarada: {sorted(orphaned)}. Quedan sin techo; "
             "confirmar con Compliance antes de operar."
         )
-
-    # Gross exposure. leverage_max of 1.0 collapses this to the fully invested
-    # long-only case; above 1.0 it is a real budget, which CCI's original code
-    # never applied.
-    budget = float(rules["leverage_max"]) * LEVERAGE_BUFFER
 
     # CLARABEL ships with CVXPY. CCI's code asked for ECOS, which is optional
     # and absent from a stock Colab -- that is what killed their saved run.
@@ -579,7 +623,10 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         """Solve the mandate's problem with ``banned`` names forced to zero."""
         w = cp.Variable(len(tickers))
         constraints = [w >= 0, cp.sum(w) <= budget]
-        if rules["leverage_max"] <= 1.0:
+        if not allow_leverage or rules["leverage_max"] <= 1.0:
+            # Fully invested at the budget. Long-only plus an equality on the
+            # sum is the whole of "no leverage": nothing can be borrowed and
+            # nothing can sit unallocated.
             constraints.append(cp.sum(w) == budget)
         else:
             # Stay invested: without a floor the optimizer can sit in cash and
@@ -699,7 +746,8 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
 def audit_bands(allocation: Allocation,
                 classes: Mapping[str, str],
-                tolerance: float = 1e-4) -> list[str]:
+                tolerance: float = 1e-4,
+                allow_leverage: bool = ALLOW_LEVERAGE) -> list[str]:
     """
     Check solved weights against every limit. Returns the breaches found.
 
@@ -712,12 +760,21 @@ def audit_bands(allocation: Allocation,
     weights = allocation.weights
     breaches: list[str] = []
 
-    budget = rules["leverage_max"] * LEVERAGE_BUFFER
+    # Audited against the budget actually in force, not just the regulatory
+    # ceiling. Checking only the mandate would let a book solved under a desk
+    # policy of no leverage come back at 113% and still pass, since 113% clears
+    # a 125% limit -- the audit would be true and useless.
+    budget = gross_budget(allocation.strategy, allow_leverage=allow_leverage)
     if allocation.gross_exposure > budget + tolerance:
+        if allow_leverage:
+            detalle = (f"(apalancamiento {rules['leverage_max']:.2f} con buffer "
+                       f"{LEVERAGE_BUFFER:.0%})")
+        else:
+            detalle = ("(apalancamiento desactivado por política de mesa; el "
+                       f"mandato permitiría {rules['leverage_max']:.0%})")
         breaches.append(
             f"Exposición bruta {allocation.gross_exposure:.2%} excede el "
-            f"presupuesto {budget:.2%} (apalancamiento {rules['leverage_max']:.2f} "
-            f"con buffer {LEVERAGE_BUFFER:.0%})"
+            f"presupuesto {budget:.2%} {detalle}"
         )
 
     negative = weights[weights < -tolerance]

@@ -33,7 +33,8 @@ from screener.cci_regulation import (  # noqa: E402
     classify_for_bands, unbanded_classes,
 )
 from screener.optimizer import (  # noqa: E402
-    EQUITY_CLASSES, LEVERAGE_BUFFER, allocation_table, audit_bands,
+    EQUITY_CLASSES, LEVERAGE_BUFFER, Allocation, allocation_table,
+    audit_bands, gross_budget,
     feasibility_report, implied_equilibrium, market_weights, optimize,
     policy_weights, posterior, select_basket, shrunk_covariance,
 )
@@ -139,7 +140,7 @@ def test_policy_anchor_is_self_consistent() -> None:
     """
     _, scored, cov, _, types, caps = world("Moderado")
     types = {t: types[t] for t in cov.columns}
-    budget = REGULACIONES["Moderado"]["leverage_max"] * LEVERAGE_BUFFER
+    budget = gross_budget("Moderado")
 
     anchor, _ = policy_weights(types, "Moderado", caps=caps, total=budget)
     solved = optimize(implied_equilibrium(anchor, cov), cov, types, "Moderado")
@@ -166,7 +167,7 @@ def test_policy_anchor_obeys_every_constraint_the_solver_applies() -> None:
     for strategy in ("Conservador_Defensivo", "Conservador", "Moderado", "Agresivo"):
         _, scored, cov, _, types, caps = world(strategy)
         types = {t: types[t] for t in cov.columns}
-        budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+        budget = gross_budget(strategy)
         anchor, _ = policy_weights(types, strategy, caps=caps, total=budget)
         classes = pd.Series({t: classify_for_bands(t, types[t]) for t in anchor.index})
         by_class = anchor.groupby(classes).sum()
@@ -201,7 +202,7 @@ def test_policy_anchor_frees_the_equity_ceiling() -> None:
     strategy = "Conservador"
     _, scored, cov, _, types, caps = world(strategy)
     types = {t: types[t] for t in cov.columns}
-    budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+    budget = gross_budget(strategy)
     ceiling = REGULACIONES[strategy]["max_equity_total"]
     classes = pd.Series({t: classify_for_bands(t, types[t]) for t in cov.columns})
 
@@ -343,7 +344,7 @@ def _solved(strategy: str = "Moderado", **kwargs):
     """A posterior-driven allocation, the way the notebook builds one."""
     data, scored, cov, _, types, caps = world(strategy)
     types = {t: types[t] for t in cov.columns}
-    budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+    budget = gross_budget(strategy)
     views = build_views(scored, data, strategy=strategy)
     anchor, _ = policy_weights(types, strategy, caps=caps, total=budget)
     er, pcov = posterior(implied_equilibrium(anchor, cov), cov, views)
@@ -409,7 +410,7 @@ def test_minimum_position_preserves_every_mandate_limit() -> None:
               not tight.breaches, "; ".join(tight.breaches))
 
         rules = REGULACIONES[strategy]
-        budget = rules["leverage_max"] * LEVERAGE_BUFFER
+        budget = gross_budget(strategy)
         check(f"{strategy}: gross exposure still inside the budget",
               tight.gross_exposure <= budget + 1e-6,
               f"{tight.gross_exposure:.6f} > {budget:.6f}")
@@ -582,7 +583,7 @@ def test_optimization_respects_every_limit() -> None:
         check(f"{strategy}: no negative weights",
               bool((alloc.weights >= -1e-9).all()))
 
-        budget = REGULACIONES[strategy]["leverage_max"] * LEVERAGE_BUFFER
+        budget = gross_budget(strategy)
         check(f"{strategy}: gross exposure respects the leverage budget",
               alloc.gross_exposure <= budget + 1e-6,
               f"{alloc.gross_exposure:.4f} > {budget:.4f}")
@@ -590,16 +591,47 @@ def test_optimization_respects_every_limit() -> None:
               alloc.gross_exposure > 0.9, f"{alloc.gross_exposure:.4f}")
 
 
-def test_leverage_is_actually_applied() -> None:
+def test_leverage_is_off_by_desk_policy() -> None:
     """
-    CCI's REGULACIONES declares leverage_max 1.25/1.50 and their optimizer
-    hard-coded sum(w) == 1, so the field never constrained anything.
+    Every mandate solves fully invested, whatever REGULACIONES permits.
+
+    The desk switched leverage off. The regulation table still carries
+    leverage_max 1.25 and 1.50 because that is what the Investment Procedure
+    says -- the policy lives in the optimizer, so a run can report both what is
+    allowed and what was used.
     """
     _, scored, cov, pi, types, _ = world("Moderado")
 
-    conservative = optimize(pi, cov, types, "Conservador")
-    moderate = optimize(pi, cov, types, "Moderado")
-    aggressive = optimize(pi, cov, types, "Agresivo")
+    for strategy in ("Conservador_Defensivo", "Conservador", "Moderado", "Agresivo"):
+        alloc = optimize(pi, cov, types, strategy)
+        check(f"{strategy}: solves at exactly 100% gross",
+              abs(alloc.gross_exposure - 1.0) < 1e-4,
+              f"{alloc.gross_exposure:.4f}")
+
+    check("the regulation table is untouched: it still records what is allowed",
+          REGULACIONES["Moderado"]["leverage_max"] == 1.25
+          and REGULACIONES["Agresivo"]["leverage_max"] == 1.50)
+
+    levered = optimize(pi, cov, types, "Moderado")
+    check("a run under the policy says the mandate would have allowed more",
+          any("Apalancamiento desactivado" in n for n in levered.notes),
+          str(levered.notes))
+
+
+def test_leverage_still_works_when_switched_on() -> None:
+    """
+    The capability is off, not removed.
+
+    CCI's REGULACIONES declares leverage_max 1.25/1.50 and their optimizer
+    hard-coded sum(w) == 1, so the field never constrained anything. It does
+    now, and turning the policy back on has to reach the solver -- a switch
+    that silently does nothing is worse than no switch.
+    """
+    _, scored, cov, pi, types, _ = world("Moderado")
+
+    conservative = optimize(pi, cov, types, "Conservador", allow_leverage=True)
+    moderate = optimize(pi, cov, types, "Moderado", allow_leverage=True)
+    aggressive = optimize(pi, cov, types, "Agresivo", allow_leverage=True)
 
     check("an unlevered mandate is fully invested and no more",
           abs(conservative.gross_exposure - 1.0 * LEVERAGE_BUFFER) < 1e-4,
@@ -610,6 +642,33 @@ def test_leverage_is_actually_applied() -> None:
           aggressive.gross_exposure > moderate.gross_exposure)
     check("the documented buffer keeps it off the regulatory margin",
           aggressive.gross_exposure <= 1.50 * LEVERAGE_BUFFER + 1e-6)
+    check("with leverage on, the policy note is absent",
+          not any("Apalancamiento desactivado" in n for n in moderate.notes))
+
+
+def test_audit_catches_leverage_against_the_policy_in_force() -> None:
+    """
+    An audit that only checked the mandate would be true and useless.
+
+    A book solved at 113% clears a 125% regulatory ceiling, so auditing against
+    REGULACIONES alone would pass it even though the desk forbids leverage. The
+    audit reads the same budget the solver did.
+    """
+    levered = Allocation(
+        weights=pd.Series({"AAPL": 0.60, "TLT": 0.53}), strategy="Moderado",
+        status="optimal", gross_exposure=1.13, expected_return=0.1,
+        volatility=0.2, by_class=pd.Series(dtype=float))
+    classes = {"AAPL": "Equity", "TLT": "RentaFija_Soberana_IG"}
+
+    breaches = audit_bands(levered, classes)
+    check("113% gross is a breach when leverage is off",
+          any("Exposición bruta" in b for b in breaches), str(breaches))
+    check("the breach names the desk policy, not a regulatory limit",
+          any("política de mesa" in b for b in breaches), str(breaches))
+
+    allowed = audit_bands(levered, classes, allow_leverage=True)
+    check("the same book is compliant when leverage is on",
+          not any("Exposición bruta" in b for b in allowed), str(allowed))
 
 
 def test_hard_exclusions_hold() -> None:
@@ -907,7 +966,9 @@ def main() -> int:
         test_asset_classification,
         test_commodity_band_closes_the_hole,
         test_optimization_respects_every_limit,
-        test_leverage_is_actually_applied,
+        test_leverage_is_off_by_desk_policy,
+        test_leverage_still_works_when_switched_on,
+        test_audit_catches_leverage_against_the_policy_in_force,
         test_hard_exclusions_hold,
         test_single_name_cap_binds,
         test_equity_ceiling_binds,

@@ -330,8 +330,8 @@ def test_cells_execute() -> None:
           bool((cartera.weights >= -1e-9).all()))
 
     from screener.cci_regulation import REGULACIONES
-    from screener.optimizer import LEVERAGE_BUFFER
-    budget = REGULACIONES[namespace["ESTRATEGIA_CCI"]]["leverage_max"] * LEVERAGE_BUFFER
+    from screener.optimizer import gross_budget
+    budget = gross_budget(namespace["ESTRATEGIA_CCI"])
     check("gross exposure respects the leverage budget",
           cartera.gross_exposure <= budget + 1e-6,
           f"{cartera.gross_exposure:.4f} > {budget:.4f}")
@@ -356,7 +356,7 @@ def test_cells_execute() -> None:
     )
     by_class = anchor.groupby(anchor_classes).sum()
 
-    check("the anchor spends exactly the leverage budget",
+    check("the anchor spends exactly the gross budget in force",
           abs(float(anchor.sum()) - budget) < 1e-9,
           f"{float(anchor.sum()):.6f} vs {budget:.6f}")
     check("the anchor is long-only", bool((anchor >= -1e-12).all()))

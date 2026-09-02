@@ -780,8 +780,12 @@ def build_cells() -> list[dict]:
         "guardada murió ahí sin producir cartera. Este usa CLARABEL, que viene "
         "con CVXPY.\n",
         "2. **Apalancamiento.** `leverage_max` de 1.25 y 1.50 estaba declarado "
-        "pero el optimizador fijaba `sum(w) == 1`. Ahora es un presupuesto real, "
-        "con el buffer de 95% que dice tu documento.\n",
+        "pero el optimizador fijaba `sum(w) == 1`, asi que nunca restringio nada. "
+        "Ahora es un presupuesto real — pero **la mesa lo tiene apagado**: todas "
+        "las carteras resuelven invertidas al 100%, sin importar lo que permita "
+        "el mandato. El limite sigue en `REGULACIONES` porque es lo que dice el "
+        "Procedimiento; la decision de no usarlo vive en `ALLOW_LEVERAGE`, en el "
+        "optimizador.\n",
         "3. **La auditoría ahora puede fallar.** `auditar_bandas` escribía "
         "\"Auditoría OK\" sin comparar nada. Esta compara contra cada límite y "
         "reporta lo que se rompe.\n",
@@ -808,7 +812,7 @@ def build_cells() -> list[dict]:
         "from screener.optimizer import (implied_equilibrium, market_weights,\n",
         "                               optimize, policy_weights, posterior,\n",
         "                               shrunk_covariance, allocation_table,\n",
-        "                               select_basket, LEVERAGE_BUFFER)\n",
+        "                               select_basket, gross_budget)\n",
         "from screener.cci_regulation import REGULACIONES\n",
         "from screener.cci_regulation import classify_for_bands\n",
         "from screener.yahoo_adapter import daily_returns, fetch_market_caps\n",
@@ -838,8 +842,8 @@ def build_cells() -> list[dict]:
         "\n",
         "capitalizaciones = fetch_market_caps(list(covarianza.columns))\n",
         "_tipos_cesta = {t: tipos_todos.get(t, 'ETF') for t in covarianza.columns}\n",
-        "_presupuesto = (REGULACIONES[ESTRATEGIA_CCI]['leverage_max']\n",
-        "                * LEVERAGE_BUFFER)\n",
+        "# Presupuesto bruto en vigor. Con el apalancamiento apagado es 1.0.\n",
+        "_presupuesto = gross_budget(ESTRATEGIA_CCI)\n",
         "\n",
         "if ANCLA == 'politica':\n",
         "    pesos_ancla, _notas_ancla = policy_weights(\n",

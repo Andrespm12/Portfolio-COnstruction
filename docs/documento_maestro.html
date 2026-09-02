@@ -10,7 +10,7 @@
 
 <p>La primera mitad es un <b>screener</b>. Baja precios de 447 candidatos entre acciones e ETFs, les calcula 25 medidas distintas, y los ordena de mejor a peor. No usa opiniones ni noticias: solo lo que dicen los precios y el volumen de los últimos dos años. El resultado es un ranking con una recomendación de Sobreponderar, Neutral o Subponderar para cada nombre.</p>
 
-<p>La segunda mitad es el <b>modelo Black-Litterman</b>. Toma ese ranking, lo traduce a expectativas de retorno, y arma la cartera final respetando todos los límites del Procedimiento de Inversión: bandas por clase de activo, máximo de renta variable, tope por emisor individual, exclusiones del Art. 170 y apalancamiento permitido.</p>
+<p>La segunda mitad es el <b>modelo Black-Litterman</b>. Toma ese ranking, lo traduce a expectativas de retorno, y arma la cartera final respetando todos los límites del Procedimiento de Inversión: bandas por clase de activo, máximo de renta variable, tope por emisor individual, exclusiones del Art. 170 y el presupuesto de exposición bruta. El apalancamiento que permiten los mandatos <b>está apagado</b> por decisión de mesa: todas las carteras resuelven invertidas al 100%.</p>
 
 <h2>Lo que hay que entender antes de cualquier otra cosa</h2>
 
@@ -513,7 +513,29 @@
 
 <p><b>Mezcla equilibrio y views.</b> Esa es la parte propiamente Black-Litterman. Las views con más convicción mueven más el resultado.</p>
 
-<p><b>Optimiza con todos los límites.</b> Maximiza retorno esperado menos una penalización por riesgo, sujeto a: bandas por clase de activo, máximo de renta variable total, tope por acción individual, exclusiones duras del Art. 170, prohibición de cortos, y presupuesto de apalancamiento con el buffer de 95%.</p>
+<p><b>Optimiza con todos los límites.</b> Maximiza retorno esperado menos una penalización por riesgo, sujeto a: bandas por clase de activo, máximo de renta variable total, tope por acción individual, exclusiones duras del Art. 170, prohibición de cortos, y el presupuesto de exposición bruta.</p>
+
+<h2>[v3] El apalancamiento está apagado</h2>
+
+<p>La mesa decidió no usar el apalancamiento que permiten los mandatos. <b>Las cuatro estrategias resuelven invertidas al 100% exacto</b>, ni más ni menos.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Estrategia</th><th>El mandato permite</th><th>Presupuesto en vigor</th><th>Bruta resuelta</th></tr>
+  <tr><th>Cons. Defensivo</th><td>100%</td><td>100%</td><td>100.00%</td></tr>
+  <tr><th>Conservador</th><td>100%</td><td>100%</td><td>100.00%</td></tr>
+  <tr><th>Moderado</th><td>125%</td><td>100%</td><td>100.00%</td></tr>
+  <tr><th>Agresivo</th><td>150%</td><td>100%</td><td>100.00%</td></tr>
+</table>
+
+<p><b>Esto es criterio de mesa, no un cambio regulatorio</b>, y por eso vive en el optimizador (<code>ALLOW_LEVERAGE</code>) y no en la tabla de regulaciones. Esa tabla es copia literal del Procedimiento de Inversión: editarla para que diga 1.0 destruiría el registro de lo que el mandato de verdad permite y no dejaría rastro de que alguien tomó una decisión. Manteniéndolos separados, cada corrida puede reportar las dos cosas — lo permitido y lo usado — y de hecho lo hace, en la hoja de Parámetros y en las notas.</p>
+
+<p>Un detalle que se decidió a conciencia: <b>el buffer de 95% no se aplica.</b> Ese buffer existía para que la solución nunca quedara sentada exactamente sobre un margen regulatorio; sin apalancamiento no hay margen del que separarse, y aplicarlo igual dejaría 5% de cada libro sin asignar a nada — ni siquiera a efectivo, que aquí ya es una clase de activo con su propia banda y su propio peso. Con el apalancamiento activo el buffer sigue funcionando como antes.</p>
+
+<p>Un efecto secundario que vale la pena: <b>esto arregla una inconsistencia que había entre el ancla y el presupuesto.</b> El ancla de política se construye para sumar el presupuesto bruto. Con apalancamiento en Moderado eso eran 118.75%, y la propiedad de "sin views el optimizador devuelve el ancla" solo se sostenía si quien llamaba se acordaba de pasar ese total. Ahora el presupuesto es 1.0 en las cuatro estrategias y la identidad se cumple sola.</p>
+
+<p>Volver a encenderlo es un parámetro (<code>allow_leverage=True</code>), y la maquinaria sigue probada: hay pruebas que verifican que con el interruptor encendido Moderado sí pasa de 100% y Agresivo llega más alto que Moderado. Un interruptor que en silencio no hace nada es peor que no tener interruptor.</p>
+
+<p>La auditoría también cambió: compara la exposición bruta contra <b>el presupuesto que estuvo en vigor</b>, no solo contra el techo regulatorio. Auditar únicamente el mandato dejaría pasar un libro al 113% —que cumple un techo de 125%— aunque la mesa lo prohíba. Sería una auditoría cierta e inútil.</p>
 
 <h2>[v2] Cuántas posiciones tiene la cartera</h2>
 
@@ -618,7 +640,7 @@
   <li>Bandas mínimas y máximas por clase de activo, para cada una de las cuatro estrategias.</li>
   <li>Máximo de renta variable total.</li>
   <li>Máximo por acción individual.</li>
-  <li>Apalancamiento permitido y máximo de derivados.</li>
+  <li>Apalancamiento permitido y máximo de derivados. <b>[v3]</b> El límite sigue codificado tal como lo dice el Procedimiento, pero la mesa no lo usa; ver la sección 9.</li>
   <li>Exclusiones duras del Art. 170 RIV.</li>
 </ul>
 
@@ -705,6 +727,11 @@
     <td>"politica" (por defecto) o "mercado". Correr las dos y comparar es la forma de ver cuánto pesa esta decisión</td>
   </tr>
   <tr>
+    <td>[v3] Usar o no el apalancamiento del mandato</td>
+    <td><code>screener/optimizer.py</code>, <code>ALLOW_LEVERAGE</code></td>
+    <td>Apagado. Con él apagado todas las carteras resuelven al 100% bruto. Es criterio de mesa: no toques REGULACIONES, que es el registro de lo permitido</td>
+  </tr>
+  <tr>
     <td>[v2] La posición mínima ejecutable</td>
     <td>Celda de Cartera, campo POSICION_MINIMA</td>
     <td>1% por defecto. 0 lo desactiva. Criterio de mesa, no del Procedimiento</td>
@@ -776,7 +803,7 @@
   <tr><th>tuning.py</th><td>Permite cambiar pesos y frenos en caliente sin reiniciar.</td></tr>
 </table>
 
-<p>Hay además una carpeta de pruebas con <b>645 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
+<p>Hay además una carpeta de pruebas con <b>655 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
 
 <p>Un ejemplo de esta ronda que ilustra para qué sirven: al agregar la omisión del bloque de sensibilidad al mercado, una prueba nueva falló y destapó que <b>las pruebas viejas estaban corriendo sobre datos mal armados</b>. Los instrumentos de prueba tenían todos el mismo volumen y el mismo dividendo, y como el puntaje relativo no se puede calcular cuando todos los valores son idénticos, los bloques de liquidez y valuación venían vacíos sin que nadie lo notara. Varias pruebas sobre el ranking estaban pasando sobre un universo que no podía producir ninguna recomendación.</p>
 
@@ -935,9 +962,15 @@
     <td>8</td>
   </tr>
   <tr>
+    <th>[v3] Apalancamiento</th>
+    <td>Presupuesto real: Moderado resolvía cerca de 113%, Agresivo más</td>
+    <td>Apagado por política de mesa; las cuatro estrategias al 100% bruto. El límite del Procedimiento queda intacto y la corrida reporta ambos</td>
+    <td>9</td>
+  </tr>
+  <tr>
     <th>Pruebas automáticas</th>
     <td>439</td>
-    <td>645, más la comprobación de paridad entre los dos motores</td>
+    <td>655, más la comprobación de paridad entre los dos motores</td>
     <td>14</td>
   </tr>
 </table>

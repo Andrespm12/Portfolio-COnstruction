@@ -179,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     from screener.cci_regulation import REGULACIONES, classify_for_bands
     from screener.diagnostics import run_diagnostics
     from screener.optimizer import (
-        LEVERAGE_BUFFER, allocation_table, implied_equilibrium, market_weights,
+        ALLOW_LEVERAGE, gross_budget, allocation_table,
+        implied_equilibrium, market_weights,
         optimize, policy_weights, posterior, select_basket, shrunk_covariance,
     )
     from screener.profiles import PROFILES, get_profile, profile_for_strategy
@@ -429,7 +430,10 @@ def main(argv: list[str] | None = None) -> int:
 
     capitalizaciones = fetch_market_caps(list(covarianza.columns))
     tipos_cesta = {t: tipos_todos.get(t, "ETF") for t in covarianza.columns}
-    presupuesto = REGULACIONES[args.estrategia]["leverage_max"] * LEVERAGE_BUFFER
+    # Presupuesto bruto en vigor. Con el apalancamiento apagado es 1.0, y el
+    # ancla se construye sobre ese mismo total para que "sin views el
+    # optimizador devuelve el ancla" siga siendo cierto.
+    presupuesto = gross_budget(args.estrategia)
 
     if args.ancla == "politica":
         pesos_ancla, notas_ancla = policy_weights(
@@ -533,6 +537,11 @@ def main(argv: list[str] | None = None) -> int:
          " | ".join(notas_ancla) or "capitalización de mercado / AUM"),
         ("Estado de la optimización", cartera.status),
         ("Exposición bruta", f"{cartera.gross_exposure:.2%}"),
+        ("Apalancamiento", "desactivado por política de mesa"
+         if not ALLOW_LEVERAGE else "activo"),
+        ("Presupuesto bruto en vigor", f"{presupuesto:.0%}"),
+        ("Apalancamiento que permite el mandato",
+         f"{REGULACIONES[args.estrategia]['leverage_max']:.0%}"),
         ("Auditoría de bandas",
          "sin incumplimientos" if not cartera.breaches
          else " | ".join(cartera.breaches)),
