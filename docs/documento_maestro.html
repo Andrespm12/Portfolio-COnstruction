@@ -503,6 +503,20 @@
 
 <p><b>Lo que hace ahora.</b> Parte de la cartera neutral del propio mandato: cada clase de activo en el punto medio de su banda, repartido sobre las clases que efectivamente están en la cesta, y con el techo de renta variable aplicado al punto de partida mismo. Dentro de cada clase el reparto sí es por capitalización — ahí comparar valores de mercado sí tiene sentido, porque estás comparando acciones contra acciones.</p>
 
+<p><b>[v3] El tope por acción individual también se aplica en el ancla.</b> Faltaba, y se notaba solo con capitalizaciones reales. Con NVDA valiendo 74.6% de la capitalización de las acciones de la cesta, el reparto proporcional la ponía en 6.01% contra un tope de 5% en Conservador Defensivo.</p>
+
+<p>Nunca fue un incumplimiento — el optimizador sí aplica el tope y la auditoría corre sobre la cartera resuelta. Pero dejaba el ancla <i>fuera del conjunto factible</i>, que es exactamente el defecto que arreglamos para el techo de renta variable: el optimizador gastaba presupuesto discutiendo con su propio punto de partida en vez de expresar las views. Como tres cuartas partes de los pesos salen del ancla, no era cosmético.</p>
+
+<p>El reparto ahora es <b>por saturación</b>: se topa el nombre que se pasa, su exceso se reparte por capitalización entre los demás de su clase, y como eso puede empujar a un segundo nombre contra el tope, se repite hasta que nada se mueve. Una sola pasada dejaría al segundo por encima del límite.</p>
+
+<p>Dos casos de borde, ambos reportados en las notas de la corrida:</p>
+<ul>
+  <li><b>Una clase que no puede sostener su presupuesto.</b> Si hay pocas acciones y el tope no da para absorber lo que le toca a la clase, el sobrante se reparte entre las demás clases, para que el ancla siga sumando el presupuesto completo.</li>
+  <li><b>Una cesta que es solo renta variable.</b> Ahí no hay otra clase donde poner el sobrante. Esa cesta ya es infactible —tampoco puede cumplir el techo de renta variable— así que el ancla reparte sin el tope y lo dice; aplicarlo solo agregaría un segundo modo de falla a una cartera que no puede existir.</li>
+</ul>
+
+<p>Un detalle que conviene saber: <b>los ETFs de renta variable no tienen tope por instrumento.</b> El límite del Procedimiento habla de acciones individuales, y un ETF es una canasta, no un nombre. El ancla y el optimizador coinciden en eso — tienen que coincidir, o el ancla vuelve a quedar fuera del conjunto factible. La consecuencia práctica es que un solo ETF puede llegar al techo de su clase: 50% en Moderado. Si la casa quiere un tope por instrumento para ETFs, es un número nuevo que tiene que dar el Comité.</p>
+
 <p>La propiedad que confirma que está bien hecho: <b>sin views, el optimizador te devuelve exactamente esa cartera</b>. Verificado en las cuatro estrategias. O sea que cuando el modelo no tiene nada que decir, el resultado es la asignación del mandato, y las views se desvían de ahí. Así es como debe funcionar.</p>
 
 <p>El notebook tiene un parámetro llamado <b>ANCLA</b> para correr las dos y comparar. Por defecto viene en "politica".</p>
@@ -803,7 +817,7 @@
   <tr><th>tuning.py</th><td>Permite cambiar pesos y frenos en caliente sin reiniciar.</td></tr>
 </table>
 
-<p>Hay además una carpeta de pruebas con <b>655 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
+<p>Hay además una carpeta de pruebas con <b>681 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
 
 <p>Un ejemplo de esta ronda que ilustra para qué sirven: al agregar la omisión del bloque de sensibilidad al mercado, una prueba nueva falló y destapó que <b>las pruebas viejas estaban corriendo sobre datos mal armados</b>. Los instrumentos de prueba tenían todos el mismo volumen y el mismo dividendo, y como el puntaje relativo no se puede calcular cuando todos los valores son idénticos, los bloques de liquidez y valuación venían vacíos sin que nadie lo notara. Varias pruebas sobre el ranking estaban pasando sobre un universo que no podía producir ninguna recomendación.</p>
 
@@ -968,9 +982,15 @@
     <td>9</td>
   </tr>
   <tr>
+    <th>[v3] Tope por acción en el ancla</th>
+    <td>Solo lo aplicaba el optimizador; el ancla podía partir fuera del límite</td>
+    <td>El ancla lo aplica por saturación y reparte el exceso entre las demás acciones de la clase</td>
+    <td>9</td>
+  </tr>
+  <tr>
     <th>Pruebas automáticas</th>
     <td>439</td>
-    <td>655, más la comprobación de paridad entre los dos motores</td>
+    <td>681, más la comprobación de paridad entre los dos motores</td>
     <td>14</td>
   </tr>
 </table>

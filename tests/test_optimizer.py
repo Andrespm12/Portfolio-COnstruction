@@ -181,6 +181,12 @@ def test_policy_anchor_obeys_every_constraint_the_solver_applies() -> None:
         check(f"{strategy}: anchor respects the absolute equity ceiling",
               equity <= ceiling + 1e-9, f"{equity:.4f} > {ceiling:.4f}")
 
+        name_cap = REGULACIONES[strategy]["max_equity_individual"]
+        over = {t: float(w) for t, w in anchor.items()
+                if classes[t] == "Equity" and w > name_cap + 1e-9}
+        check(f"{strategy}: anchor respects the per-name cap too",
+              not over, f"{over} > {name_cap}")
+
         breaches = [
             f"{clase} {by_class[clase]:.4f} outside [{lo}, {hi}]"
             for clase, (lo, hi) in bands_for(strategy).items()
@@ -227,15 +233,27 @@ def test_policy_anchor_frees_the_equity_ceiling() -> None:
 
 
 def test_policy_anchor_splits_within_class_by_market_value() -> None:
-    """Cross-class from policy, within-class from market cap."""
-    types = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF", "IEF": "ETF"}
-    caps = {"AAPL": 3e12, "MSFT": 1e12, "TLT": 5e10, "IEF": 5e10}
-    anchor, _ = policy_weights(types, "Moderado", caps=caps)
+    """
+    Cross-class from policy, within-class from market cap.
 
+    Uses Agresivo and four stocks so the per-name cap (20%) stays slack and the
+    proportionality is actually what is being measured. With two stocks under
+    Moderado the class budget divided by the cap forces both onto the ceiling,
+    and a test written that way would pass for the wrong reason.
+    """
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "NVDA": "STOCK", "JPM": "STOCK",
+             "TLT": "ETF", "IEF": "ETF"}
+    caps = {"AAPL": 2e12, "MSFT": 1e12, "NVDA": 1e12, "JPM": 1e12,
+            "TLT": 5e10, "IEF": 5e10}
+    anchor, _ = policy_weights(types, "Agresivo", caps=caps)
+
+    cap = REGULACIONES["Agresivo"]["max_equity_individual"]
+    check("the per-name cap is slack, so market value is what decides",
+          float(anchor["AAPL"]) < cap - 1e-6, f"{anchor['AAPL']:.4f} vs {cap}")
     check("larger cap takes the larger share of its class",
           anchor["AAPL"] > anchor["MSFT"])
     check("the split is proportional to market value",
-          abs(anchor["AAPL"] / anchor["MSFT"] - 3.0) < 1e-9,
+          abs(anchor["AAPL"] / anchor["MSFT"] - 2.0) < 1e-9,
           f"ratio {anchor['AAPL'] / anchor['MSFT']:.4f}")
     check("equal caps split equally", abs(anchor["TLT"] - anchor["IEF"]) < 1e-12)
     check("the anchor sums to one", abs(anchor.sum() - 1.0) < 1e-12)
@@ -282,24 +300,43 @@ def test_policy_anchor_says_the_midpoints_are_not_an_saa() -> None:
 
 def test_explicit_targets_override_the_midpoints() -> None:
     """A real strategic allocation, once CCI supplies one, must win."""
-    types = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF"}
-    caps = {"AAPL": 1e12, "MSFT": 1e12, "TLT": 1e11}
+    types = {"AAPL": "STOCK", "MSFT": "STOCK", "NVDA": "STOCK", "JPM": "STOCK",
+             "LLY": "STOCK", "TLT": "ETF"}
+    caps = {"AAPL": 1e12, "MSFT": 1e12, "NVDA": 1e12, "JPM": 1e12,
+            "LLY": 1e12, "TLT": 1e11}
     anchor, _ = policy_weights(types, "Moderado", caps=caps,
                                targets={"Equity": 0.40, "RentaFija_Soberana_IG": 0.60})
 
     check("the class totals follow the supplied targets",
-          abs(anchor["AAPL"] + anchor["MSFT"] - 0.40) < 1e-12
+          abs(sum(float(anchor[t]) for t in
+                  ("AAPL", "MSFT", "NVDA", "JPM", "LLY")) - 0.40) < 1e-12
           and abs(anchor["TLT"] - 0.60) < 1e-12,
           f"{anchor.to_dict()}")
+
+    # A committee target for a class does not license breaching a per-name
+    # regulatory cap. Two stocks cannot hold 40% at a 15% ceiling, and the
+    # limit wins over the target rather than the other way round.
+    thin = {"AAPL": "STOCK", "MSFT": "STOCK", "TLT": "ETF"}
+    tight, tight_notes = policy_weights(
+        thin, "Moderado", caps={"AAPL": 1e12, "MSFT": 1e12, "TLT": 1e11},
+        targets={"Equity": 0.40, "RentaFija_Soberana_IG": 0.60})
+    cap = REGULACIONES["Moderado"]["max_equity_individual"]
+    check("a target cannot push a single name past its regulatory cap",
+          float(tight["AAPL"]) <= cap + 1e-9, f"{tight['AAPL']:.4f} vs {cap}")
+    check("what the class cannot hold moves to the others, keeping the budget",
+          abs(float(tight.sum()) - 1.0) < 1e-9, f"{tight.sum():.9f}")
+    check("and the shortfall against the target is reported",
+          any("no puede sostener" in n for n in tight_notes), str(tight_notes))
 
     # The ceiling still binds: Moderado permits 60% equity, so a 90% target
     # must be pulled back rather than trusted.
     greedy, notes = policy_weights(types, "Moderado", caps=caps,
                                    targets={"Equity": 0.90,
                                             "RentaFija_Soberana_IG": 0.10})
+    greedy_equity = sum(float(greedy[t]) for t in
+                        ("AAPL", "MSFT", "NVDA", "JPM", "LLY"))
     check("an over-target is pulled back to the mandate's ceiling",
-          abs(greedy["AAPL"] + greedy["MSFT"] - 0.60) < 1e-9,
-          f"equity {greedy['AAPL'] + greedy['MSFT']:.4f}")
+          abs(greedy_equity - 0.60) < 1e-9, f"equity {greedy_equity:.4f}")
     check("pulling it back is reported",
           any("techo del mandato" in n for n in notes), str(notes))
 
@@ -589,6 +626,91 @@ def test_optimization_respects_every_limit() -> None:
               f"{alloc.gross_exposure:.4f} > {budget:.4f}")
         check(f"{strategy}: the book stays invested",
               alloc.gross_exposure > 0.9, f"{alloc.gross_exposure:.4f}")
+
+
+def test_anchor_applies_the_per_name_cap_under_real_concentration() -> None:
+    """
+    The fixture's caps are near-uniform, so no name ever approaches the ceiling
+    and the whole question stays invisible. Real mega-cap concentration is what
+    exposes it: with NVDA at 74.6% of the class's market value, an uncapped
+    split put it at 6.01% against a 5% limit in Conservador_Defensivo.
+
+    That was never a breach -- the solver applies the cap and the audit runs on
+    the solved book -- but it left the anchor outside the feasible set, so the
+    optimizer spent budget arguing with its own starting point instead of
+    expressing views. Since roughly three quarters of the weights come from the
+    anchor, that is not cosmetic.
+    """
+    types = {"NVDA": "STOCK", "JPM": "STOCK", "LLY": "STOCK",
+             "BIL": "ETF", "IEF": "ETF", "LQD": "ETF", "HYG": "ETF",
+             "SPY": "ETF", "GLD": "ETF"}
+    caps = {"NVDA": 4.40e12, "JPM": 0.80e12, "LLY": 0.70e12,
+            "BIL": 3.5e10, "IEF": 3.5e10, "LQD": 3.5e10, "HYG": 1.5e10,
+            "SPY": 6.5e11, "GLD": 1.0e11}
+
+    for strategy in ("Conservador_Defensivo", "Conservador", "Moderado", "Agresivo"):
+        anchor, _ = policy_weights(types, strategy, caps=caps)
+        cap = REGULACIONES[strategy]["max_equity_individual"]
+        stocks = {t: float(anchor[t]) for t in ("NVDA", "JPM", "LLY")}
+
+        check(f"{strategy}: no single stock exceeds its cap in the anchor",
+              max(stocks.values()) <= cap + 1e-9, f"{stocks} vs {cap}")
+        check(f"{strategy}: the anchor still sums to the budget",
+              abs(float(anchor.sum()) - 1.0) < 1e-9, f"{anchor.sum():.9f}")
+
+    # The specific case that was wrong before, stated as a number.
+    defensive, notes = policy_weights(types, "Conservador_Defensivo", caps=caps)
+    check("the capped name lands exactly on the ceiling, not below it",
+          abs(float(defensive["NVDA"]) - 0.05) < 1e-9, f"{defensive['NVDA']:.6f}")
+    check("its excess went to the other stocks, not to another class",
+          abs(sum(float(defensive[t]) for t in ("NVDA", "JPM", "LLY"))
+              - 0.0806) < 1e-3,
+          f"{sum(float(defensive[t]) for t in ('NVDA', 'JPM', 'LLY')):.4f}")
+    check("the redistribution kept market-cap order among the survivors",
+          float(defensive["JPM"]) > float(defensive["LLY"]))
+    check("the run says the cap was applied and to whom",
+          any("Tope por nombre" in n and "NVDA" in n for n in notes), str(notes))
+
+
+def test_anchor_cap_cascades() -> None:
+    """
+    Capping one name pushes weight onto the others, which can put a second name
+    over the ceiling. A single pass would leave that second name in breach, so
+    the split has to repeat until nothing moves.
+    """
+    types = {"A": "STOCK", "B": "STOCK", "C": "STOCK",
+             "BIL": "ETF", "IEF": "ETF", "SPY": "ETF"}
+    caps = {"A": 5e12, "B": 4.5e12, "C": 0.1e12,
+            "BIL": 3e10, "IEF": 3e10, "SPY": 6e11}
+
+    anchor, _ = policy_weights(types, "Conservador_Defensivo", caps=caps)
+    cap = REGULACIONES["Conservador_Defensivo"]["max_equity_individual"]
+    stocks = {t: float(anchor[t]) for t in ("A", "B", "C")}
+
+    check("two near-equal mega caps both stay under the ceiling",
+          all(w <= cap + 1e-9 for w in stocks.values()), str(stocks))
+    check("the class still spends its whole allocation",
+          abs(sum(stocks.values()) - 0.10) < 1e-6, f"{sum(stocks.values()):.6f}")
+    check("the anchor still sums to the budget",
+          abs(float(anchor.sum()) - 1.0) < 1e-9, f"{anchor.sum():.9f}")
+
+
+def test_anchor_reports_a_class_that_cannot_absorb_its_budget() -> None:
+    """
+    One stock cannot hold the equity allocation at a 5% ceiling. The remainder
+    has to go somewhere or the anchor stops summing to the budget, which would
+    silently break the property that makes it an anchor at all.
+    """
+    types = {"A": "STOCK", "BIL": "ETF", "IEF": "ETF", "LQD": "ETF", "SPY": "ETF"}
+    caps = {"A": 5e12, "BIL": 3e10, "IEF": 3e10, "LQD": 3e10, "SPY": 6e11}
+
+    anchor, notes = policy_weights(types, "Conservador_Defensivo", caps=caps)
+    check("the lone stock sits on its ceiling",
+          abs(float(anchor["A"]) - 0.05) < 1e-9, f"{anchor['A']:.6f}")
+    check("the anchor still sums to the budget",
+          abs(float(anchor.sum()) - 1.0) < 1e-9, f"{anchor.sum():.9f}")
+    check("the shortfall is reported rather than absorbed silently",
+          any("no puede sostener" in n for n in notes), str(notes))
 
 
 def test_leverage_is_off_by_desk_policy() -> None:
@@ -966,6 +1088,9 @@ def main() -> int:
         test_asset_classification,
         test_commodity_band_closes_the_hole,
         test_optimization_respects_every_limit,
+        test_anchor_applies_the_per_name_cap_under_real_concentration,
+        test_anchor_cap_cascades,
+        test_anchor_reports_a_class_that_cannot_absorb_its_budget,
         test_leverage_is_off_by_desk_policy,
         test_leverage_still_works_when_switched_on,
         test_audit_catches_leverage_against_the_policy_in_force,

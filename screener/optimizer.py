@@ -364,24 +364,122 @@ def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
             return None
         return value if np.isfinite(value) and value > 0 else None
 
-    weights: dict[str, float] = {}
-    for clase in present:
-        members = [t for t in tickers if classes[t] == clase]
-        budget = class_target[clase]
+    # Per-name ceiling, applied inside the class the same way the solver applies
+    # it. Only single stocks carry one: `max_equity_individual` is a limit on
+    # one company, and an ETF is a basket rather than a name. That means an
+    # equity ETF has no per-instrument ceiling here, which matches `optimize`
+    # exactly -- the anchor and the solver must agree or the anchor is outside
+    # the feasible set again, which is the whole defect this function exists to
+    # remove.
+    name_cap = float(REGULACIONES[strategy]["max_equity_individual"])
+
+    def split_class(members: list[str], budget: float,
+                    capped: bool) -> tuple[dict[str, float], float]:
+        """
+        Weights for one class, and whatever budget it could not absorb.
+
+        Market value decides the split, but a name at its ceiling stops taking
+        more and its excess goes to the others -- which can push a second name
+        onto the ceiling, so this repeats until nothing moves. Water-filling,
+        not a single pass: one pass would leave the second name over the limit.
+        """
+        if not members or budget <= 0:
+            return {t: 0.0 for t in members}, max(budget, 0.0)
+
         usable = {t: c for t in members if (c := usable_cap(t)) is not None}
-        if len(usable) == len(members) and members:
-            scale = sum(usable.values())
-            for t in members:
-                weights[t] = budget * usable[t] / scale
+        if len(usable) == len(members):
+            share = {t: usable[t] / sum(usable.values()) for t in members}
         else:
-            if members and usable:
+            if usable:
                 notes.append(
                     f"Capitalización faltante en {clase} para "
                     f"{sorted(set(members) - set(usable))}; esa clase se reparte "
                     "en partes iguales."
                 )
-            for t in members:
-                weights[t] = budget / len(members) if members else 0.0
+            share = {t: 1.0 / len(members) for t in members}
+
+        if not capped:
+            return {t: budget * share[t] for t in members}, 0.0
+
+        out: dict[str, float] = {}
+        free = list(members)
+        remaining = budget
+        for _ in range(len(members) + 1):
+            if not free or remaining <= 1e-12:
+                break
+            scale = sum(share[t] for t in free)
+            if scale <= 0:
+                break
+            hit = [t for t in free if remaining * share[t] / scale > name_cap + 1e-12]
+            if not hit:
+                for t in free:
+                    out[t] = remaining * share[t] / scale
+                remaining = 0.0
+                free = []
+                break
+            for t in hit:
+                out[t] = name_cap
+                remaining -= name_cap
+                free.remove(t)
+        for t in free:
+            out[t] = 0.0
+        return {t: out.get(t, 0.0) for t in members}, max(remaining, 0.0)
+
+    weights: dict[str, float] = {}
+    unabsorbed: dict[str, float] = {}
+    for clase in present:
+        members = [t for t in tickers if classes[t] == clase]
+        part, left = split_class(members, class_target[clase],
+                                 capped=clase == CLASE_EQUITY)
+        weights.update(part)
+        if left > 1e-12:
+            unabsorbed[clase] = left
+
+    # A class that cannot hold its own budget hands the remainder back, so the
+    # anchor still spends exactly `total`. Only reachable when the basket has
+    # too few single stocks to absorb the equity allocation at the per-name
+    # ceiling -- select_basket's three-per-class floor normally prevents it, but
+    # this function is public and cannot assume its caller.
+    for clase, left in unabsorbed.items():
+        takers = [c for c in present if c != clase and class_target[c] > 0]
+        capacity = sum(class_target[c] for c in takers)
+        if capacity <= 0:
+            # Nowhere to put it. Such a basket is already infeasible -- an
+            # all-equity cesta cannot meet the equity ceiling either -- so
+            # enforcing the per-name cap here would only add a second failure
+            # to a portfolio that cannot exist, and would break the invariant
+            # that the anchor spends its budget. Fall back to the uncapped
+            # split and report both problems instead.
+            members = [t for t in tickers if classes[t] == clase]
+            part, _ = split_class(members, class_target[clase], capped=False)
+            weights.update(part)
+            notes.append(
+                f"{clase} no puede absorber {left:.2%} bajo el tope por nombre "
+                f"de {name_cap:.0%}, y no hay otra clase donde ponerlo. El ancla "
+                "reparte sin el tope: la cesta no es compatible con el mandato, "
+                "y el optimizador lo va a reportar como infactible."
+            )
+            continue
+        for c in takers:
+            extra = left * class_target[c] / capacity
+            members = [t for t in tickers if classes[t] == c]
+            part, _ = split_class(members, class_target[c] + extra,
+                                  capped=c == CLASE_EQUITY)
+            weights.update(part)
+        notes.append(
+            f"El tope por nombre de {name_cap:.0%} deja {left:.2%} que {clase} "
+            "no puede sostener; se repartió entre las demás clases. Faltan "
+            "nombres de esa clase en la cesta."
+        )
+
+    hit_cap = sorted(t for t, w in weights.items()
+                     if classes[t] == CLASE_EQUITY and w >= name_cap - 1e-9)
+    if hit_cap:
+        notes.append(
+            f"Tope por nombre de {name_cap:.0%} aplicado en el ancla a: "
+            f"{', '.join(hit_cap)}. El exceso se repartió por capitalización "
+            "entre las demás acciones de la clase."
+        )
 
     return pd.Series(weights, dtype=float).reindex(tickers).fillna(0.0), notes
 
