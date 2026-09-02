@@ -242,9 +242,9 @@ def test_policy_anchor_splits_within_class_by_market_value() -> None:
     and a test written that way would pass for the wrong reason.
     """
     types = {"AAPL": "STOCK", "MSFT": "STOCK", "NVDA": "STOCK", "JPM": "STOCK",
-             "TLT": "ETF", "IEF": "ETF"}
+             "SPY": "ETF", "TLT": "ETF", "IEF": "ETF"}
     caps = {"AAPL": 2e12, "MSFT": 1e12, "NVDA": 1e12, "JPM": 1e12,
-            "TLT": 5e10, "IEF": 5e10}
+            "SPY": 6e12, "TLT": 5e10, "IEF": 5e10}
     anchor, _ = policy_weights(types, "Agresivo", caps=caps)
 
     cap = REGULACIONES["Agresivo"]["max_equity_individual"]
@@ -284,18 +284,36 @@ def test_missing_caps_degrade_one_class_only() -> None:
     check("the anchor still sums to one", abs(a_gap.sum() - 1.0) < 1e-12)
 
 
-def test_policy_anchor_says_the_midpoints_are_not_an_saa() -> None:
+def test_policy_anchor_names_the_source_of_its_numbers() -> None:
     """
-    Band midpoints are an inference, and must be labelled as one.
+    The anchor has to say where its allocation came from.
 
-    Same discipline as COMMODITY_BANDS: a number this system invented cannot be
-    presented as if it came from CCI's Investment Procedure.
+    It used to be band midpoints, which are an inference and were labelled as
+    one. It is now the Procedimiento's Modelo de Asignación, which is not -- and
+    the note has to change with it, or a reviewer reading last month's wording
+    would conclude the desk is still anchoring on a guess.
     """
     types = {"AAPL": "STOCK", "TLT": "ETF"}
     _, notes = policy_weights(types, "Moderado")
-    check("the midpoint assumption is disclosed",
-          any("puntos medios" in n and "Comité de Inversiones" in n for n in notes),
+    check("the anchor says it came from the Modelo de Asignación",
+          any("Modelo de Asignación" in n and "Procedimiento" in n for n in notes),
           str(notes))
+    check("it no longer claims to be using band midpoints",
+          not any("puntos medios" in n for n in notes), str(notes))
+
+    # The midpoint path survives for a strategy the Procedimiento does not
+    # cover, and still labels itself as an inference.
+    from screener import cci_regulation
+    saved = dict(cci_regulation.MODELO_ASIGNACION)
+    try:
+        cci_regulation.MODELO_ASIGNACION.pop("Moderado")
+        _, fallback = policy_weights(types, "Moderado")
+    finally:
+        cci_regulation.MODELO_ASIGNACION.clear()
+        cci_regulation.MODELO_ASIGNACION.update(saved)
+    check("without a model line, midpoints return and say they are a stand-in",
+          any("puntos medios" in n and "Comité de Inversiones" in n
+              for n in fallback), str(fallback))
 
 
 def test_explicit_targets_override_the_midpoints() -> None:
@@ -358,7 +376,8 @@ def test_unbanded_class_gets_no_neutral_weight() -> None:
           abs(anchor["WEIRD"]) < 1e-12, f"{anchor['WEIRD']}")
     check("the anchor still sums to one", abs(anchor.sum() - 1.0) < 1e-12)
     check("the missing band is reported",
-          any("no tiene banda declarada" in n for n in notes), str(notes))
+          any("no tiene banda declarada" in n
+              or "sin línea en el Modelo" in n for n in notes), str(notes))
 
 
 def test_all_equity_basket_reports_rather_than_pretends() -> None:
@@ -641,17 +660,20 @@ def test_anchor_applies_the_per_name_cap_under_real_concentration() -> None:
     expressing views. Since roughly three quarters of the weights come from the
     anchor, that is not cosmetic.
     """
-    types = {"NVDA": "STOCK", "JPM": "STOCK", "LLY": "STOCK",
+    stock_names = ("NVDA", "JPM", "LLY", "AAPL", "MSFT", "XOM")
+    types = {"NVDA": "STOCK", "JPM": "STOCK", "LLY": "STOCK", "AAPL": "STOCK",
+             "MSFT": "STOCK", "XOM": "STOCK",
              "BIL": "ETF", "IEF": "ETF", "LQD": "ETF", "HYG": "ETF",
              "SPY": "ETF", "GLD": "ETF"}
-    caps = {"NVDA": 4.40e12, "JPM": 0.80e12, "LLY": 0.70e12,
+    caps = {"NVDA": 4.40e12, "JPM": 0.80e12, "LLY": 0.70e12, "AAPL": 0.60e12,
+            "MSFT": 0.50e12, "XOM": 0.40e12,
             "BIL": 3.5e10, "IEF": 3.5e10, "LQD": 3.5e10, "HYG": 1.5e10,
             "SPY": 6.5e11, "GLD": 1.0e11}
 
     for strategy in ("Conservador_Defensivo", "Conservador", "Moderado", "Agresivo"):
         anchor, _ = policy_weights(types, strategy, caps=caps)
         cap = REGULACIONES[strategy]["max_equity_individual"]
-        stocks = {t: float(anchor[t]) for t in ("NVDA", "JPM", "LLY")}
+        stocks = {t: float(anchor[t]) for t in stock_names}
 
         check(f"{strategy}: no single stock exceeds its cap in the anchor",
               max(stocks.values()) <= cap + 1e-9, f"{stocks} vs {cap}")
@@ -662,12 +684,10 @@ def test_anchor_applies_the_per_name_cap_under_real_concentration() -> None:
     defensive, notes = policy_weights(types, "Conservador_Defensivo", caps=caps)
     check("the capped name lands exactly on the ceiling, not below it",
           abs(float(defensive["NVDA"]) - 0.05) < 1e-9, f"{defensive['NVDA']:.6f}")
-    check("its excess went to the other stocks, not to another class",
-          abs(sum(float(defensive[t]) for t in ("NVDA", "JPM", "LLY"))
-              - 0.0806) < 1e-3,
-          f"{sum(float(defensive[t]) for t in ('NVDA', 'JPM', 'LLY')):.4f}")
-    check("the redistribution kept market-cap order among the survivors",
-          float(defensive["JPM"]) > float(defensive["LLY"]))
+    check("the names below the ceiling still rank by market value",
+          float(defensive["JPM"]) > float(defensive["LLY"])
+          > float(defensive["AAPL"]) > float(defensive["MSFT"]),
+          str({t: round(float(defensive[t]), 5) for t in stock_names}))
     check("the run says the cap was applied and to whom",
           any("Tope por nombre" in n and "NVDA" in n for n in notes), str(notes))
 
@@ -678,10 +698,13 @@ def test_anchor_cap_cascades() -> None:
     over the ceiling. A single pass would leave that second name in breach, so
     the split has to repeat until nothing moves.
     """
+    # Every line of the Modelo de Asignación needs a class present, or the
+    # missing line's budget renormalizes across the others and the numbers
+    # under test move for a reason that has nothing to do with the cap.
     types = {"A": "STOCK", "B": "STOCK", "C": "STOCK",
-             "BIL": "ETF", "IEF": "ETF", "SPY": "ETF"}
+             "BIL": "ETF", "IEF": "ETF", "LQD": "ETF", "SPY": "ETF"}
     caps = {"A": 5e12, "B": 4.5e12, "C": 0.1e12,
-            "BIL": 3e10, "IEF": 3e10, "SPY": 6e11}
+            "BIL": 3e10, "IEF": 3e10, "LQD": 3e10, "SPY": 6e11}
 
     anchor, _ = policy_weights(types, "Conservador_Defensivo", caps=caps)
     cap = REGULACIONES["Conservador_Defensivo"]["max_equity_individual"]
@@ -689,8 +712,10 @@ def test_anchor_cap_cascades() -> None:
 
     check("two near-equal mega caps both stay under the ceiling",
           all(w <= cap + 1e-9 for w in stocks.values()), str(stocks))
-    check("the class still spends its whole allocation",
-          abs(sum(stocks.values()) - 0.10) < 1e-6, f"{sum(stocks.values()):.6f}")
+    check("all three sit on the ceiling, spending what the class can hold",
+          abs(sum(stocks.values()) - 0.15) < 1e-6, f"{sum(stocks.values()):.6f}")
+    check("what they could not hold went to the ETF on the same policy line",
+          abs(float(anchor["SPY"]) - 0.05) < 1e-3, f"{anchor['SPY']:.6f}")
     check("the anchor still sums to the budget",
           abs(float(anchor.sum()) - 1.0) < 1e-9, f"{anchor.sum():.9f}")
 
@@ -1074,7 +1099,7 @@ def main() -> int:
         test_policy_anchor_frees_the_equity_ceiling,
         test_policy_anchor_splits_within_class_by_market_value,
         test_missing_caps_degrade_one_class_only,
-        test_policy_anchor_says_the_midpoints_are_not_an_saa,
+        test_policy_anchor_names_the_source_of_its_numbers,
         test_explicit_targets_override_the_midpoints,
         test_unbanded_class_gets_no_neutral_weight,
         test_all_equity_basket_reports_rather_than_pretends,

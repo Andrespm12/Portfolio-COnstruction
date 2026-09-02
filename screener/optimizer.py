@@ -52,7 +52,8 @@ import numpy as np
 import pandas as pd
 
 from .cci_regulation import (
-    CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, REGULACIONES, bands_for,
+    CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, GRUPOS_ASIGNACION,
+    MODELO_ASIGNACION, REGULACIONES, bands_for, clase_a_grupo,
     classify_for_bands, unbanded_classes,
 )
 
@@ -191,6 +192,126 @@ def market_weights(caps: Mapping[str, float],
 EQUITY_CLASSES: tuple[str, ...] = (CLASE_EQUITY, CLASE_ETF_RV)
 
 
+def _model_targets(strategy: str, present: list[str],
+                   classes: Mapping[str, str],
+                   caps: Mapping[str, float] | None,
+                   notes: list[str]) -> dict[str, float]:
+    """
+    Per-class targets from the Procedimiento's Modelo de Asignación.
+
+    The Procedimiento allocates to four lines; the engine carries eight classes,
+    so each line's budget is split across the classes of its group by the market
+    value actually in the basket -- the same rule already used inside a class,
+    one level up. Two things constrain that split:
+
+    * A class with nothing in the basket takes none of the line. The budget goes
+      to the rest of its own group, never to another line: a line is a policy
+      decision and must not leak across.
+    * A class cannot exceed its regulatory band. This is what keeps the
+      corporate line from becoming all high yield -- ``RentaFija_NoIG`` holds
+      its 5 / 10 / 15 / 25% ceiling inside the group, and what it cannot take
+      goes back to investment grade.
+
+    A group whose classes are all absent leaves its budget unassignable; it is
+    renormalized away by the caller along with everything else, and reported.
+    """
+    model = MODELO_ASIGNACION[strategy]
+    bands = bands_for(strategy)
+    caps = {k.upper(): v for k, v in (caps or {}).items()}
+
+    def value_of(clase: str) -> float:
+        total = 0.0
+        for ticker, c in classes.items():
+            if c != clase:
+                continue
+            raw = caps.get(ticker.upper())
+            try:
+                v = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                v = None
+            total += v if v is not None and np.isfinite(v) and v > 0 else 0.0
+        return total
+
+    class_target = {c: 0.0 for c in present}
+    empty: list[str] = []
+
+    for grupo, budget in model.items():
+        members = [c for c in GRUPOS_ASIGNACION[grupo] if c in present]
+        if not members:
+            empty.append(grupo)
+            continue
+
+        values = {c: value_of(c) for c in members}
+        if sum(values.values()) <= 0:
+            # No usable market values anywhere in the group: split evenly rather
+            # than dropping the line, and say so.
+            share = {c: 1.0 / len(members) for c in members}
+            notes.append(
+                f"Sin capitalización utilizable en «{grupo}»; su asignación se "
+                "repartió en partes iguales entre las clases presentes."
+            )
+        else:
+            share = {c: values[c] / sum(values.values()) for c in members}
+
+        # Split, then pull any class back to its band and give the excess to the
+        # others in the same line. Repeats because clamping one raises the rest.
+        free = list(members)
+        remaining = budget
+        for _ in range(len(members) + 1):
+            if not free or remaining <= 1e-12:
+                break
+            scale = sum(share[c] for c in free)
+            if scale <= 0:
+                break
+            over = [c for c in free
+                    if bands.get(c) is not None
+                    and remaining * share[c] / scale > bands[c][1] + 1e-12]
+            if not over:
+                for c in free:
+                    class_target[c] += remaining * share[c] / scale
+                remaining = 0.0
+                break
+            for c in over:
+                ceiling = bands[c][1]
+                class_target[c] += ceiling
+                remaining -= ceiling
+                free.remove(c)
+                notes.append(
+                    f"{c} topado en su banda de {ceiling:.0%} dentro de "
+                    f"«{grupo}»; el resto de esa línea fue a las demás clases "
+                    "del mismo grupo."
+                )
+        if remaining > 1e-12:
+            notes.append(
+                f"«{grupo}» no puede colocar {remaining:.2%}: sus clases ya "
+                "están en sus bandas. Ese porcentaje queda sin asignar en el "
+                "ancla y se reparte al renormalizar."
+            )
+
+    if empty:
+        notes.append(
+            f"Líneas del Modelo de Asignación sin ninguna clase en la cesta: "
+            f"{sorted(empty)}. Su porcentaje no se pudo colocar; el ancla se "
+            "renormaliza sobre lo que sí está, así que las demás líneas suben "
+            "en proporción."
+        )
+
+    sin_linea = sorted(c for c in present if clase_a_grupo(c) is None)
+    if sin_linea:
+        notes.append(
+            f"Clases sin línea en el Modelo de Asignación: {sin_linea}. Quedan "
+            "en 0 en el ancla — el Procedimiento no les asigna nada — así que "
+            "el optimizador solo las toma si una view las empuja."
+        )
+
+    notes.append(
+        "Ancla construida con el Modelo de Asignación de Mercado Internacional "
+        "del Procedimiento de Inversión. Dentro de cada línea el reparto es por "
+        "valor de mercado, con las bandas y el tope por nombre aplicados."
+    )
+    return class_target
+
+
 def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
                    caps: Mapping[str, float] | None = None,
                    targets: Mapping[str, float] | None = None,
@@ -289,6 +410,8 @@ def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
                 "el ancla, así que el optimizador solo los tomará si una view "
                 "los empuja."
             )
+    elif strategy in MODELO_ASIGNACION:
+        class_target = _model_targets(strategy, present, classes, caps, notes)
     else:
         class_target = {}
         for clase in present:
@@ -441,7 +564,16 @@ def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
     # ceiling -- select_basket's three-per-class floor normally prevents it, but
     # this function is public and cannot assume its caller.
     for clase, left in unabsorbed.items():
-        takers = [c for c in present if c != clase and class_target[c] > 0]
+        # Prefer the rest of the same Modelo de Asignación line. A line is a
+        # policy decision, so weight the per-name cap pushes out of single
+        # stocks belongs with the index ETFs it was allocated alongside -- not
+        # in fixed income. Only a fully saturated line leaks to other lines.
+        grupo = clase_a_grupo(clase)
+        siblings = [c for c in present
+                    if c != clase and clase_a_grupo(c) == grupo
+                    and class_target[c] > 0] if grupo else []
+        takers = siblings or [c for c in present
+                              if c != clase and class_target[c] > 0]
         capacity = sum(class_target[c] for c in takers)
         if capacity <= 0:
             # Nowhere to put it. Such a basket is already infeasible -- an

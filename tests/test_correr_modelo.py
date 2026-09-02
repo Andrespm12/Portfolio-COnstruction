@@ -160,9 +160,12 @@ def test_workbook_matches_the_notebook_shape() -> None:
           str(params.get("Piso absoluto para Overweight")))
     check("Parametros still flags the IC as an assumption",
           "no calibrado" in str(params.get("Nota sobre el IC", "")))
-    check("Parametros says midpoints are not a real SAA",
-          "Comité de Inversiones" in str(params.get("Nota sobre el ancla", "")),
-          str(params.get("Nota sobre el ancla"))[:120])
+    check("Parametros names the Modelo de Asignación as the anchor's source",
+          "Modelo de Asignación" in str(params.get("Nota sobre el ancla", "")),
+          str(params.get("Nota sobre el ancla"))[:160])
+    check("Parametros no longer claims the anchor is band midpoints",
+          "puntos medios" not in str(params.get("Nota sobre el ancla", "")),
+          str(params.get("Nota sobre el ancla"))[:160])
 
 
 def test_proposals_land_in_the_right_folder() -> None:

@@ -93,6 +93,77 @@ REGULACIONES: dict[str, dict] = {
 #: Tickers forced to zero weight. Art. 170 RIV -- related issuers.
 EXCLUSIONES_DURAS: tuple[str, ...] = ("CCI", "EMISOR_VINCULADO_1")
 
+
+# --------------------------------------------------------------------------
+# Modelo de Asignación de Mercado Internacional
+# --------------------------------------------------------------------------
+#
+# The desired allocation from the Investment Procedure, verbatim. This is the
+# strategic asset allocation the band midpoints were standing in for: bands are
+# ceilings, these are targets, and only the second is an allocation.
+#
+# The Procedimiento states four lines; the engine carries eight classes, so
+# each line is a *group* of classes and the budget is split inside it by market
+# value, exactly as weights are split inside a single class. Two mapping
+# decisions are recorded here rather than buried:
+#
+# * "Renta Fija Corporativa" covers investment grade **and** high yield /
+#   emerging debt, per the desk. RentaFija_NoIG keeps its own regulatory
+#   ceiling inside the group (5 / 10 / 15 / 25%), so the line cannot become all
+#   high yield.
+# * Broad aggregate bond funds (AGG, BND) sit with the government line. They are
+#   investment grade and majority treasury, and neither line names them. This
+#   one is a judgement call, not the Procedimiento's -- move ETF_RentaFija to
+#   the corporate group if the committee reads it the other way.
+#
+# Commodities have no line in the Procedimiento, so they carry **no target**:
+# the neutral portfolio holds none, and gold enters only when a view pushes it
+# there. That is the honest reading of a document that does not allocate to
+# them, and it is separate from COMMODITY_BANDS, which is a ceiling we invented
+# to stop an unconstrained position.
+
+GRUPOS_ASIGNACION: dict[str, tuple[str, ...]] = {
+    "Renta Fija Gubernamental IG": ("RentaFija_Soberana_IG", "ETF_RentaFija"),
+    "Renta Fija Corporativa": ("RentaFija_Corporativa_IG", "RentaFija_NoIG"),
+    "Acciones y ETFs indexados": ("Equity", "ETF_RentaVariable"),
+    "Efectivo / Money Market": ("Efectivo_MM",),
+}
+
+MODELO_ASIGNACION: dict[str, dict[str, float]] = {
+    "Conservador_Defensivo": {
+        "Renta Fija Gubernamental IG": 0.45,
+        "Renta Fija Corporativa": 0.25,
+        "Acciones y ETFs indexados": 0.20,
+        "Efectivo / Money Market": 0.10,
+    },
+    "Conservador": {
+        "Renta Fija Gubernamental IG": 0.40,
+        "Renta Fija Corporativa": 0.20,
+        "Acciones y ETFs indexados": 0.30,
+        "Efectivo / Money Market": 0.10,
+    },
+    "Moderado": {
+        "Renta Fija Gubernamental IG": 0.30,
+        "Renta Fija Corporativa": 0.15,
+        "Acciones y ETFs indexados": 0.50,
+        "Efectivo / Money Market": 0.05,
+    },
+    "Agresivo": {
+        "Renta Fija Gubernamental IG": 0.20,
+        "Renta Fija Corporativa": 0.10,
+        "Acciones y ETFs indexados": 0.65,
+        "Efectivo / Money Market": 0.05,
+    },
+}
+
+
+def clase_a_grupo(clase: str) -> str | None:
+    """Which line of the Modelo de Asignación an engine class belongs to."""
+    for grupo, clases in GRUPOS_ASIGNACION.items():
+        if clase in clases:
+            return grupo
+    return None
+
 #: Ceiling for commodity and precious-metal ETFs, per strategy.
 #:
 #: NOT from CCI's Investment Procedure. Their REGULACIONES has no commodity

@@ -86,7 +86,17 @@
 
 <p><b>El techo de materias primas.</b> El Procedimiento de Inversión no tiene una banda para oro ni commodities, y el optimizador original solo restringe las clases que aparecen listadas — o sea que una posición en oro podía tomar el libro entero sin violar ninguna regla escrita. Le pusimos un techo por perfil (5%, 10%, 15% y 25%), pero ese número lo inventamos. Compliance tiene que dar el real.</p>
 
-<p><b>[v2] La asignación estratégica.</b> El punto de partida nuevo usa el punto medio de cada banda como la posición neutral de cada clase. Es una lectura razonable de un límite y es muchísimo mejor que lo que había, pero <b>un punto medio no es una asignación estratégica</b>. Una asignación estratégica la decide el Comité de Inversiones, y los documentos de la casa dan bandas, no objetivos. El código acepta los números reales el día que existan. Mientras tanto hay que saber una cosa: como los puntos medios se reparten sobre las clases que estén en la cesta, el punto de partida se mueve según cómo quede armada la cesta — algo que una asignación estratégica de verdad no haría. Pasar los objetivos reales elimina también ese efecto.</p>
+<p><b>[v3] La asignación estratégica ya no es un supuesto nuestro.</b> Este era el hueco más grande que quedaba, y se cerró. El punto de partida ya no usa el punto medio de cada banda: usa el <b>Modelo de Asignación de Mercado Internacional</b> del propio Procedimiento de Inversión, o sea los porcentajes deseados por clase de activo que fijó la casa.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Clase de activo</th><th>Cons. Defensivo</th><th>Conservador</th><th>Moderado</th><th>Agresivo</th></tr>
+  <tr><td>Renta fija gubernamental IG (soberanos MIH, US-T y otros)</td><td>45%</td><td>40%</td><td>30%</td><td>20%</td></tr>
+  <tr><td>Renta fija corporativa (incluye high yield y emergentes)</td><td>25%</td><td>20%</td><td>15%</td><td>10%</td></tr>
+  <tr><td>Acciones individuales y ETFs indexados</td><td>20%</td><td>30%</td><td>50%</td><td>65%</td></tr>
+  <tr><td>Efectivo / money market</td><td>10%</td><td>10%</td><td>5%</td><td>5%</td></tr>
+</table>
+
+<p>La diferencia no es cosmética. Una banda es un techo; el Modelo es un objetivo, y solo lo segundo es una asignación. Además desaparece un efecto que veníamos arrastrando: los puntos medios se repartían sobre las clases que quedaran en la cesta, así que el punto de partida se movía según cómo saliera armada la cesta ese día. Con objetivos reales, el ancla queda fija.</p>
 
 <hr>
 
@@ -501,7 +511,32 @@
 
 <p>El resultado era que la cartera se iba contra el techo de renta variable: pegada <i>exactamente</i> a él en Conservador, y a un pelo en Moderado. Eso quiere decir que <b>la banda regulatoria estaba haciendo la asignación de activos</b>, y el modelo solo decidía cómo repartir por dentro. El ranking del screener apenas llegaba a la cartera. (En Agresivo no llega al techo ni con el ancla vieja, y por una razón distinta: a 80% de renta variable la penalización por riesgo ya pesa más que el retorno esperado.)</p>
 
-<p><b>Lo que hace ahora.</b> Parte de la cartera neutral del propio mandato: cada clase de activo en el punto medio de su banda, repartido sobre las clases que efectivamente están en la cesta, y con el techo de renta variable aplicado al punto de partida mismo. Dentro de cada clase el reparto sí es por capitalización — ahí comparar valores de mercado sí tiene sentido, porque estás comparando acciones contra acciones.</p>
+<p><b>[v3] Lo que hace ahora.</b> Parte del <b>Modelo de Asignación de Mercado Internacional</b> del Procedimiento: los porcentajes deseados por clase, no una lectura de las bandas.</p>
+
+<table border="1" cellpadding="6" cellspacing="0">
+  <tr><th>Clase de activo</th><th>Cons. Defensivo</th><th>Conservador</th><th>Moderado</th><th>Agresivo</th></tr>
+  <tr><td>Renta fija gubernamental IG (soberanos MIH, US-T y otros)</td><td>45%</td><td>40%</td><td>30%</td><td>20%</td></tr>
+  <tr><td>Renta fija corporativa (incluye high yield y emergentes)</td><td>25%</td><td>20%</td><td>15%</td><td>10%</td></tr>
+  <tr><td>Acciones individuales y ETFs indexados</td><td>20%</td><td>30%</td><td>50%</td><td>65%</td></tr>
+  <tr><td>Efectivo / money market</td><td>10%</td><td>10%</td><td>5%</td><td>5%</td></tr>
+</table>
+
+<p>El Procedimiento declara cuatro líneas y el motor lleva ocho clases, así que cada línea es un <i>grupo</i> de clases y su presupuesto se reparte por dentro <b>por valor de mercado</b> — la misma regla que ya se usaba dentro de una clase, un nivel más arriba. Con dos frenos:</p>
+
+<ul>
+  <li><b>Cada clase respeta su banda.</b> Esto es lo que impide que la línea corporativa se vuelva toda high yield: <code>RentaFija_NoIG</code> mantiene su techo de 5 / 10 / 15 / 25% dentro del grupo, y lo que no puede tomar vuelve a grado de inversión.</li>
+  <li><b>El tope por acción individual sigue aplicando.</b> Y lo que expulsa se queda <i>en la misma línea</i> — pasa a los ETFs indexados con los que fue asignado, no a renta fija. Una línea es una decisión de política y no debe filtrarse a otra.</li>
+</ul>
+
+<p>Tres decisiones de mapeo que conviene tener escritas:</p>
+
+<ul>
+  <li><b>La línea corporativa incluye high yield y deuda emergente</b>, por decisión de la mesa. HYG y EMB entran ahí, con el sub-tope de su banda.</li>
+  <li><b>Los fondos agregados de bonos (AGG, BND) van con la línea gubernamental.</b> Son grado de inversión y mayoritariamente tesoro, y ninguna línea los nombra. <b>Esta es nuestra lectura, no del Procedimiento</b> — es un renglón de código moverlos si el Comité lo lee al revés.</li>
+  <li><b>Las materias primas no tienen línea, así que no tienen objetivo.</b> La cartera neutral no lleva oro: entra solo si una view lo empuja. Es la lectura honesta de un documento que no les asigna nada, y es distinto de <code>COMMODITY_BANDS</code>, que es un techo que inventamos para que una posición no quede sin restricción.</li>
+</ul>
+
+<p>Si a alguna línea no le queda ninguna clase en la cesta, su porcentaje no se puede colocar y el ancla se renormaliza sobre lo que sí está — las demás líneas suben en proporción, y la corrida lo dice.</p>
 
 <p><b>[v3] El tope por acción individual también se aplica en el ancla.</b> Faltaba, y se notaba solo con capitalizaciones reales. Con NVDA valiendo 74.6% de la capitalización de las acciones de la cesta, el reparto proporcional la ponía en 6.01% contra un tope de 5% en Conservador Defensivo.</p>
 
@@ -756,9 +791,9 @@
     <td>Campos min_momentum_for_overweight y min_sharpe_for_overweight. Ponerlos en None lo desactiva</td>
   </tr>
   <tr>
-    <td>[v2] La asignación estratégica por clase</td>
-    <td>Función policy_weights, parámetro targets</td>
-    <td>El día que el Comité dé objetivos reales, entran por aquí y dejan de usarse los puntos medios</td>
+    <td>[v3] Los porcentajes deseados por clase</td>
+    <td><code>screener/cci_regulation.py</code>, <code>MODELO_ASIGNACION</code></td>
+    <td>[v3] Ya no hace falta para el uso normal: el Modelo de Asignación entra solo. Este parámetro queda para correr un escenario distinto sin tocar el Procedimiento</td>
   </tr>
   <tr>
     <td>Los pesos de los seis bloques</td>
@@ -817,7 +852,7 @@
   <tr><th>tuning.py</th><td>Permite cambiar pesos y frenos en caliente sin reiniciar.</td></tr>
 </table>
 
-<p>Hay además una carpeta de pruebas con <b>681 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
+<p>Hay además una carpeta de pruebas con <b>685 verificaciones automáticas</b> (eran 439 en la versión anterior), más una comprobación aparte de que el motor en JavaScript de la página web reproduce exactamente los mismos números que el de Python. No son decorativas: varias existen porque encontraron errores reales durante el desarrollo, incluyendo dos de esta ronda. Cada vez que se toque el código, se corren y tienen que pasar todas.</p>
 
 <p>Un ejemplo de esta ronda que ilustra para qué sirven: al agregar la omisión del bloque de sensibilidad al mercado, una prueba nueva falló y destapó que <b>las pruebas viejas estaban corriendo sobre datos mal armados</b>. Los instrumentos de prueba tenían todos el mismo volumen y el mismo dividendo, y como el puntaje relativo no se puede calcular cuando todos los valores son idénticos, los bloques de liquidez y valuación venían vacíos sin que nadie lo notara. Varias pruebas sobre el ranking estaban pasando sobre un universo que no podía producir ninguna recomendación.</p>
 
@@ -891,7 +926,7 @@
 
 <p><b>El techo de materias primas es nuestro, no del Procedimiento.</b> Necesita el número real.</p>
 
-<p><b>[v2] Los puntos medios de las bandas no son una asignación estratégica.</b> Es el supuesto que más pesa en el resultado, porque de ahí sale la mayor parte de la cartera. Es defendible y es mucho mejor que lo que había, pero sigue siendo una inferencia nuestra sobre lo que el Comité querría. Además, como se reparte sobre las clases que estén en la cesta, el punto de partida se mueve según cómo quede armada la cesta.</p>
+<p><b>[v3] La asignación estratégica dejó de ser una limitación.</b> Era el supuesto que más pesaba en el resultado, porque de ahí sale la mayor parte de la cartera. Ahora el ancla usa el Modelo de Asignación del Procedimiento, así que ya no es una inferencia nuestra, y el punto de partida dejó de moverse con la composición de la cesta. Lo único que sigue siendo lectura nuestra es dónde cae AGG/BND y que las materias primas no tengan objetivo — ambas dichas en la sección 9 y ambas de un renglón.</p>
 
 <p><b>El bloque de valuación es el más débil.</b> Sin fundamentales, usa aproximaciones de mercado, y con Yahoo pierde dos de sus cuatro medidas.</p>
 
@@ -988,9 +1023,15 @@
     <td>9</td>
   </tr>
   <tr>
+    <th>[v3] Cartera de arranque</th>
+    <td>Punto medio de cada banda — una inferencia nuestra que se movía con la cesta</td>
+    <td>El Modelo de Asignación de Mercado Internacional del Procedimiento: los porcentajes deseados de la casa</td>
+    <td>9</td>
+  </tr>
+  <tr>
     <th>Pruebas automáticas</th>
     <td>439</td>
-    <td>681, más la comprobación de paridad entre los dos motores</td>
+    <td>685, más la comprobación de paridad entre los dos motores</td>
     <td>14</td>
   </tr>
 </table>

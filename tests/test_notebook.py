@@ -368,8 +368,11 @@ def test_cells_execute() -> None:
           f"renta variable neutral {anchor_equity:.4f} > techo {ceiling:.4f}")
     check("the anchor spans the classes the basket actually holds",
           set(by_class.index) == set(anchor_classes.unique()))
-    check("the notebook states that band midpoints are not a real SAA",
-          any("Comité de Inversiones" in n for n in namespace["_notas_ancla"]),
+    check("the notebook names the Modelo de Asignación as the anchor's source",
+          any("Modelo de Asignación" in n for n in namespace["_notas_ancla"]),
+          str(namespace.get("_notas_ancla")))
+    check("the notebook no longer calls the anchor a set of band midpoints",
+          not any("puntos medios" in n for n in namespace["_notas_ancla"]),
           str(namespace.get("_notas_ancla")))
     check("the Cartera sheet lists the held positions",
           wb["Cartera"].max_row == int((cartera.weights > 0).sum()) + 1)

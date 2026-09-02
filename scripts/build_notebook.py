@@ -754,25 +754,28 @@ def build_cells() -> list[dict]:
         "pegado exactamente en el límite — o sea, **la banda decide la "
         "asignación, no el modelo**.\n",
         "\n",
-        "**`politica`** (lo que corre por defecto) parte de la cartera neutral "
-        "del propio mandato: cada clase en el punto medio de su banda, "
-        "renormalizado sobre las clases que realmente están en la cesta, y con "
-        "el techo de renta variable aplicado al ancla misma. Dentro de cada "
-        "clase el reparto sí es por capitalización, que es donde comparar "
-        "valores de mercado tiene sentido. La propiedad que importa: **sin "
-        "views, el optimizador te devuelve exactamente esta cartera**. Las "
-        "views se desvían de ahí, que es como debe funcionar.\n",
+        "**`politica`** (lo que corre por defecto) parte del **Modelo de "
+        "Asignación de Mercado Internacional** de tu Procedimiento de "
+        "Inversión: los porcentajes deseados por clase de activo, no una "
+        "lectura de las bandas. Las bandas siguen siendo techos que se "
+        "verifican; el Modelo es el objetivo. Dentro de cada línea del Modelo "
+        "el reparto es por capitalización, con la banda de cada clase y el tope "
+        "por nombre aplicados. La propiedad que importa: **sin views, el "
+        "optimizador te devuelve exactamente esta cartera**. Las views se "
+        "desvían de ahí, que es como debe funcionar.\n",
         "\n",
-        "**Lo que tienes que confirmar:** el punto medio de una banda no es tu "
-        "asignación estratégica. Una asignación estratégica la decide el Comité "
-        "de Inversiones, y tus documentos dan bandas, no objetivos. El punto "
-        "medio es una lectura razonable del límite y es muchísimo mejor ancla "
-        "que capitalización mezclada, pero sigue siendo una inferencia mía. "
-        "Cuando el Comité tenga números reales, se pasan con "
-        "`policy_weights(..., targets={...})` y esto deja de ser un supuesto. "
-        "Ojo también con esto: como los puntos medios se renormalizan sobre las "
-        "clases presentes, el ancla se mueve según cómo quede armada la cesta. "
-        "Pasar `targets` también elimina ese efecto.\n",
+        "| Clase | Cons. Def. | Conservador | Moderado | Agresivo |\n",
+        "|---|---|---|---|---|\n",
+        "| Renta fija gubernamental IG | 45% | 40% | 30% | 20% |\n",
+        "| Renta fija corporativa | 25% | 20% | 15% | 10% |\n",
+        "| Acciones y ETFs indexados | 20% | 30% | 50% | 65% |\n",
+        "| Efectivo / money market | 10% | 10% | 5% | 5% |\n",
+        "\n",
+        "Dos cosas que conviene saber. **Materias primas no tienen línea en el "
+        "Procedimiento**, así que el ancla no les asigna nada: el oro entra "
+        "solo si una view lo empuja. Y si a alguna línea no le queda ninguna "
+        "clase en la cesta, su porcentaje se reparte entre las demás al "
+        "renormalizar, y la corrida lo dice.\n",
         "\n",
         "### Tres arreglos frente al sistema original\n",
         "\n",
