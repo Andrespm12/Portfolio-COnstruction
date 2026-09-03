@@ -104,6 +104,67 @@ def test_reads_issuer_files_as_downloaded() -> None:
           abs(holdings["MINI"]["AAA"] - 0.6) < 1e-9)
 
 
+PARCIAL = """\
+ticker,weight
+AAPL,7.05
+MSFT,6.45
+NVDA,6.20
+_RESTO,80.30
+"""
+
+RECORTADO = "ticker,weight\nAAPL,7.05\nMSFT,6.45\nNVDA,6.20\n"
+
+
+def test_a_partial_file_with_a_declared_remainder_stays_correct() -> None:
+    """
+    El caso que hace usable el módulo sin bajar 500 filas por fondo.
+
+    Un archivo con las mayores posiciones y una fila _RESTO da la exposición
+    correcta para los nombres listados. Sin esa fila, la normalización infla
+    cada peso y el reporte acusaría de romper topes que nadie rompió -- que es
+    exactamente el tipo de error que este módulo existe para no cometer.
+    """
+    tmp = _dir_with({"BIEN.csv": PARCIAL, "MAL.csv": RECORTADO})
+    holdings, _, _ = load_holdings(tmp)
+
+    check("con _RESTO declarado, el peso del nombre se conserva",
+          abs(holdings["BIEN"]["AAPL"] - 0.0705) < 1e-9,
+          str(holdings["BIEN"]))
+    check("el resto queda como su propia entrada",
+          abs(holdings["BIEN"]["_RESTO"] - 0.8030) < 1e-9)
+    check("sin _RESTO, el mismo nombre queda inflado 5 veces",
+          abs(holdings["MAL"]["AAPL"] - 7.05 / 19.70) < 1e-6,
+          f"{holdings['MAL']['AAPL']:.4f}")
+
+    # Y esa inflación es la que produciría una falsa acusación de incumplimiento.
+    pesos = {"BIEN": 1.0}
+    exp, _, _ = effective_exposure(pesos, holdings)
+    check("con archivo parcial bien declarado, AAPL no rompe el tope de 15%",
+          not issuer_cap_breaches(pesos, holdings, 0.15, only=["AAPL"]),
+          str(exp))
+    mal = issuer_cap_breaches({"MAL": 1.0}, holdings, 0.15, only=["AAPL"])
+    check("con el archivo recortado sí lo rompería -- el falso positivo",
+          len(mal) == 1, str(mal))
+
+
+def test_the_remainder_is_never_treated_as_an_issuer() -> None:
+    holdings = {"SPY": {"AAPL": 0.10, "_RESTO": 0.90}}
+    pesos = {"SPY": 1.0}
+
+    check("el resto no puede violar un tope, por grande que sea",
+          not issuer_cap_breaches(pesos, holdings, 0.15),
+          str(issuer_cap_breaches(pesos, holdings, 0.15)))
+
+    sec = sector_exposure(effective_exposure(pesos, holdings)[0],
+                          {"AAPL": "Tecnología"})
+    check("y se etiqueta como resto, no como 'sin clasificar'",
+          abs(sec.get("Resto no detallado", 0) - 0.90) < 1e-9, str(sec))
+
+    texto = report(pesos, holdings, {"AAPL": "Tecnología"})
+    check("el reporte avisa cuánto del libro quedó sin atribuir",
+          "sin atribuir" in texto, texto)
+
+
 def test_an_unreadable_file_is_reported_not_swallowed() -> None:
     tmp = _dir_with({"BUENO.csv": SIMPLE, "ROTO.csv": "esto no es un csv de tenencias\n"})
     holdings, _, notas = load_holdings(tmp)
@@ -224,6 +285,8 @@ def test_sector_exposure_declares_the_unknown() -> None:
 def main() -> int:
     for fn in [
         test_reads_issuer_files_as_downloaded,
+        test_a_partial_file_with_a_declared_remainder_stays_correct,
+        test_the_remainder_is_never_treated_as_an_issuer,
         test_an_unreadable_file_is_reported_not_swallowed,
         test_missing_directory_says_so,
         test_a_position_without_holdings_is_opaque_and_lowers_coverage,

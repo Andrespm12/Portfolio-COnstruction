@@ -61,6 +61,21 @@ _NO_ES_TENENCIA = re.compile(
 #: esas filas se agregan en un emisor fantasma llamado "-".
 _TICKER_VACIO = {"-", "--", "---", "N/A", "NA", "NULL", "NONE", "."}
 
+#: Fila que declara el peso no detallado de un archivo parcial.
+#:
+#: Bajar las 500 tenencias de un fondo amplio es incómodo, y para exposición
+#: por emisor la cola larga casi no importa: lo que decide si un nombre pasa su
+#: tope son las primeras veinte o treinta posiciones. Pero un archivo recortado
+#: **sin declarar el resto** es peor que no tener archivo: al normalizar, un 7%
+#: se convertiría en 17% y el reporte diría que el tope se rompió cuando no.
+#:
+#: Con esta fila el archivo parcial queda correcto. El peso del resto entra como
+#: un emisor sinténtico que nunca puede violar un tope individual, y el reporte
+#: lo muestra como lo que es: parte del libro sin atribuir.
+RESTO = "_RESTO"
+_RESTO_ALIAS = {"_RESTO", "RESTO", "_OTROS", "OTROS", "_OTHER", "OTHER",
+                "_REMAINDER", "REMAINDER"}
+
 
 def _norm(s: str) -> str:
     return (s or "").strip().lower().replace("﻿", "")
@@ -131,6 +146,9 @@ def parse_holdings_csv(path: str | Path) -> tuple[dict[str, float], dict[str, st
         tk = (fila[c_tk] or "").strip().upper()
         w = _to_float(fila[c_w])
         if not tk or tk in _TICKER_VACIO or w is None or w <= 0:
+            continue
+        if tk in _RESTO_ALIAS:
+            pesos[RESTO] = pesos.get(RESTO, 0.0) + w
             continue
         if _NO_ES_TENENCIA.match(tk) or _NO_ES_TENENCIA.match(fila[c_tk] or ""):
             continue
@@ -226,7 +244,10 @@ def sector_exposure(exposicion: Mapping[str, float],
     """Agrupa la exposición efectiva por sector. Lo desconocido se declara."""
     out: dict[str, float] = {}
     for emisor, peso in exposicion.items():
-        s = sectores.get(emisor.upper()) or "Sin clasificar"
+        if emisor == RESTO:
+            s = "Resto no detallado"
+        else:
+            s = sectores.get(emisor.upper()) or "Sin clasificar"
         out[s] = out.get(s, 0.0) + peso
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
@@ -268,6 +289,10 @@ def issuer_cap_breaches(weights: Mapping[str, float],
 
     fuera = []
     for emisor, efectiva in exposicion.items():
+        # El resto no atribuido de un archivo parcial no es un emisor y no
+        # puede violar un tope individual: son cientos de nombres sumados.
+        if emisor == RESTO:
+            continue
         if permitidos is not None and emisor.upper() not in permitidos:
             continue
         if efectiva > cap + 1e-9:
@@ -300,8 +325,18 @@ def report(weights: Mapping[str, float],
                       "tenencias; el nombre del archivo es el ticker (SPY.csv).")
         return "\n".join(lineas)
 
+    resto = exposicion.get(RESTO, 0.0)
+    if resto > 1e-9:
+        lineas.append(
+            f"  {resto:.1%} del libro viene de archivos parciales y queda sin "
+            "atribuir a un emisor. No puede romper un tope individual, pero "
+            "tampoco se ve.")
+
     lineas += ["", f"  Exposición efectiva por emisor (top {top}):"]
     for emisor, w in sorted(exposicion.items(), key=lambda kv: -kv[1])[:top]:
+        if emisor == RESTO:
+            lineas.append(f"    {w:>7.2%}  (resto no detallado)")
+            continue
         directo = float(weights.get(emisor, 0.0) or 0.0)
         via = w - directo
         marca = "" if via <= 1e-9 else f"  (directo {directo:.2%} + fondos {via:.2%})"
