@@ -164,6 +164,73 @@ def clase_a_grupo(clase: str) -> str | None:
             return grupo
     return None
 
+
+# --------------------------------------------------------------------------
+# Sector concentration
+# --------------------------------------------------------------------------
+#
+# NOT from CCI's Investment Procedure. Its bands are by **asset class**, and
+# nothing in it constrains industry. A live Agresivo run came out with roughly
+# 35% of the book in one semiconductor chain -- eleven single names plus EWY,
+# which is largely Samsung and SK Hynix -- and passed the band audit clean,
+# because every one of those positions is "Equity" and Equity was inside its
+# ceiling. The audit was correct and the portfolio was still a sector fund.
+#
+# The mechanism is structural, not bad luck: the factor model weights momentum
+# at 25-36% depending on profile, momentum is serially correlated *within* an
+# industry, so whatever sector ran hardest supplies most of the top of the
+# ranking, and mean-variance then buys the whole cluster because their pairwise
+# correlations still look moderate over a two-year window.
+#
+# These ceilings are the desk's, proposed by this engine and not by any
+# document. They must be confirmed by the Investment Committee before they
+# govern a trade. Set a value to None to disable the constraint for a strategy
+# and the run will say the sleeve is unconstrained rather than pretend.
+SECTOR_CAPS: dict[str, float | None] = {
+    "Conservador_Defensivo": 0.15,
+    "Conservador": 0.18,
+    "Moderado": 0.22,
+    "Agresivo": 0.25,
+}
+
+
+# --------------------------------------------------------------------------
+# Core index exposures
+# --------------------------------------------------------------------------
+#
+# Which market exposures the core should be *able* to hold, and the vehicles
+# that deliver each one.
+#
+# The problem this fixes: ``select_basket`` used to hand the optimizer the top
+# names by score plus a floor of three per asset class. In a live run that
+# produced exactly three equity ETFs -- XBI (biotech), EWT (Taiwan) and EWY
+# (Korea) -- because those were the highest-scoring ETFs in a momentum-weighted
+# ranking. SPY ranked #149, IWM #115, EEM #119. None of them was ever offered
+# to the optimizer, so "the model did not choose SPY" was never true: the model
+# never saw it.
+#
+# Broad market exposure is an allocation decision, so policy decides which
+# exposures are available. Which *vehicle* delivers an exposure is a comparison
+# of like with like, so the screener's own score decides that -- the best
+# eligible candidate in each line wins its slot. That is the split the desk
+# asked for: rank the exposure first, then compare the wrappers.
+#
+# What is deliberately absent: factor and style funds (SCHD, VTV, VLUE, IWD).
+# A value or dividend tilt is a position, not core beta, and it should have to
+# earn its way in through the ranking like any other bet. Sector funds are
+# absent for the same reason.
+#
+# The list is policy, and it is the kind of hand-maintained list that
+# ``screener.seleccion`` warns about. The difference is that this one is
+# declared, versioned and printed in the run, so it can be argued with.
+EXPOSICIONES_NUCLEO: dict[str, tuple[str, ...]] = {
+    "EEUU amplio": ("SPY", "IVV", "VOO", "VTI", "SPLG", "SCHX"),
+    "EEUU pequeña capitalización": ("IWM", "IJR"),
+    "Desarrollados ex-EEUU": ("EFA", "IEFA", "VEA"),
+    "Emergentes": ("IEMG", "EEM", "VWO"),
+    "Nasdaq / crecimiento": ("QQQ", "QQQM", "VUG", "IWF"),
+}
+
 #: Ceiling for commodity and precious-metal ETFs, per strategy.
 #:
 #: NOT from CCI's Investment Procedure. Their REGULACIONES has no commodity

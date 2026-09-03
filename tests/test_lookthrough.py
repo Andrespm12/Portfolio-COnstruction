@@ -273,13 +273,16 @@ def test_overlap_is_a_fact_not_an_inference() -> None:
           abs(structural_overlap("LLY", "JPM", holdings)) < 1e-9)
 
 
+#: Escrito como lo entrega Yahoo para un fondo: minúsculas y guion bajo. La
+#: acción del mismo sector llega escrita como 'Healthcare'. Que las dos caigan
+#: en el mismo cubo es lo que hace utilizable el número.
 SECTORES_CSV = """\
 fondo,sector,peso
-SPY,Technology,0.32
-SPY,Financials,0.13
-SPY,Healthcare,0.11
+SPY,technology,0.32
+SPY,financial_services,0.13
+SPY,healthcare,0.11
 SPY,Otros,0.44
-XLE,Energy,1.00
+XLE,energy,1.00
 """
 
 
@@ -305,8 +308,13 @@ def test_fund_sector_breakdown_is_complete_not_a_sample() -> None:
 
     check("el fondo aporta sus sectores prorrateados",
           abs(sec["Technology"] - 0.16) < 1e-9, str(sec))
+    # El fondo dijo 'healthcare' y la acción 'Healthcare'. Si quedaran
+    # separados, el reporte mostraría dos líneas para el mismo sector y un
+    # tope sobre esa cifra se podría romper por partida doble.
     check("la acción aporta el suyo, y se suma al del fondo",
-          abs(sec["Healthcare"] - (0.055 + 0.30)) < 1e-9, str(sec))
+          abs(sec["Health Care"] - (0.055 + 0.30)) < 1e-9, str(sec))
+    check("no queda ninguna variante suelta del mismo sector",
+          not {"Healthcare", "healthcare", "technology"} & set(sec), str(sec))
     check("el sectorial suma el libro entero",
           abs(sum(sec.values()) - 1.0) < 1e-9, str(sum(sec.values())))
     check("y la cobertura es total porque no faltó nada",

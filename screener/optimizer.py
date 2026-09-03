@@ -52,9 +52,9 @@ import numpy as np
 import pandas as pd
 
 from .cci_regulation import (
-    CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, GRUPOS_ASIGNACION,
-    MODELO_ASIGNACION, REGULACIONES, bands_for, clase_a_grupo,
-    classify_for_bands, unbanded_classes,
+    CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, EXPOSICIONES_NUCLEO,
+    GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES, SECTOR_CAPS, bands_for,
+    clase_a_grupo, classify_for_bands, unbanded_classes,
 )
 
 #: Global risk-aversion coefficient. CCI's document parameterizes it at 2.5 for
@@ -687,26 +687,116 @@ def posterior(pi: pd.Series, covariance: pd.DataFrame,
 # Constrained optimization
 # --------------------------------------------------------------------------
 
-def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
-                  min_per_class: int = 3) -> list[str]:
+def core_vehicles(scored: Sequence[Any],
+                  exposures: Mapping[str, Sequence[str]] | None = None,
+                  ) -> tuple[dict[str, str], list[str]]:
     """
-    Choose the optimizer's basket so the mandate's bands are actually reachable.
+    One vehicle per core exposure: the best-scoring eligible candidate.
 
-    Top-N by score alone is not enough, and the failure is silent. The screener
-    ranks on momentum and risk-adjusted return, which equities dominate, so the
-    top of the list is routinely all equity. Under Moderado total equity caps at
-    60% while the book must be roughly fully invested -- the solver returns
-    infeasible and the portfolio comes out empty with no obvious cause.
+    Splits a decision the old basket ran together. *Which exposures the core can
+    hold* is allocation policy and lives in
+    :data:`screener.cci_regulation.EXPOSICIONES_NUCLEO`. *Which fund delivers an
+    exposure* is a comparison of near-identical products, which is exactly what
+    the screener's score is for -- so policy names the line and the model picks
+    the wrapper.
 
-    CCI's system never hits this because its basket comes from a hand-maintained
-    sheet that deliberately spans bonds, credit, cash and equity. Replacing that
-    sheet means reproducing that property: take the top names by score, then
-    ensure every asset class available in the universe has at least a few
-    representatives, chosen by score within the class.
+    Returns ``({exposure: ticker}, notes)``. An exposure whose candidates are
+    all missing or ineligible is reported, never substituted: dropping in a
+    different fund because the intended one failed a liquidity gate would put a
+    product in the core that no rule selected.
+    """
+    exposures = EXPOSICIONES_NUCLEO if exposures is None else exposures
+    by_ticker = {r.ticker.upper(): r for r in scored}
+    eligible = {t: r for t, r in by_ticker.items()
+                if getattr(r, "eligible", True)}
+
+    chosen: dict[str, str] = {}
+    notes: list[str] = []
+    for exposure, candidates in exposures.items():
+        ranked = [t for t in (c.upper() for c in candidates) if t in eligible]
+        if not ranked:
+            presentes = [t for t in (c.upper() for c in candidates)
+                         if t in by_ticker]
+            motivo = ("ninguno pasó los filtros de elegibilidad"
+                      if presentes else "ninguno llegó al universo puntuado")
+            notes.append(
+                f"Exposición núcleo «{exposure}» sin vehículo: {motivo} "
+                f"({', '.join(candidates)}). El optimizador no podrá tomarla."
+            )
+            continue
+        best = min(ranked, key=lambda t: _rank_of(eligible[t]))
+        chosen[exposure] = best
+        if len(ranked) > 1:
+            resto = ", ".join(f"{t} ({eligible[t].score:.0f})" for t in ranked
+                              if t != best)
+            notes.append(
+                f"Núcleo «{exposure}»: {best} "
+                f"(score {eligible[best].score:.0f}) sobre {resto}."
+            )
+    return chosen, notes
+
+
+def _rank_of(row: Any) -> float:
+    """Sort key that prefers a higher score; missing scores sort last."""
+    score = getattr(row, "score", None)
+    try:
+        return -float(score)
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
+                  min_per_class: int = 3,
+                  core_exposures: Mapping[str, Sequence[str]] | None = None,
+                  include_core: bool = True) -> tuple[list[str], list[str]]:
+    """
+    Choose the optimizer's basket so the mandate's bands are actually reachable
+    and the core exposures are actually on offer.
+
+    Returns ``(tickers, notes)``.
+
+    Three rules, in order:
+
+    1. **Top-N by score.** The screener's opinion.
+    2. **Core index exposures**, one vehicle each, whether or not they scored.
+    3. **A floor per asset class**, so every class the bands need is reachable.
+
+    Rule 2 is the one added after a live run. Top-N plus the class floor is not
+    enough, and the failure is invisible in the output. The factor model weights
+    momentum at 25-36%, momentum clusters by industry, so the top of the ranking
+    is whatever ran hardest. In an Agresivo run that produced a basket whose only
+    equity ETFs were XBI, EWT and EWY -- biotech, Taiwan, Korea -- while SPY sat
+    at #149, IWM at #115 and EEM at #119. The optimizer then held one of the
+    three and the run read as "the model rejected broad index exposure". It had
+    never been offered any. A momentum ranking decides what runs *well*; it must
+    not also decide what is *available*, or the core is a momentum artifact.
+
+    Rule 3 exists for a different failure. Under Moderado total equity caps at
+    60% while the book must be roughly fully invested, so an all-equity basket
+    makes the solver return infeasible and the portfolio comes out empty with no
+    obvious cause. CCI's own system never hits it because its basket comes from
+    a hand-maintained sheet spanning bonds, credit, cash and equity; replacing
+    that sheet means reproducing the property.
     """
     ranked = [r for r in scored if getattr(r, "eligible", True)]
     picked = [r.ticker for r in ranked[:max(top_n, 0)]]
     chosen = set(picked)
+    notes: list[str] = []
+
+    if include_core:
+        vehicles, core_notes = core_vehicles(scored, core_exposures)
+        notes.extend(core_notes)
+        added = []
+        for exposure, ticker in vehicles.items():
+            if ticker not in chosen:
+                chosen.add(ticker)
+                picked.append(ticker)
+                added.append(f"{ticker} ({exposure})")
+        if added:
+            notes.append(
+                f"Núcleo agregado a la cesta por construcción, fuera del "
+                f"top-{top_n}: {', '.join(added)}."
+            )
 
     by_class: dict[str, list[str]] = {}
     for row in ranked:
@@ -725,7 +815,7 @@ def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
                 picked.append(ticker)
                 present += 1
 
-    return picked
+    return picked, notes
 
 
 def feasibility_report(classes: Mapping[str, str], strategy: str,
@@ -781,10 +871,39 @@ class Allocation:
     by_class: pd.Series
     breaches: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    #: Look-through exposure by sector. Empty when no sector map was supplied,
+    #: which is not the same as "no concentration" and must not be read as it.
+    sector_exposure: dict[str, float] = field(default_factory=dict)
 
     @property
     def feasible(self) -> bool:
         return self.status in {"optimal", "optimal_inaccurate"}
+
+
+def sector_exposures(weights: pd.Series | Mapping[str, float],
+                     sector_weights: Mapping[str, Mapping[str, float]],
+                     ) -> dict[str, float]:
+    """Look-through sector exposure of a solved book, largest first."""
+    held = dict(weights.items()) if hasattr(weights, "items") else dict(weights)
+    out: dict[str, float] = {}
+    for sector, members in sector_weights.items():
+        total = sum(float(held.get(t, 0.0) or 0.0) * float(share)
+                    for t, share in members.items())
+        if total > 1e-12:
+            out[sector] = total
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def audit_sectors(weights: pd.Series | Mapping[str, float],
+                  sector_weights: Mapping[str, Mapping[str, float]],
+                  cap: float | None,
+                  tolerance: float = 1e-4) -> list[str]:
+    """Sector concentrations above ``cap``. Empty when ``cap`` is None."""
+    if cap is None:
+        return []
+    return [f"Sector {sector}: {value:.2%} excede el tope de {cap:.0%}"
+            for sector, value in sector_exposures(weights, sector_weights).items()
+            if value > cap + tolerance]
 
 
 def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
@@ -792,12 +911,27 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              risk_aversion: float = RISK_AVERSION,
              solver: str | None = None,
              min_position: float | None = MIN_POSITION,
-             allow_leverage: bool = ALLOW_LEVERAGE) -> Allocation:
+             allow_leverage: bool = ALLOW_LEVERAGE,
+             sector_weights: Mapping[str, Mapping[str, float]] | None = None,
+             sector_cap: float | None | str = "auto") -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
     Long-only, per-class bands, a total-equity ceiling, a per-name cap on single
-    stocks, hard exclusions, and a gross-exposure budget.
+    stocks, an optional look-through sector ceiling, hard exclusions, and a
+    gross-exposure budget.
+
+    ``sector_weights`` maps ``{sector: {ticker: fraction of that ticker}}``, as
+    :func:`screener.lookthrough.sector_map` produces it. Pass it and the solver
+    constrains industry concentration *through* the funds, so a sector ETF and a
+    single name in the same industry compete for one ceiling. Without it the
+    sleeve is unconstrained and the run says so -- CCI's bands are by asset
+    class and stop nothing here, which is how a live Agresivo book reached ~35%
+    in one semiconductor chain and passed its audit clean.
+
+    ``sector_cap`` defaults to the strategy's entry in
+    :data:`screener.cci_regulation.SECTOR_CAPS`; pass a number to override or
+    ``None`` to measure sector exposure without constraining it.
 
     ``allow_leverage`` is off by default: the book solves fully invested at 100%
     gross for every strategy, whatever ``leverage_max`` permits. See
@@ -843,13 +977,60 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             "confirmar con Compliance antes de operar."
         )
 
+    # --- Sector ceiling --------------------------------------------------
+    #
+    # Restricted to the tickers actually in this problem, so a sector map built
+    # for a wider universe cannot smuggle in names the optimizer never sees.
+    if sector_cap == "auto":
+        sector_cap = SECTOR_CAPS.get(strategy)
+    sectors: dict[str, dict[str, float]] = {}
+    if sector_weights:
+        for sector, members in sector_weights.items():
+            fila = {t: float(s) for t, s in members.items()
+                    if t in set(tickers) and float(s) > 0}
+            if fila:
+                sectors[sector] = fila
+
+    if not sectors:
+        notes.append(
+            "Sin desglose sectorial: la concentración por industria queda SIN "
+            "restringir. Las bandas del Procedimiento son por clase de activo y "
+            "no limitan sector. Corre bajar_tenencias.py para habilitarla."
+        )
+    else:
+        cubierto = {t for fila in sectors.values() for t in fila}
+        sin_dato = [t for t in tickers if t not in cubierto]
+        equity_sin_dato = [t for t in sin_dato
+                           if classes[t] in (CLASE_EQUITY, CLASE_ETF_RV)]
+        if sector_cap is None:
+            notes.append(
+                f"Exposición sectorial medida sobre {len(cubierto)} de "
+                f"{len(tickers)} instrumentos, pero SIN tope: "
+                f"SECTOR_CAPS[{strategy!r}] es None."
+            )
+        else:
+            notes.append(
+                f"Tope sectorial {sector_cap:.0%} (mirando a través de los "
+                f"fondos) sobre {len(sectors)} sector(es) y {len(cubierto)} de "
+                f"{len(tickers)} instrumentos. Número de la mesa, no del "
+                "Procedimiento: pendiente de confirmar con el Comité."
+            )
+        if equity_sin_dato:
+            notes.append(
+                f"Renta variable sin sector conocido, fuera del tope: "
+                f"{', '.join(sorted(equity_sin_dato)[:10])}"
+                f"{' ...' if len(equity_sin_dato) > 10 else ''}. Ese peso puede "
+                "concentrarse sin que la restricción lo vea."
+            )
+
     # CLARABEL ships with CVXPY. CCI's code asked for ECOS, which is optional
     # and absent from a stock Colab -- that is what killed their saved run.
     order = ([solver] if solver else
              [s for s in ("CLARABEL", "SCS", "OSQP", "ECOS")
               if s in cp.installed_solvers()])
 
-    def solve(banned: frozenset[str]) -> tuple[np.ndarray | None, str]:
+    def solve(banned: frozenset[str],
+              with_sectors: bool = True) -> tuple[np.ndarray | None, str]:
         """Solve the mandate's problem with ``banned`` names forced to zero."""
         w = cp.Variable(len(tickers))
         constraints = [w >= 0, cp.sum(w) <= budget]
@@ -880,6 +1061,16 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                 constraints.append(cp.sum(w[idx]) >= low)
                 constraints.append(cp.sum(w[idx]) <= high)
 
+        # One row per sector: the look-through weight of the book in that
+        # industry, counting a fund by its own breakdown rather than as a
+        # single undifferentiated "equity" position.
+        if with_sectors and sectors and sector_cap is not None:
+            posicion = {t: i for i, t in enumerate(tickers)}
+            for fila in sectors.values():
+                idx = [posicion[t] for t in fila]
+                shares = np.array([fila[t] for t in fila])
+                constraints.append(shares @ w[idx] <= sector_cap)
+
         objective = cp.Maximize(
             mu @ w - (risk_aversion / 2) * cp.quad_form(w, cp.psd_wrap(sigma)))
         problem = cp.Problem(objective, constraints)
@@ -896,6 +1087,22 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         return None, status
 
     solution, status = solve(frozenset())
+
+    if solution is None and sectors and sector_cap is not None:
+        # Name the sector ceiling as the cause instead of leaving a bare
+        # "infeasible". Solving again without it is the only way to know: if
+        # the same problem solves once that one constraint is gone, that
+        # constraint is the reason, and the desk can raise it or widen the
+        # basket knowing which of the two to do.
+        sin_sector, _ = solve(frozenset(), with_sectors=False)
+        if sin_sector is not None:
+            infeasible_reasons.insert(0, (
+                f"El tope sectorial de {sector_cap:.0%} es lo que deja la "
+                "cartera sin solución: sin él sí resuelve. La cesta no tiene "
+                "suficientes industrias distintas para llenar el libro bajo ese "
+                "techo — amplía la cesta o sube el tope, pero decídelo, no lo "
+                "descubras por un resultado vacío."
+            ))
 
     if solution is None:
         # A bare "infeasible" is not a diagnosis. Lead with the structural
@@ -967,6 +1174,13 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         notes=notes,
     )
     allocation.breaches = audit_bands(allocation, classes)
+    # Checked after the fact even though the solver was given the same ceiling:
+    # an audit that only repeats what the solver was told cannot catch a bad
+    # sector map, a solver that returned "optimal_inaccurate", or a constraint
+    # that never got built.
+    allocation.breaches += audit_sectors(allocation.weights, sectors, sector_cap)
+    if sectors:
+        allocation.sector_exposure = sector_exposures(allocation.weights, sectors)
     return allocation
 
 

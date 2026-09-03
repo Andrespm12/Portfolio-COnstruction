@@ -1050,8 +1050,16 @@ def test_select_basket_spans_the_classes() -> None:
         reset_all()
 
     types = {r.ticker: r.asset_type for r in scored}
-    basket = select_basket(scored, "Moderado", top_n=8, min_per_class=2)
+    basket, notes = select_basket(scored, "Moderado", top_n=8, min_per_class=2)
     classes = {t: classify_for_bands(t, types.get(t, "ETF")) for t in basket}
+
+    # The core exposures are policy, so they are in the basket whatever they
+    # scored -- that is the whole point of rule 2.
+    check("the broad US core vehicle is offered to the optimizer",
+          {"SPY", "IVV", "VOO", "VTI", "SPLG", "SCHX"} & set(basket),
+          f"basket {sorted(basket)}")
+    check("the run says which vehicle won each core exposure",
+          any("Núcleo" in n for n in notes), str(notes))
 
     check("the basket keeps the top names by score",
           {r.ticker for r in scored[:8]} <= set(basket))

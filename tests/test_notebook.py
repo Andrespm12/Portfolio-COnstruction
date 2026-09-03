@@ -117,9 +117,16 @@ from screener.yahoo_adapter import build_market_data
 _frame = make_yf_frame(TICKERS, dividends={'SPY': 6.0, 'JPM': 4.0})
 if ('Volume', 'DBC') in _frame.columns:
     _frame[('Volume', 'DBC')] = 250_000.0
+# Sectors for the single names. Without them the sector ceiling has nothing to
+# bind on for the equity sleeve, and the test would pass on a constraint that
+# never constrained anything. Four of the five are Technology on purpose: that
+# is the concentration the ceiling exists to stop.
 market_data = build_market_data(
     _frame, TICKERS, benchmark=BENCHMARK,
     risk_free_rate=TASA_LIBRE_RIESGO,
+    sectors={'AAPL': 'Technology', 'MSFT': 'Technology',
+             'NVDA': 'Technology', 'LLY': 'Healthcare',
+             'JPM': 'Financial Services'},
 )
 frame_diario = _frame
 
@@ -152,11 +159,27 @@ def _fake_download(tickers, destino, **kw):
         lines = ['ticker,weight'] + [f'{t},{w:.4f}' for t, w in rows]
         (destino / f'{tk}.csv').write_text('\\n'.join(lines), encoding='utf-8')
         ok.append(tk)
-    _ty.escribir_auxiliares(
-        destino, {t: {'technology': 0.6, 'financials': 0.4} for t in ok}, {})
+    # A broad-index-like breakdown, in Yahoo's own lowercase snake_case. The
+    # casing matters: the single names below carry Yahoo's stock spelling
+    # ('Technology'), and if the two never collapsed to one label each would
+    # get its own ceiling and the cap could be doubled.
+    breakdown = {'technology': 0.31, 'financial_services': 0.14,
+                 'healthcare': 0.12, 'consumer_cyclical': 0.11,
+                 'communication_services': 0.09, 'industrials': 0.08,
+                 'consumer_defensive': 0.06, 'energy': 0.04,
+                 'utilities': 0.02, 'real_estate': 0.02, 'basic_materials': 0.01}
+    _ty.escribir_auxiliares(destino, {t: dict(breakdown) for t in ok}, {})
     return ok, failed
 
 _ty.bajar_varios = _fake_download
+
+# Nothing in a test may reach the network. The fixture already carries every
+# stock's sector, so this should never be called -- it raising is the assertion
+# that the sector lookup stays off the wire when the data is already in hand.
+def _no_network(tickers, **kw):
+    raise AssertionError(f'fetch_metadata reached the network for {tickers}')
+
+_ya.fetch_metadata = _no_network
 print(f'{len(market_data["instruments"])} instrumentos (fixture offline)')
 """
 
@@ -398,6 +421,34 @@ def test_cells_execute() -> None:
     check("the notebook names the Modelo de Asignación as the anchor's source",
           any("Modelo de Asignación" in n for n in namespace["_notas_ancla"]),
           str(namespace.get("_notas_ancla")))
+
+    # ---- sector ceiling ---------------------------------------------------
+    from screener.cci_regulation import SECTOR_CAPS
+
+    sector_cap = SECTOR_CAPS[strategy]
+    exposure = cartera.sector_exposure
+    check("the notebook constrains sector concentration, not just asset class",
+          exposure, "no sector exposure was computed")
+    check("no sector exceeds the ceiling",
+          all(v <= sector_cap + 1e-6 for v in exposure.values()),
+          str({k: f"{v:.2%}" for k, v in exposure.items() if v > sector_cap}))
+    check("the ceiling actually binds on this fixture",
+          any(v > sector_cap - 1e-6 for v in exposure.values()),
+          "nothing reached the cap, so the constraint proves nothing here")
+
+    # The defect this caught: Yahoo spells a fund's sector 'technology' and a
+    # stock's 'Technology'. Left alone they are two buckets, each gets the full
+    # ceiling, and a 22% cap permits 44% in one industry.
+    labels = list(exposure)
+    check("each sector appears once, whatever spelling it arrived in",
+          len(labels) == len({s.lower() for s in labels}), str(labels))
+    check("the fund's sector and the single names' sector are the same bucket",
+          "Technology" in exposure and "technology" not in exposure,
+          str(labels))
+
+    check("the run names the sector ceiling as the desk's, not the mandate's",
+          any("Procedimiento" in n and "Comité" in n for n in cartera.notes),
+          "a number we invented must not read as a regulatory limit")
 
     # ---- transparency (look-through) --------------------------------------
     # Colab is the only place most of this gets run, so the notebook has to

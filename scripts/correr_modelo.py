@@ -161,6 +161,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Baja nombres largos y sectores. Necesario con --tickers.")
     p.add_argument("--sin-json", action="store_true",
                    help="Solo el Excel, sin el JSON de propuestas para el BL.")
+    p.add_argument("--sin-nucleo", dest="nucleo", action="store_false",
+                   default=True,
+                   help="No forzar las exposiciones núcleo en la cesta; "
+                        "vuelve al comportamiento de solo top-N por puntaje.")
+    p.add_argument("--sin-tope-sectorial", action="store_true",
+                   help="Medir la concentración sectorial pero no restringirla.")
     p.add_argument("--tenencias", default=TENENCIAS_DIR,
                    help="Directorio con los CSV de tenencias por ETF, "
                         "para el reporte de transparencia.")
@@ -184,12 +190,14 @@ def main(argv: list[str] | None = None) -> int:
         DRIVE_PROPOSALS_DIR, ViewParams, build_basket, build_views,
         default_views_filename, public_view, write_views,
     )
-    from screener.cci_regulation import CLASE_EQUITY, REGULACIONES, classify_for_bands
+    from screener.cci_regulation import (CLASE_EQUITY, REGULACIONES, SECTOR_CAPS,
+                                         classify_for_bands)
     from screener.diagnostics import run_diagnostics
-    from screener.lookthrough import (load_fund_sectors, load_holdings,
-                                      report, sector_exposure_direct)
+    from screener.lookthrough import (load_fund_sectors, load_holdings, report,
+                                      sector_exposure_direct, sector_map,
+                                      stock_sectors_for)
     from screener.optimizer import (
-        ALLOW_LEVERAGE, gross_budget, allocation_table,
+        ALLOW_LEVERAGE, core_vehicles, gross_budget, allocation_table,
         implied_equilibrium, market_weights,
         optimize, policy_weights, posterior, select_basket, shrunk_covariance,
     )
@@ -386,8 +394,13 @@ def main(argv: list[str] | None = None) -> int:
     # descarta en silencio cualquier view que nombre un ticker fuera de él, así
     # que un par contra un nombre que no llega a la cesta no debilita la view,
     # la borra — y encima gasta uno de los cupos de max_views.
-    cartera_tickers = select_basket(scored, args.estrategia,
-                                    top_n=args.top_n, min_per_class=3)
+    cartera_tickers, notas_cesta = select_basket(
+        scored, args.estrategia, top_n=args.top_n, min_per_class=3,
+        include_core=args.nucleo)
+    for n in notas_cesta:
+        print(f"  {n}")
+    if notas_cesta:
+        print()
     views = build_views(scored, market_data, strategy=args.estrategia,
                         reference_map=REFERENCIAS,
                         pair_pool=cartera_tickers, params=params)
@@ -469,8 +482,26 @@ def main(argv: list[str] | None = None) -> int:
     er_posterior, cov_posterior = posterior(pi, covarianza, views)
     clases = {t: classify_for_bands(t, tipos_todos.get(t, "ETF"))
               for t in covarianza.columns}
+
+    # El mapa sectorial mira a través de los fondos, así que necesita el
+    # desglose que baja bajar_tenencias.py. Sin él la restricción no se aplica
+    # y la corrida lo dice; nunca se supone un sector.
+    fondos_sectores = load_fund_sectors(Path(args.tenencias) / "_sectores.csv")
+    acciones_cesta = [t for t in covarianza.columns
+                      if t not in fondos_sectores
+                      and tipos_todos.get(t, "ETF") != "ETF"]
+    sectores_acciones, notas_meta = stock_sectors_for(
+        acciones_cesta,
+        {r.ticker: r.sector for r in scored if getattr(r, "sector", None)})
+    mapa_sectores, _cob_sec, notas_sec = sector_map(
+        list(covarianza.columns), fondos_sectores, sectores_acciones)
+    for n in notas_meta + notas_sec:
+        print(f"  {n}")
+
     cartera = optimize(er_posterior, cov_posterior, tipos_todos, args.estrategia,
-                       min_position=args.posicion_minima or None)
+                       min_position=args.posicion_minima or None,
+                       sector_weights=mapa_sectores,
+                       sector_cap=(None if args.sin_tope_sectorial else "auto"))
 
     print(f"\n{args.estrategia}  |  estado: {cartera.status}")
     print(f"Exposición bruta   {cartera.gross_exposure:.1%}")
@@ -482,6 +513,15 @@ def main(argv: list[str] | None = None) -> int:
     for clase, peso in cartera.by_class.items():
         if peso > 0.0001:
             print(f"  {peso:7.2%}  {clase}")
+
+    if cartera.sector_exposure:
+        tope = SECTOR_CAPS.get(args.estrategia)
+        etiqueta = ("sin tope" if args.sin_tope_sectorial or tope is None
+                    else f"tope {tope:.0%}")
+        print(f"\nPor sector, mirando a través de los fondos ({etiqueta})")
+        for sector, peso in cartera.sector_exposure.items():
+            if peso > 0.0001:
+                print(f"  {peso:7.2%}  {sector}")
 
     if cartera.breaches:
         print("\nAUDITORÍA — INCUMPLIMIENTOS:")
@@ -576,6 +616,18 @@ def main(argv: list[str] | None = None) -> int:
         ("Universo — barras mínimas", barras_requeridas()),
         ("Posición mínima",
          f"{args.posicion_minima:.2%}" if args.posicion_minima else "sin mínimo"),
+        ("Núcleo indexado forzado en la cesta", "sí" if args.nucleo else "no"),
+        ("Núcleo — vehículo por exposición",
+         " | ".join(f"{e}: {t}" for e, t in
+                    core_vehicles(scored)[0].items()) or "ninguno disponible"),
+        ("Tope sectorial (look-through)",
+         "sin tope" if args.sin_tope_sectorial
+         or SECTOR_CAPS.get(args.estrategia) is None
+         else f"{SECTOR_CAPS[args.estrategia]:.0%}"),
+        ("Nota sobre el tope sectorial",
+         "número de la mesa, NO del Procedimiento de Inversión; "
+         "pendiente de confirmación del Comité"),
+        ("Sectores restringidos", len(mapa_sectores) or "sin desglose sectorial"),
         ("Nota sobre el ancla",
          " | ".join(notas_ancla) or "capitalización de mercado / AUM"),
         ("Estado de la optimización", cartera.status),
@@ -596,7 +648,13 @@ def main(argv: list[str] | None = None) -> int:
         ("Techo de volatilidad para OW",
          f"{perfil.gates.max_volatility_for_overweight:.0%}"),
         ("Beta máxima", f"{perfil.gates.beta_limit:.2f}"),
-        ("Peso máximo por posición", f"{perfil.sizing.max_weight:.1%}"),
+        # Dos topes distintos, y verlos sin etiqueta en la misma hoja se lee
+        # como una contradicción: el del screener dimensiona una idea suelta,
+        # el del optimizador es el límite del Procedimiento sobre la cartera.
+        ("Peso máx. por posición — dimensionamiento del screener",
+         f"{perfil.sizing.max_weight:.1%}"),
+        ("Peso máx. por acción individual — Procedimiento (optimizador)",
+         f"{REGULACIONES[args.estrategia]['max_equity_individual']:.1%}"),
         ("Volumen diario mínimo", f"${perfil.eligibility.min_adv_usd / 1e6:,.0f}MM"),
     ] + [(f"Peso — {b.label}", f"{b.weight:.0%}") for b in modelo],
         columns=["Parámetro", "Valor"])

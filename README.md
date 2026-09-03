@@ -87,6 +87,47 @@ Outputs land in `output/screen_results.csv` and `output/screen_report.md`.
 
 ---
 
+## What constrains the portfolio
+
+CCI's Investment Procedure bands are by **asset class**, and two things they do
+not constrain turned out to decide most of a live Agresivo book:
+
+**Industry concentration.** That run came out ~35% in one semiconductor chain —
+eleven single names plus EWY, which is largely Samsung and SK Hynix — and passed
+its band audit clean, because every one of those positions is "Equity" and
+Equity was inside its ceiling. The audit was right and the portfolio was still a
+sector fund. `SECTOR_CAPS` adds a per-sector ceiling (15/18/22/25% by strategy)
+enforced *through the funds*, so a sector ETF and a single name in the same
+industry compete for one limit. Those numbers are the desk's, not the
+Procedimiento's, and every run says so.
+
+Two details that make the difference between a real limit and a fiction:
+
+- Sector labels are normalized. Yahoo spells a fund's sector `technology` and a
+  stock's `Technology`; left alone they are two buckets, each gets the full
+  ceiling, and a 25% cap permits 50% in one industry.
+- Stock sectors are fetched for the basket even when `--con-nombres` is off,
+  which is the default. Without that the ceiling would see only the ETFs and
+  wave through the single-name concentration it exists to stop.
+
+Anything with no sector data stays **outside** the ceiling and is named in the
+run. An unconstrained sleeve reported as such beats a compliance number computed
+over half the book.
+
+**What the optimizer is even offered.** `select_basket` used to hand over the
+top names by score plus a floor per asset class. Momentum is 25-36% of the
+factor model and clusters by industry, so the top of the ranking is whatever ran
+hardest — in that run the only equity ETFs in the basket were XBI, EWT and EWY,
+while SPY sat at #149, IWM at #115 and EEM at #119. None of them was ever
+offered, so "the model rejected broad index exposure" was never true.
+
+`EXPOSICIONES_NUCLEO` now puts one vehicle per core exposure in the basket by
+construction. Which exposures exist is policy; which fund delivers one is the
+screener's score picking among near-identical products. A ranking decides what
+runs well; it must not also decide what is available.
+
+---
+
 ## The notebook
 
 `notebooks/screener_colab.ipynb` runs the **same engine** as this repo — the

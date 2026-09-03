@@ -252,7 +252,7 @@ def sector_exposure(exposicion: Mapping[str, float],
         if emisor == RESTO:
             s = "Resto no detallado"
         else:
-            s = sectores.get(emisor.upper()) or "Sin clasificar"
+            s = normalize_sector(sectores.get(emisor.upper(), "")) or "Sin clasificar"
         out[s] = out.get(s, 0.0) + peso
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
@@ -314,9 +314,10 @@ def sector_exposure_direct(weights: Mapping[str, float],
         if mapa:
             visto += peso
             for sector, share in mapa.items():
-                out[sector] = out.get(sector, 0.0) + peso * share
+                canon = normalize_sector(sector) or "Sin clasificar"
+                out[canon] = out.get(canon, 0.0) + peso * share
             continue
-        sector = stock_sectors.get(tk)
+        sector = normalize_sector(stock_sectors.get(tk, ""))
         if sector:
             visto += peso
             out[sector] = out.get(sector, 0.0) + peso
@@ -333,6 +334,167 @@ def sector_exposure_direct(weights: Mapping[str, float],
                             sorted(sin_clasificar, key=lambda kv: -kv[1])[:8])
         notas.append(f"Sin sector conocido: {detalle}.")
     return dict(sorted(out.items(), key=lambda kv: -kv[1])), cobertura, notas
+
+
+#: Nombres de sector que significan lo mismo escritos de distinta forma.
+#:
+#: No es cosmética. Yahoo entrega el sector de una **acción** como
+#: ``"Technology"`` y el de un **fondo** como ``"technology"``; los archivos de
+#: iShares dicen ``"Health Care"`` donde Yahoo dice ``"Healthcare"``, y GICS
+#: dice ``"Consumer Discretionary"`` donde Yahoo dice ``"Consumer Cyclical"``.
+#:
+#: Sin unificarlos, una acción y el ETF que la contiene caen en cubos distintos
+#: y **cada uno recibe su propio tope**: con un techo del 22% la cartera podría
+#: llevar 44% en tecnología y la restricción reportaría cumplimiento. Un tope
+#: que se puede duplicar partiendo el nombre del sector no es un tope.
+_SECTOR_CANONICO: dict[str, str] = {
+    "technology": "Technology",
+    "information technology": "Technology",
+    "tech": "Technology",
+    "financial services": "Financial Services",
+    "financials": "Financial Services",
+    "financial": "Financial Services",
+    "healthcare": "Health Care",
+    "health care": "Health Care",
+    "consumer cyclical": "Consumer Discretionary",
+    "consumer discretionary": "Consumer Discretionary",
+    "consumer defensive": "Consumer Staples",
+    "consumer staples": "Consumer Staples",
+    "basic materials": "Materials",
+    "materials": "Materials",
+    "communication services": "Communication Services",
+    "communications": "Communication Services",
+    "telecommunications": "Communication Services",
+    "telecom": "Communication Services",
+    "real estate": "Real Estate",
+    "realestate": "Real Estate",
+    "industrials": "Industrials",
+    "industrial": "Industrials",
+    "energy": "Energy",
+    "utilities": "Utilities",
+    "utility": "Utilities",
+}
+
+
+def normalize_sector(nombre: str) -> str:
+    """
+    Un solo nombre por sector, venga de donde venga.
+
+    Lo desconocido se devuelve limpio pero sin traducir: inventarle un sector a
+    algo que no reconocemos sería peor que dejarlo aparte, porque lo metería en
+    un tope que no le corresponde.
+    """
+    limpio = " ".join(str(nombre or "").replace("_", " ").split()).strip()
+    if not limpio:
+        return ""
+    return _SECTOR_CANONICO.get(limpio.lower(), limpio)
+
+
+def stock_sectors_for(tickers: Iterable[str],
+                      known: Mapping[str, str] | None = None,
+                      fetch: Any = None) -> tuple[dict[str, str], list[str]]:
+    """
+    Sector de cada acción, bajándolo solo para las que falten.
+
+    Existe por un fallo concreto: ``--con-nombres`` viene apagado por defecto
+    (bajar metadatos de 430 nombres es una petición por ticker), así que en una
+    corrida normal **ninguna acción trae sector**. El tope sectorial habría
+    visto solo los ETFs y habría dejado pasar el 29% en semiconductores que la
+    restricción existe para frenar: un número de cumplimiento calculado sobre
+    la mitad del libro es peor que no tenerlo, porque parece que sí midió.
+
+    La cesta son unas decenas de nombres, no cuatrocientos, así que bajar el
+    sector solo para ella es barato. Lo que no se pueda bajar se reporta como
+    hueco; nunca se supone.
+    """
+    known = {k.upper(): v for k, v in (known or {}).items() if v}
+    faltan = sorted({str(t).upper() for t in tickers} - set(known))
+    if not faltan:
+        return dict(known), []
+
+    if fetch is None:
+        from .yahoo_adapter import fetch_metadata as fetch
+
+    notas: list[str] = []
+    try:
+        _, bajados = fetch(faltan)
+    except Exception as exc:                    # noqa: BLE001 - se reporta
+        return dict(known), [
+            f"No se pudo bajar el sector de {len(faltan)} nombre(s) "
+            f"({type(exc).__name__}). Quedan fuera del tope sectorial."
+        ]
+
+    obtenidos = {k.upper(): v for k, v in (bajados or {}).items() if v}
+    sin_sector = [t for t in faltan if t not in obtenidos]
+    if obtenidos:
+        notas.append(f"Sector bajado para {len(obtenidos)} nombre(s) de la cesta.")
+    if sin_sector:
+        notas.append(
+            f"Yahoo no dio sector para {len(sin_sector)}: "
+            f"{', '.join(sin_sector[:10])}"
+            f"{' ...' if len(sin_sector) > 10 else ''}."
+        )
+    return {**known, **obtenidos}, notas
+
+
+def sector_map(tickers: Iterable[str],
+               fund_sectors: Mapping[str, Mapping[str, float]],
+               stock_sectors: Mapping[str, str],
+               ) -> tuple[dict[str, dict[str, float]], dict[str, float], list[str]]:
+    """
+    Qué fracción de cada instrumento pertenece a cada sector.
+
+    Es :func:`sector_exposure_direct` sin los pesos: en vez de la exposición de
+    una cartera ya resuelta, devuelve el mapa que permite **restringirla antes**
+    de resolverla. El optimizador lo convierte en una fila por sector.
+
+    Una acción aporta 1.0 a su sector. Un fondo aporta su desglose completo, que
+    es lo que lo hace útil: sin mirar a través, un ETF sectorial y uno amplio
+    son la misma "renta variable" para las bandas del Procedimiento.
+
+    Devuelve ``(mapa, cobertura_por_ticker, notas)``. Un instrumento sin dato
+    sectorial queda **fuera del mapa**, no repartido ni supuesto. Eso importa
+    más aquí que en un reporte: un instrumento ausente del mapa no aporta a
+    ningún tope, así que queda sin restringir, y la corrida tiene que decirlo o
+    el tope sería una cifra de cumplimiento que nadie verificó.
+    """
+    mapa: dict[str, dict[str, float]] = {}
+    cobertura: dict[str, float] = {}
+    sin_dato: list[str] = []
+
+    for ticker in tickers:
+        tk = str(ticker).upper()
+        fondo = fund_sectors.get(tk)
+        if fondo:
+            total = sum(v for v in fondo.values() if v > 0)
+            if total > 0:
+                for sector, peso in fondo.items():
+                    if peso <= 0:
+                        continue
+                    canon = normalize_sector(sector)
+                    if not canon:
+                        continue
+                    fila = mapa.setdefault(canon, {})
+                    fila[tk] = fila.get(tk, 0.0) + peso / total
+                cobertura[tk] = 1.0
+                continue
+        sector = normalize_sector(stock_sectors.get(tk, ""))
+        if sector:
+            mapa.setdefault(sector, {})[tk] = 1.0
+            cobertura[tk] = 1.0
+        else:
+            cobertura[tk] = 0.0
+            sin_dato.append(tk)
+
+    notas: list[str] = []
+    if sin_dato:
+        notas.append(
+            f"{len(sin_dato)} instrumento(s) sin desglose sectorial: "
+            f"{', '.join(sorted(sin_dato)[:10])}"
+            f"{' ...' if len(sin_dato) > 10 else ''}. No aportan a ningún tope "
+            "sectorial, así que ese peso queda sin restringir."
+        )
+    return mapa, cobertura, notas
 
 
 def structural_overlap(a: str, b: str,
