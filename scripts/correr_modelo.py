@@ -103,6 +103,11 @@ ANCLA = "politica"             # politica | mercado  (ver el documento maestro)
 POSICION_MINIMA = 0.01         # posición mínima ejecutable; 0 la desactiva
 
 # --- Salida ---------------------------------------------------------------
+#: Directorio con los CSV de tenencias de los emisores, uno por ETF
+#: (SPY.csv, IVV.csv...). Sin él, la sección de transparencia dice que
+#: no puede ver nada en vez de estimar.
+TENENCIAS_DIR = "tenencias"
+
 EXPORTAR_JSON_PARA_BL = True
 
 _GRUPOS = {
@@ -156,6 +161,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Baja nombres largos y sectores. Necesario con --tickers.")
     p.add_argument("--sin-json", action="store_true",
                    help="Solo el Excel, sin el JSON de propuestas para el BL.")
+    p.add_argument("--tenencias", default=TENENCIAS_DIR,
+                   help="Directorio con los CSV de tenencias por ETF, "
+                        "para el reporte de transparencia.")
     p.add_argument("--salida", default=".", help="Directorio donde escribir los archivos.")
     args = p.parse_args(argv)
     if args.tickers.strip():
@@ -176,8 +184,9 @@ def main(argv: list[str] | None = None) -> int:
         DRIVE_PROPOSALS_DIR, ViewParams, build_basket, build_views,
         default_views_filename, public_view, write_views,
     )
-    from screener.cci_regulation import REGULACIONES, classify_for_bands
+    from screener.cci_regulation import CLASE_EQUITY, REGULACIONES, classify_for_bands
     from screener.diagnostics import run_diagnostics
+    from screener.lookthrough import load_holdings, report
     from screener.optimizer import (
         ALLOW_LEVERAGE, gross_budget, allocation_table,
         implied_equilibrium, market_weights,
@@ -499,6 +508,25 @@ def main(argv: list[str] | None = None) -> int:
         for row in cartera_df.itertuples():
             if row.peso > 0.0001:
                 print(f"  {row.peso:7.2%}  {row.ticker}")
+
+    # ------------------------------------------------------- 8b. transparencia
+    #
+    # La hoja de Cartera de arriba lista instrumentos. Esto lista lo que de
+    # verdad tienes: un libro con fondos adentro carga emisores que nadie eligió
+    # uno por uno, y el tope del Procedimiento está escrito sobre el instrumento
+    # cuando su intención es sobre el emisor.
+    titulo("8b · TRANSPARENCIA (LOOK-THROUGH)")
+    tenencias, sectores_lt, notas_lt = load_holdings(args.tenencias)
+    for n in notas_lt:
+        print(f"  {n}")
+    if notas_lt:
+        print()
+    acciones_cesta = [t for t in cartera.weights.index
+                      if classify_for_bands(t, tipos_todos.get(t, "ETF")) == CLASE_EQUITY]
+    print(report(cartera.weights[cartera.weights > 0].to_dict(),
+                 tenencias, sectores_lt,
+                 cap=REGULACIONES[args.estrategia]["max_equity_individual"],
+                 only=acciones_cesta))
 
     # ---------------------------------------------------------------- 9. export
     titulo("9 · ARCHIVOS")
