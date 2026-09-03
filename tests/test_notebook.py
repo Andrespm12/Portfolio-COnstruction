@@ -130,6 +130,33 @@ import screener.yahoo_adapter as _ya
 _ya.fetch_market_caps = lambda tickers, **kw: {
     t: 1e10 + 1e9 * i for i, t in enumerate(tickers)
 }
+
+# Same for the transparency cell, which downloads ETF composition. The stub
+# writes the same shape of file the real downloader writes -- partial holdings
+# plus the _RESTO row -- so the look-through path runs for real offline. GLD
+# gets no file: a fund the source does not cover has to come out declared as
+# opaque, not silently dropped.
+import screener.tenencias_yahoo as _ty
+
+def _fake_download(tickers, destino, **kw):
+    from pathlib import Path as _P
+    holdings = {'AAPL': 7.0, 'MSFT': 6.0, 'NVDA': 5.0}
+    destino = _P(destino)
+    destino.mkdir(parents=True, exist_ok=True)
+    ok, failed = [], []
+    for tk in tickers:
+        if tk == 'GLD':
+            failed.append(tk)
+            continue
+        rows = _ty.filas_con_resto(dict(holdings))
+        lines = ['ticker,weight'] + [f'{t},{w:.4f}' for t, w in rows]
+        (destino / f'{tk}.csv').write_text('\\n'.join(lines), encoding='utf-8')
+        ok.append(tk)
+    _ty.escribir_auxiliares(
+        destino, {t: {'technology': 0.6, 'financials': 0.4} for t in ok}, {})
+    return ok, failed
+
+_ty.bajar_varios = _fake_download
 print(f'{len(market_data["instruments"])} instrumentos (fixture offline)')
 """
 
@@ -371,6 +398,41 @@ def test_cells_execute() -> None:
     check("the notebook names the Modelo de Asignación as the anchor's source",
           any("Modelo de Asignación" in n for n in namespace["_notas_ancla"]),
           str(namespace.get("_notas_ancla")))
+
+    # ---- transparency (look-through) --------------------------------------
+    # Colab is the only place most of this gets run, so the notebook has to
+    # carry the look-through itself; running it locally is not an answer.
+    check("the transparency cell ran and pulled fund composition",
+          len(namespace.get("_tenencias", {})) > 0,
+          "no fund composition reached the look-through")
+    check("composition landed in the notebook's own tenencias directory",
+          (Path(workdir) / "tenencias").is_dir())
+
+    exposure, coverage, notes = __import__(
+        "screener.lookthrough", fromlist=["effective_exposure"]
+    ).effective_exposure(namespace["_pesos_cartera"], namespace["_tenencias"])
+
+    check("look-through reports coverage below 100% rather than assuming it",
+          0.0 < coverage < 1.0, f"coverage {coverage:.2f}")
+    check("a fund with no composition is declared, not silently dropped",
+          any("GLD" in n for n in notes),
+          "GLD has no file in the fixture and must be named as a blind spot")
+    check("the undetailed remainder is carried as _RESTO, not normalized away",
+          exposure.get("_RESTO", 0.0) > 0.0,
+          "without _RESTO the listed holdings inflate and the cap test lies")
+    check("weights still sum to the book, remainder included",
+          abs(sum(exposure.values())
+              - sum(namespace["_pesos_cartera"].values())) < 1e-9)
+
+    # The point of the whole section: a name held directly AND inside an index
+    # fund has an effective exposure larger than the row in the Cartera sheet.
+    bigger = [t for t, w in exposure.items()
+              if t in namespace["_pesos_cartera"]
+              and w > namespace["_pesos_cartera"][t] + 1e-9]
+    check("a name held directly and through a fund shows the larger exposure",
+          bigger, "no issuer's effective exposure exceeded its direct weight")
+    check("the cap is checked against issuers the book actually holds directly",
+          set(namespace["_acciones"]) <= set(namespace["_pesos_cartera"]))
     check("the notebook no longer calls the anchor a set of band midpoints",
           not any("puntos medios" in n for n in namespace["_notas_ancla"]),
           str(namespace.get("_notas_ancla")))

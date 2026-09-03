@@ -35,6 +35,7 @@ MODULES = (
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
     "profiles.py", "black_litterman.py", "cci_regulation.py",
     "optimizer.py", "diagnostics.py", "seleccion.py", "lookthrough.py",
+    "tenencias_yahoo.py",
 )
 
 
@@ -918,6 +919,115 @@ def build_cells() -> list[dict]:
         "    .map(lambda v: escala(v, 0, 0.12), subset=['peso'])\n",
         "    .hide(axis='index')\n",
         "    .set_caption(f'Cartera optimizada — {ESTRATEGIA_CCI}'))\n",
+    ))
+
+    # --------------------------------------------------------- transparencia
+    cells.append(md(
+        "## 11b · Transparencia (mirar a través de los ETFs)\n",
+        "\n",
+        "La tabla de arriba no es la cartera. Un 20% en un ETF de mercado "
+        "amplio son posiciones en cientos de empresas que nadie eligió una por "
+        "una, y eso esconde tres cosas:\n",
+        "\n",
+        "1. **Exposición efectiva por emisor.** El tope del Procedimiento está "
+        "escrito sobre el instrumento, pero su intención es sobre el emisor. "
+        "Con solo acciones las dos cosas coinciden; con ETFs se separan, y un "
+        "nombre puede pasar su límite sumando la posición directa y la que "
+        "entra por los fondos.\n",
+        "2. **Exposición sectorial real.** Un ETF sectorial encima de uno "
+        "amplio no da \"exposición al sector\": da un **sobrepeso** sobre lo "
+        "que el amplio ya traía.\n",
+        "3. **Solape estructural.** Que dos ETFs sigan el mismo índice es un "
+        "hecho verificable, no una correlación que puede fallar en un régimen "
+        "raro.\n",
+        "\n",
+        "Esta celda baja la composición de los ETFs **de la cartera** desde "
+        "Yahoo (`funds_data`) y corre el reporte. No hace falta subir nada ni "
+        "contratar a ningún proveedor.\n",
+        "\n",
+        "**Lo que este reporte no hace: estimar.** Yahoo publica las mayores "
+        "posiciones de cada fondo, no las 500. El peso que no detalla se anota "
+        "como `_RESTO` y se reporta como tal. Sin esa fila, un 7% se "
+        "convertiría en 17% al normalizar y el reporte acusaría un "
+        "incumplimiento que no existe. Un fondo que Yahoo no cubra queda "
+        "declarado **opaco**, no rellenado con supuestos.\n",
+        "\n",
+        "Para lo que sirve el tope: la exposición efectiva se compara contra "
+        "`max_equity_individual` del perfil, pero **solo sobre las acciones de "
+        "la cesta** — un emisor al que solo se llega por dentro de un ETF "
+        "indexado no es una posición individual del libro.\n",
+    ))
+    cells.append(code(
+        "# @markdown Baja la composición de los ETFs de la cartera y mira a "
+        "través de ellos.\n",
+        "CORRER_TRANSPARENCIA = True  # @param {type:\"boolean\"}\n",
+        "\n",
+        "from screener.lookthrough import (load_fund_sectors, load_holdings,\n",
+        "                                  report, sector_exposure_direct)\n",
+        "from screener.tenencias_yahoo import bajar_varios\n",
+        "from screener.cci_regulation import CLASE_EQUITY\n",
+        "from pathlib import Path\n",
+        "\n",
+        "# En Colab el disco de trabajo es /content. Fuera de Colab (jupyter\n",
+        "# local) cae junto al notebook, para que la misma celda sirva en los\n",
+        "# dos sitios sin editar la ruta.\n",
+        "DIR_TENENCIAS = (Path('/content') if Path('/content').is_dir()\n",
+        "                 else Path('.')) / 'tenencias'\n",
+        "\n",
+        "if not CORRER_TRANSPARENCIA:\n",
+        "    print('Transparencia desactivada.')\n",
+        "else:\n",
+        "    _pesos_cartera = cartera.weights[cartera.weights > 0].to_dict()\n",
+        "    # Solo los ETFs: una accion mira a traves de si misma, y pedirle su\n",
+        "    # composicion a Yahoo es una llamada que siempre falla.\n",
+        "    _fondos = sorted(t for t in _pesos_cartera\n",
+        "                     if tipos_todos.get(t, 'ETF') == 'ETF')\n",
+        "\n",
+        "    if not _fondos:\n",
+        "        print('La cartera no tiene ETFs: lo que ves es lo que hay.')\n",
+        "    else:\n",
+        "        _faltan = [t for t in _fondos\n",
+        "                   if not (DIR_TENENCIAS / f'{t}.csv').exists()]\n",
+        "        if _faltan:\n",
+        "            print(f'Bajando composicion de {len(_faltan)} fondo(s):')\n",
+        "            _ok, _fallaron = bajar_varios(_faltan, DIR_TENENCIAS)\n",
+        "            if _fallaron:\n",
+        "                print(f'\\nSin composicion en Yahoo: "
+        "{\", \".join(_fallaron)}')\n",
+        "                print('Quedan declarados como opacos en el reporte. '\n",
+        "                      'Si te importan, baja el CSV del emisor y subelo '\n",
+        "                      f'a {DIR_TENENCIAS}/TICKER.csv')\n",
+        "            print()\n",
+        "        else:\n",
+        "            print('Composicion ya bajada; se reutiliza.\\n')\n",
+        "\n",
+        "        _tenencias, _sectores_lt, _notas_lt = load_holdings(DIR_TENENCIAS)\n",
+        "        for _n in _notas_lt:\n",
+        "            print(f'  {_n}')\n",
+        "\n",
+        "        _acciones = [t for t in _pesos_cartera\n",
+        "                     if classify_for_bands(t, tipos_todos.get(t, 'ETF'))\n",
+        "                     == CLASE_EQUITY]\n",
+        "        print(report(_pesos_cartera, _tenencias, _sectores_lt,\n",
+        "                     cap=REGULACIONES[ESTRATEGIA_CCI]"
+        "['max_equity_individual'],\n",
+        "                     only=_acciones))\n",
+        "\n",
+        "        # El desglose sectorial del emisor es el total del fondo, no una\n",
+        "        # muestra de sus mayores posiciones: da un numero completo aunque\n",
+        "        # las tenencias sean parciales. Cuando esta, manda sobre el\n",
+        "        # derivado de las posiciones.\n",
+        "        _fondos_sec = load_fund_sectors(DIR_TENENCIAS / '_sectores.csv')\n",
+        "        if _fondos_sec:\n",
+        "            _sec, _cob_sec, _notas_sec = sector_exposure_direct(\n",
+        "                _pesos_cartera, _fondos_sec,\n",
+        "                {r.ticker: r.sector for r in scored if r.sector})\n",
+        "            print('\\n  Exposicion sectorial (desglose completo del "
+        "emisor):')\n",
+        "            for _n in _notas_sec:\n",
+        "                print(f'    {_n}')\n",
+        "            for _s, _v in _sec.items():\n",
+        "                print(f'    {_v:>7.2%}  {_s}')\n",
     ))
 
     # ---------------------------------------------------------------- export

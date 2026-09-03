@@ -29,10 +29,15 @@ Five deliverables:
 [open the notebook in Colab](https://colab.research.google.com/github/Andrespm12/Portfolio-COnstruction/blob/claude/stock-picking-screening-metrics-b0b2dh/notebooks/screener_colab.ipynb)
 → *Runtime → Run all*.
 
+Upload **only the `.ipynb`** — the engine travels inside it. There is nothing
+else to put in the Colab filesystem, and the transparency section downloads the
+ETF composition it needs on its own.
+
 **The whole model, no notebook:**
 
 ```bash
 pip install pandas numpy yfinance openpyxl cvxpy scikit-learn
+python3 scripts/bajar_tenencias.py                # ETF composition, once
 python3 scripts/correr_modelo.py                  # screen, views, diagnostics, portfolio
 python3 scripts/correr_modelo.py --perfil Agresivo --ancla mercado
 python3 scripts/correr_modelo.py --tickers SPY,QQQ,TLT,GLD,AAPL --con-nombres
@@ -40,6 +45,21 @@ python3 scripts/correr_modelo.py --tickers SPY,QQQ,TLT,GLD,AAPL --con-nombres
 
 Same package, same order, same output as the notebook — `screening.xlsx` plus
 the proposals JSON under `propuestas/`. `--help` lists every flag.
+
+`bajar_tenencias.py` is optional: without it, section 8b reports 0% look-through
+coverage instead of estimating what it cannot see, and everything else runs
+unchanged.
+
+**A self-contained zip, for a machine without the repo:**
+
+```bash
+python3 scripts/build_bundle.py           # -> output/modelo_cci.zip
+```
+
+The package, the two runnable programs and their requirements — no tests, no
+notebook, no web. `tests/test_bundle.py` extracts it and runs both programs from
+the extracted copy, so a missing module fails here rather than on the recipient's
+machine.
 
 **Locally:**
 
@@ -59,6 +79,7 @@ python3 tests/test_optimizer.py          # posterior, regulatory bands, audit
 python3 tests/test_notebook.py           # notebook drift + full execution
 python3 tests/test_diagnostics.py        # block overlap + view saturation
 python3 tests/test_correr_modelo.py      # the runner script, end to end
+python3 -m pytest tests/test_bundle.py tests/test_tenencias_yahoo.py
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
