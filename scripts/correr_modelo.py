@@ -32,11 +32,11 @@ Qué produce
 -----------
 En el directorio de salida (por defecto, el actual):
 
-    screening.xlsx                              9 hojas, se explica solo
+    screening.xlsx                             10 hojas, se explica solo
     {Estrategia}_screener_propuestas_{fecha}.json   entrada para el BL de CCI
 
-Las nueve hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Cesta,
-Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
+Las diez hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Sectores,
+Cesta, Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
 Parametros.
 
 El JSON va a ``propuestas/``, nunca a ``aprobadas/``: esa carpeta es solo para
@@ -533,6 +533,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"NOTA: {n}")
 
     cartera_df = allocation_table(cartera, classes=clases)
+
+    # La concentración sectorial pasó de dato a restricción, así que tiene que
+    # viajar en el libro que lee el comité, con el techo al lado y no en una
+    # línea de consola que nadie guarda.
+    _tope_sec = None if args.sin_tope_sectorial else SECTOR_CAPS.get(args.estrategia)
+    sectores_df = pd.DataFrame(
+        [{"sector": s, "exposicion": v,
+          "tope": _tope_sec if _tope_sec is not None else float("nan"),
+          "holgura": (_tope_sec - v) if _tope_sec is not None else float("nan")}
+         for s, v in cartera.sector_exposure.items()]
+        or [{"sector": "sin desglose sectorial", "exposicion": float("nan"),
+             "tope": float("nan"), "holgura": float("nan")}])
     if cartera_df.empty:
         # Una hoja vacía no dice nada. El motivo viaja con el resultado.
         cartera_df = pd.DataFrame({
@@ -677,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
         comparacion.to_excel(xl, sheet_name="Perfiles")
         views_excel.to_excel(xl, sheet_name="Views BL", index=False)
         cartera_df.to_excel(xl, sheet_name="Cartera", index=False)
+        sectores_df.to_excel(xl, sheet_name="Sectores", index=False)
         cesta_df.to_excel(xl, sheet_name="Cesta", index=False)
         universo_df.to_excel(xl, sheet_name="Universo", index=False)
         cov.to_excel(xl, sheet_name="Cobertura", index=False)
@@ -688,7 +701,8 @@ def main(argv: list[str] | None = None) -> int:
                 ancho = max((len(str(c.value)) for c in col if c.value), default=8)
                 hoja.column_dimensions[col[0].column_letter].width = min(46, ancho + 3)
 
-    print(f"{archivo_excel}  —  {len(scored)} nombres, 9 hojas")
+    print(f"{archivo_excel}  —  {len(scored)} nombres, "
+          f"{len(pd.ExcelFile(archivo_excel).sheet_names)} hojas")
 
     if not args.sin_json:
         write_views(views, archivo_views, strategy=args.estrategia,

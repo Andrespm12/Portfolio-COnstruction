@@ -350,11 +350,37 @@ def test_cells_execute() -> None:
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the nine documented sheets",
+    check("workbook has the ten documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
-                                 "Cartera", "Cesta", "Universo", "Cobertura",
-                                 "Parametros"},
+                                 "Cartera", "Sectores", "Cesta", "Universo",
+                                 "Cobertura", "Parametros"},
           f"got {wb.sheetnames}")
+
+    # The sector ceiling is a constraint now, so it has to reach the reader of
+    # the workbook. A limit enforced in memory and reported only to a console
+    # nobody keeps is not auditable.
+    sector_rows = list(wb["Sectores"].iter_rows(min_row=2, values_only=True))
+    check("the Sectores sheet carries the exposure, its ceiling and the slack",
+          [c.value for c in next(wb["Sectores"].iter_rows(max_row=1))]
+          == ["sector", "exposicion", "tope", "holgura"])
+    check("every sector in the book is listed against its ceiling",
+          sector_rows and all(r[2] is not None for r in sector_rows),
+          str(sector_rows[:3]))
+
+    params = {r[0]: r[1] for r in
+              wb["Parametros"].iter_rows(min_row=2, values_only=True)}
+    check("the workbook records the sector ceiling that was applied",
+          "Tope sectorial (look-through)" in params, str(list(params)[:5]))
+    check("and says the number is the desk's, not the Procedimiento's",
+          "Comité" in str(params.get("Nota sobre el tope sectorial", "")))
+    check("the workbook records which vehicle won each core exposure",
+          params.get("Núcleo — vehículo por exposición"))
+    # The two caps used to sit unlabelled in the same sheet, reading as a
+    # contradiction: 12% next to a position held at 20%.
+    check("the two position caps are labelled by what each one governs",
+          "Peso máx. por posición — dimensionamiento del screener" in params
+          and "Peso máx. por acción individual — Procedimiento (optimizador)"
+          in params, str(list(params)))
 
     # The whole point of the JSON/Excel split: a human reads the views in the
     # workbook, the BL engine reads them from the JSON.
