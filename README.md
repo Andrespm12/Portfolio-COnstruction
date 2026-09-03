@@ -126,6 +126,44 @@ construction. Which exposures exist is policy; which fund delivers one is the
 screener's score picking among near-identical products. A ranking decides what
 runs well; it must not also decide what is available.
 
+**Risk that matches the mandate.** All four strategies used to maximize the
+same utility with `lambda = 2.5`, so the only difference between an Aggressive
+book and a Conservative one was the width of its bands -- and a band is a
+ceiling, so nothing made the Aggressive one use it. Each mandate now carries its
+own risk aversion (8.0 / 5.0 / 2.5 / 1.5), and the penalty applies to **active
+risk against the Modelo de Asignación**, not to total risk.
+
+That distinction is the whole design. Penalizing total risk with a per-mandate
+lambda breaks the property the anchor exists for: with no views a defensive book
+came out 54 points away from the allocation the Committee approved, because the
+optimizer mixed the anchor with the minimum-variance portfolio. Penalizing the
+deviation gives both -- with no views the book *is* the Modelo for every
+mandate, whatever the lambda, and with views the lambda decides how far that
+mandate is willing to move away from it. A conservative mandate deviating less
+for the same view is what being conservative means.
+
+`RISK_TARGETS` states the volatility range each mandate is expected to land in,
+and `risk_profile_table` solves all four with the same basket and the same views
+so the comparison isolates the mandate. It reports expected return, volatility,
+in-sample max drawdown, worst rolling 12 months and a parametric 95% one-year
+loss, and flags any inversion -- an aggressive book taking less risk than a
+moderate one contradicts what the client signed.
+
+The floor and the ceiling are not treated alike, for a mathematical reason
+rather than a stylistic one: `w'Sigma w <= max**2` is convex and `w'Sigma w >=
+min**2` is not. So a book that solves below its floor is re-solved maximizing
+return against the ceiling -- the risk budget becomes something the portfolio is
+built to use -- and both ends are audited. Those findings stay **out** of
+`breaches`, which means the Investment Procedure was violated; a volatility
+range the Committee has not approved must not fire a compliance signal.
+
+**Views the book cannot contradict.** A relative view long A / short B now
+constrains `w_A >= w_B`. A live run held MU at 5.84% against LRCX at 5.85% on a
+view saying MU wins -- the portfolio was marginally short its own call. It is a
+floor and not a margin: `0 >= 0` satisfies it, so it forbids the contradiction
+without forcing a position into the book. Long-only cannot express the short
+leg, and sizing to the spread anyway would put on a bet nobody approved.
+
 ---
 
 ## The notebook

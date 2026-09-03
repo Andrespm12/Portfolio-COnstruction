@@ -32,11 +32,11 @@ Qué produce
 -----------
 En el directorio de salida (por defecto, el actual):
 
-    screening.xlsx                             10 hojas, se explica solo
+    screening.xlsx                             11 hojas, se explica solo
     {Estrategia}_screener_propuestas_{fecha}.json   entrada para el BL de CCI
 
-Las diez hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Sectores,
-Cesta, Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
+Las once hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Sectores,
+Riesgo, Cesta, Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
 Parametros.
 
 El JSON va a ``propuestas/``, nunca a ``aprobadas/``: esa carpeta es solo para
@@ -167,6 +167,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         "vuelve al comportamiento de solo top-N por puntaje.")
     p.add_argument("--sin-tope-sectorial", action="store_true",
                    help="Medir la concentración sectorial pero no restringirla.")
+    p.add_argument("--sin-coherencia-views", dest="coherencia_views",
+                   action="store_false", default=True,
+                   help="Permitir que la cartera pese más la pata corta de una "
+                        "view relativa que la larga.")
     p.add_argument("--tenencias", default=TENENCIAS_DIR,
                    help="Directorio con los CSV de tenencias por ETF, "
                         "para el reporte de transparencia.")
@@ -190,16 +194,18 @@ def main(argv: list[str] | None = None) -> int:
         DRIVE_PROPOSALS_DIR, ViewParams, build_basket, build_views,
         default_views_filename, public_view, write_views,
     )
-    from screener.cci_regulation import (CLASE_EQUITY, REGULACIONES, SECTOR_CAPS,
-                                         classify_for_bands)
+    from screener.cci_regulation import (CLASE_EQUITY, REGULACIONES, RISK_TARGETS,
+                                         SECTOR_CAPS, classify_for_bands,
+                                         risk_aversion_for)
     from screener.diagnostics import run_diagnostics
     from screener.lookthrough import (load_fund_sectors, load_holdings, report,
                                       sector_exposure_direct, sector_map,
                                       stock_sectors_for)
     from screener.optimizer import (
-        ALLOW_LEVERAGE, core_vehicles, gross_budget, allocation_table,
-        implied_equilibrium, market_weights,
-        optimize, policy_weights, posterior, select_basket, shrunk_covariance,
+        ALLOW_LEVERAGE, RISK_AVERSION, core_vehicles, gross_budget,
+        allocation_table, drawdown_metrics, implied_equilibrium, market_weights,
+        optimize, policy_weights, posterior, risk_profile_table, select_basket,
+        shrunk_covariance,
     )
     from screener.profiles import PROFILES, get_profile, profile_for_strategy
     from screener.report import console_summary
@@ -478,7 +484,8 @@ def main(argv: list[str] | None = None) -> int:
         if peso > 0.0001:
             print(f"  {peso:7.2%}  {clase}")
 
-    pi = implied_equilibrium(pesos_ancla, covarianza)
+    pi = implied_equilibrium(pesos_ancla, covarianza,
+                             risk_aversion=RISK_AVERSION)
     er_posterior, cov_posterior = posterior(pi, covarianza, views)
     clases = {t: classify_for_bands(t, tipos_todos.get(t, "ETF"))
               for t in covarianza.columns}
@@ -501,7 +508,10 @@ def main(argv: list[str] | None = None) -> int:
     cartera = optimize(er_posterior, cov_posterior, tipos_todos, args.estrategia,
                        min_position=args.posicion_minima or None,
                        sector_weights=mapa_sectores,
-                       sector_cap=(None if args.sin_tope_sectorial else "auto"))
+                       sector_cap=(None if args.sin_tope_sectorial else "auto"),
+                       views=views,
+                       enforce_view_coherence=args.coherencia_views,
+                       anchor=pesos_ancla, prior=pi)
 
     print(f"\n{args.estrategia}  |  estado: {cartera.status}")
     print(f"Exposición bruta   {cartera.gross_exposure:.1%}")
@@ -523,6 +533,11 @@ def main(argv: list[str] | None = None) -> int:
             if peso > 0.0001:
                 print(f"  {peso:7.2%}  {sector}")
 
+    if cartera.risk_findings:
+        print("\nRIESGO vs. MANDATO (expectativa de la mesa, no del Procedimiento):")
+        for r in cartera.risk_findings:
+            print(f"  {r}")
+
     if cartera.breaches:
         print("\nAUDITORÍA — INCUMPLIMIENTOS:")
         for b in cartera.breaches:
@@ -533,6 +548,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"NOTA: {n}")
 
     cartera_df = allocation_table(cartera, classes=clases)
+
+    # ------------------------------------------------- 8c. riesgo por perfil
+    titulo("8c · RIESGO ESPERADO POR PERFIL")
+    print("Los cuatro mandatos resueltos con la MISMA cesta y las MISMAS views.")
+    print("Lo único que cambia entre filas es el mandato: su lambda, sus bandas,")
+    print("su tope sectorial y su techo de volatilidad.\n")
+    riesgo_df, notas_riesgo = risk_profile_table(
+        covarianza, tipos_cesta, capitalizaciones, views, returns=retornos,
+        sector_weights=(None if args.sin_tope_sectorial else mapa_sectores),
+        min_position=args.posicion_minima or None)
+    print(riesgo_df[["estrategia", "lambda", "retorno_esperado", "volatilidad",
+                     "vol_min_objetivo", "vol_max_objetivo", "max_drawdown",
+                     "caida_1a_95", "posiciones"]].to_string(
+        index=False,
+        formatters={c: "{:.2%}".format for c in
+                    ("retorno_esperado", "volatilidad", "vol_min_objetivo",
+                     "vol_max_objetivo", "max_drawdown", "caida_1a_95")}))
+    if notas_riesgo:
+        print()
+        for n in notas_riesgo:
+            print(f"  AVISO: {n}")
+    else:
+        print("\n  Riesgo y retorno crecen con el perfil, como debe ser.")
 
     # La concentración sectorial pasó de dato a restricción, así que tiene que
     # viajar en el libro que lee el comité, con el techo al lado y no en una
@@ -690,6 +728,7 @@ def main(argv: list[str] | None = None) -> int:
         views_excel.to_excel(xl, sheet_name="Views BL", index=False)
         cartera_df.to_excel(xl, sheet_name="Cartera", index=False)
         sectores_df.to_excel(xl, sheet_name="Sectores", index=False)
+        riesgo_df.to_excel(xl, sheet_name="Riesgo", index=False)
         cesta_df.to_excel(xl, sheet_name="Cesta", index=False)
         universo_df.to_excel(xl, sheet_name="Universo", index=False)
         cov.to_excel(xl, sheet_name="Cobertura", index=False)

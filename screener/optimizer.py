@@ -46,20 +46,31 @@ hands a fully neutral asset a -1.4% expected return.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .cci_regulation import (
     CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, EXPOSICIONES_NUCLEO,
-    GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES, SECTOR_CAPS, bands_for,
-    clase_a_grupo, classify_for_bands, unbanded_classes,
+    GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES, RISK_TARGETS,
+    SECTOR_CAPS, bands_for, clase_a_grupo, classify_for_bands,
+    risk_aversion_for, unbanded_classes,
 )
 
-#: Global risk-aversion coefficient. CCI's document parameterizes it at 2.5 for
-#: a risk-neutral investor; the same value drives the equilibrium and the
-#: objective so the two stay consistent.
+#: Risk aversion of the **market**, for the equilibrium ``pi = delta * Sigma * w``.
+#: CCI's document parameterizes it at 2.5.
+#:
+#: This is not the client's. ``pi`` says what returns would make the market
+#: portfolio optimal for the average investor; it does not change because this
+#: particular mandate is conservative. The client's appetite belongs in the
+#: objective function, and lives in
+#: :data:`~screener.cci_regulation.RISK_AVERSION_BY_STRATEGY`.
+#:
+#: Running one value through both is a modelling error with a visible symptom:
+#: since ``pi`` scales linearly with it, an Aggressive book solved with a low
+#: lambda comes back with a *lower* expected return than the Moderate one -- an
+#: artifact of scale that reads as the aggressive mandate being worse.
 RISK_AVERSION = 2.5
 
 #: Uncertainty in the equilibrium itself. Fixed low, per CCI's document.
@@ -892,10 +903,64 @@ class Allocation:
     #: Look-through exposure by sector. Empty when no sector map was supplied,
     #: which is not the same as "no concentration" and must not be read as it.
     sector_exposure: dict[str, float] = field(default_factory=dict)
+    #: Findings against the desk's risk expectations for the mandate, kept
+    #: **out** of ``breaches`` on purpose. ``breaches`` means the Investment
+    #: Procedure was violated; a book outside the desk's volatility range is a
+    #: different animal -- the range is not in that document, and it is an
+    #: expectation rather than a limit. Mixing them would make a compliance
+    #: signal fire on a number the Committee has not even approved yet.
+    risk_findings: list[str] = field(default_factory=list)
 
     @property
     def feasible(self) -> bool:
         return self.status in {"optimal", "optimal_inaccurate"}
+
+
+def relative_view_pairs(views: Sequence[Mapping[str, Any]],
+                        universe: Iterable[str] | None = None,
+                        ) -> list[tuple[str, str]]:
+    """
+    ``(largo, corto)`` de cada view relativa cuyas dos patas están en el problema.
+
+    Una view relativa que nombra un ticker fuera de la covarianza no existe para
+    el optimizador — :func:`posterior` la descarta — así que tampoco puede
+    restringirlo.
+    """
+    disponibles = None if universe is None else {str(t).upper() for t in universe}
+    out: list[tuple[str, str]] = []
+    for view in views or ():
+        if view.get("tipo") not in ("relativa", "relativo"):
+            continue
+        largo = str(view.get("activo_long") or "").upper()
+        corto = str(view.get("activo_short") or "").upper()
+        if not largo or not corto or largo == corto:
+            continue
+        if disponibles is not None and not {largo, corto} <= disponibles:
+            continue
+        # Q negativo invierte la dirección: la view dice que gana la otra pata.
+        try:
+            q = float(view.get("Q", 0.0))
+        except (TypeError, ValueError):
+            q = 0.0
+        out.append((corto, largo) if q < 0 else (largo, corto))
+    return out
+
+
+def view_coherence_breaches(weights: pd.Series | Mapping[str, float],
+                            pairs: Sequence[tuple[str, str]],
+                            tolerance: float = 1e-6) -> list[str]:
+    """Views relativas que la cartera contradice: pesa más la pata perdedora."""
+    held = dict(weights.items()) if hasattr(weights, "items") else dict(weights)
+    fuera = []
+    for largo, corto in pairs:
+        w_l = float(held.get(largo, 0.0) or 0.0)
+        w_s = float(held.get(corto, 0.0) or 0.0)
+        if w_s > w_l + tolerance:
+            fuera.append(
+                f"View {largo} sobre {corto}: la cartera lleva {w_s:.2%} de "
+                f"{corto} y {w_l:.2%} de {largo}, al revés de lo que dice la view"
+            )
+    return fuera
 
 
 def sector_exposures(weights: pd.Series | Mapping[str, float],
@@ -926,12 +991,17 @@ def audit_sectors(weights: pd.Series | Mapping[str, float],
 
 def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              asset_types: Mapping[str, str], strategy: str,
-             risk_aversion: float = RISK_AVERSION,
+             risk_aversion: float | None = None,
              solver: str | None = None,
              min_position: float | None = MIN_POSITION,
              allow_leverage: bool = ALLOW_LEVERAGE,
              sector_weights: Mapping[str, Mapping[str, float]] | None = None,
-             sector_cap: float | None | str = "auto") -> Allocation:
+             sector_cap: float | None | str = "auto",
+             views: Sequence[Mapping[str, Any]] | None = None,
+             enforce_view_coherence: bool = True,
+             risk_budget: tuple[float, float] | None | str = "auto",
+             anchor: pd.Series | None = None,
+             prior: pd.Series | None = None) -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
@@ -950,6 +1020,35 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     ``sector_cap`` defaults to the strategy's entry in
     :data:`screener.cci_regulation.SECTOR_CAPS`; pass a number to override or
     ``None`` to measure sector exposure without constraining it.
+
+    ``views``, with ``enforce_view_coherence``, stops the book from being
+    positioned *against* its own relative views: for each one, the long leg is
+    constrained to weigh at least as much as the short leg. A live run held MU
+    at 5.84% and LRCX at 5.85% on a view saying MU beats LRCX -- the portfolio
+    was marginally short its own call. The constraint is a floor and not a
+    margin on purpose: ``0 >= 0`` satisfies it, so it never forces a position
+    into the book, it only forbids the contradiction. Long-only cannot express
+    the short leg, and pretending otherwise by sizing to the spread would put
+    on a bet nobody approved.
+
+    ``risk_budget`` is the ``(floor, ceiling)`` annual volatility the mandate
+    implies, defaulting to :data:`screener.cci_regulation.RISK_TARGETS`. It is
+    deliberately **not** a constraint on the primary solve. Two reasons.
+
+    A ceiling the basket cannot meet turns into no portfolio at all, and "this
+    basket cannot build a defensive book" is information the desk needs in its
+    hands, not an empty result. And a hard ceiling breaks the property this
+    whole design rests on -- that with no views the optimizer returns the
+    mandate's own neutral portfolio -- whenever that neutral portfolio is itself
+    above the ceiling, which is a contradiction in the policy that must be
+    reported rather than silently resolved.
+
+    So the budget does two other things. The floor drives a **second pass**: a
+    book that solves below its own floor is re-solved maximizing return subject
+    to ``w'Sigma w <= ceiling**2``, which is convex where a floor is not, so the
+    mandate's risk budget becomes something the portfolio is built to use and
+    not merely to respect. And both ends are **audited**, so a book outside its
+    range says so.
 
     ``allow_leverage`` is off by default: the book solves fully invested at 100%
     gross for every strategy, whatever ``leverage_max`` permits. See
@@ -974,7 +1073,30 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     rules = REGULACIONES[strategy]
     classes = {t: classify_for_bands(t, asset_types.get(t, "ETF")) for t in tickers}
 
+    # El ancla del mandato y su equilibrio, para penalizar el riesgo ACTIVO.
+    # Sin ellos se cae al objetivo de riesgo total con el lambda global, que es
+    # el comportamiento anterior: así un llamador que no los pase no cambia de
+    # resultado por esta versión.
+    w_ancla = pi_prior = None
+    if anchor is not None and prior is not None:
+        w_ancla = np.asarray([float(anchor.get(t, 0.0)) for t in tickers])
+        pi_prior = np.asarray([float(prior.get(t, 0.0)) for t in tickers])
+
     notes: list[str] = []
+    # El lambda del mandato, no uno global. Las cuatro estrategias resolvían con
+    # el mismo 2.5 y se diferenciaban solo por el ancho de sus bandas, que son
+    # techos: nada obligaba a la Agresiva a usarlos.
+    if risk_aversion is None:
+        risk_aversion = (risk_aversion_for(strategy, RISK_AVERSION)
+                         if w_ancla is not None else RISK_AVERSION)
+        if w_ancla is not None:
+            notes.append(
+                f"Aversión al riesgo λ={risk_aversion:g} para {strategy} "
+                f"(Moderado usa {risk_aversion_for('Moderado'):g}), aplicada al "
+                "riesgo ACTIVO contra el Modelo de Asignación. Sin views la "
+                "cartera es el Modelo; el λ decide cuánto se aparta de él una "
+                "view."
+            )
     budget = gross_budget(strategy, allow_leverage=allow_leverage)
     infeasible_reasons = feasibility_report(classes, strategy, budget)
     notes.extend(infeasible_reasons)
@@ -1041,14 +1163,36 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                 "concentrarse sin que la restricción lo vea."
             )
 
+    # --- View coherence --------------------------------------------------
+    pairs = (relative_view_pairs(views or (), tickers)
+             if enforce_view_coherence else [])
+    if pairs:
+        notes.append(
+            f"Coherencia con {len(pairs)} view(s) relativa(s): la pata larga no "
+            "puede pesar menos que la corta. "
+            + "; ".join(f"{a}>={b}" for a, b in pairs)
+        )
+
+    # --- Risk budget -----------------------------------------------------
+    if risk_budget == "auto":
+        risk_budget = RISK_TARGETS.get(strategy)
+    piso_vol, techo_vol = risk_budget if risk_budget else (None, None)
+    if piso_vol is not None:
+        notes.append(
+            f"Presupuesto de riesgo {piso_vol:.1%}–{techo_vol:.1%} de "
+            f"volatilidad anual para {strategy}. Números de la mesa, no del "
+            "Procedimiento: pendientes de confirmar con el Comité."
+        )
+
     # CLARABEL ships with CVXPY. CCI's code asked for ECOS, which is optional
     # and absent from a stock Colab -- that is what killed their saved run.
     order = ([solver] if solver else
              [s for s in ("CLARABEL", "SCS", "OSQP", "ECOS")
               if s in cp.installed_solvers()])
 
-    def solve(banned: frozenset[str],
-              with_sectors: bool = True) -> tuple[np.ndarray | None, str]:
+    def solve(banned: frozenset[str], with_sectors: bool = True,
+              with_views: bool = True, with_vol: bool = True,
+              mode: str = "utility") -> tuple[np.ndarray | None, str]:
         """Solve the mandate's problem with ``banned`` names forced to zero."""
         w = cp.Variable(len(tickers))
         constraints = [w >= 0, cp.sum(w) <= budget]
@@ -1082,15 +1226,57 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         # One row per sector: the look-through weight of the book in that
         # industry, counting a fund by its own breakdown rather than as a
         # single undifferentiated "equity" position.
+        posicion = {t: i for i, t in enumerate(tickers)}
+
         if with_sectors and sectors and sector_cap is not None:
-            posicion = {t: i for i, t in enumerate(tickers)}
             for fila in sectors.values():
                 idx = [posicion[t] for t in fila]
                 shares = np.array([fila[t] for t in fila])
                 constraints.append(shares @ w[idx] <= sector_cap)
 
-        objective = cp.Maximize(
-            mu @ w - (risk_aversion / 2) * cp.quad_form(w, cp.psd_wrap(sigma)))
+        # La pata larga de una view relativa no puede pesar menos que la corta.
+        # No fuerza a tener la posición: 0 >= 0 se cumple.
+        if with_views:
+            for largo, corto in pairs:
+                constraints.append(w[posicion[largo]] >= w[posicion[corto]])
+
+        # El techo solo restringe la segunda pasada, la que gasta el
+        # presupuesto de riesgo. En la primera no va: un techo que la cesta no
+        # puede cumplir devolvería cero cartera, y ademas rompe la propiedad de
+        # que sin views el optimizador reproduce el ancla del mandato.
+        if with_vol and mode == "max_return" and techo_vol is not None:
+            constraints.append(
+                cp.quad_form(w, cp.psd_wrap(sigma)) <= float(techo_vol) ** 2)
+
+        if mode == "utility" and w_ancla is not None:
+            # Riesgo ACTIVO contra el ancla, no riesgo total.
+            #
+            # Con riesgo total y un lambda por mandato, la cartera sin views
+            # deja de ser el ancla: sale el ancla mezclada con la de mínima
+            # varianza, y en un mandato defensivo esa mezcla se aleja 54 puntos
+            # de lo que el Comité aprobó. El modelo estaría sobrescribiendo la
+            # asignación estratégica con un parámetro nuestro.
+            #
+            # Penalizando la desviación se obtienen las dos cosas: sin views el
+            # término activo es cero y la cartera ES el Modelo de Asignación,
+            # sea cual sea el lambda; con views, el lambda decide cuánto se
+            # permite el mandato apartarse de él. Que una cartera conservadora
+            # se aparte menos de su asignación estratégica por una view es
+            # exactamente lo que significa ser conservadora.
+            activo = w - w_ancla
+            objective = cp.Maximize(
+                (mu - pi_prior) @ w
+                - (risk_aversion / 2) * cp.quad_form(activo, cp.psd_wrap(sigma)))
+        elif mode == "max_return":
+            # Segunda pasada: gastar el presupuesto de riesgo del mandato en vez
+            # de buscar el óptimo de utilidad. Solo se usa cuando la cartera
+            # sale POR DEBAJO del piso de su perfil, que es el caso en que el
+            # cliente está recibiendo menos riesgo del que contrató. El techo de
+            # volatilidad y todas las demás restricciones siguen puestas.
+            objective = cp.Maximize(mu @ w)
+        else:
+            objective = cp.Maximize(
+                mu @ w - (risk_aversion / 2) * cp.quad_form(w, cp.psd_wrap(sigma)))
         problem = cp.Problem(objective, constraints)
 
         status = "unsolved"
@@ -1106,21 +1292,32 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
     solution, status = solve(frozenset())
 
-    if solution is None and sectors and sector_cap is not None:
-        # Name the sector ceiling as the cause instead of leaving a bare
-        # "infeasible". Solving again without it is the only way to know: if
-        # the same problem solves once that one constraint is gone, that
-        # constraint is the reason, and the desk can raise it or widen the
-        # basket knowing which of the two to do.
-        sin_sector, _ = solve(frozenset(), with_sectors=False)
-        if sin_sector is not None:
-            infeasible_reasons.insert(0, (
+    if solution is None:
+        # Name the constraint that caused it instead of leaving a bare
+        # "infeasible". Dropping one at a time is the only way to know: if the
+        # same problem solves once a constraint is gone, that constraint is the
+        # reason, and the desk can relax it or widen the basket knowing which
+        # of the two to do.
+        culpables: list[tuple[str, dict]] = []
+        if sectors and sector_cap is not None:
+            culpables.append((
                 f"El tope sectorial de {sector_cap:.0%} es lo que deja la "
                 "cartera sin solución: sin él sí resuelve. La cesta no tiene "
                 "suficientes industrias distintas para llenar el libro bajo ese "
                 "techo — amplía la cesta o sube el tope, pero decídelo, no lo "
-                "descubras por un resultado vacío."
-            ))
+                "descubras por un resultado vacío.", {"with_sectors": False}))
+        if pairs:
+            culpables.append((
+                f"La coherencia con las {len(pairs)} view(s) relativa(s) es lo "
+                "que deja la cartera sin solución: sin ella sí resuelve. Alguna "
+                "pata larga no puede alcanzar a su corta bajo las bandas — "
+                "revisa esa view antes de apagar la restricción.",
+                {"with_views": False}))
+
+        for mensaje, kwargs in culpables:
+            if solve(frozenset(), **kwargs)[0] is not None:
+                infeasible_reasons.insert(0, mensaje)
+                break
 
     if solution is None:
         # A bare "infeasible" is not a diagnosis. Lead with the structural
@@ -1143,37 +1340,84 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     # the solution to any stated problem, while still being presented as one.
     # Each pass here is a genuine constrained optimization, so every limit in
     # the Investment Procedure still holds exactly.
-    if min_position and min_position > 0:
+    def apply_min_position(sol: np.ndarray, st: str, mode: str
+                           ) -> tuple[np.ndarray, str, set[str], list[str]]:
+        avisos: list[str] = []
         banned: set[str] = set()
+        if not (min_position and min_position > 0):
+            return sol, st, banned, avisos
+
         for _ in range(MAX_MIN_POSITION_PASSES):
-            held = pd.Series(solution, index=tickers)
+            held = pd.Series(sol, index=tickers)
             too_small = [t for t, v in held.items()
                          if t not in banned and WEIGHT_EPS < v < min_position]
             if not too_small:
                 break
             candidate_ban = banned | set(too_small)
-            retry, retry_status = solve(frozenset(candidate_ban))
+            retry, retry_status = solve(frozenset(candidate_ban), mode=mode)
             if retry is None:
-                notes.append(
+                avisos.append(
                     f"No se pudo aplicar el mínimo de {min_position:.1%} a "
                     f"{sorted(too_small)}: sin ellos la cartera no tiene "
                     "solución factible, así que se conservan. Revisa si la "
                     "cesta da para el número de posiciones que exige el mandato."
                 )
                 break
-            banned, solution, status = candidate_ban, retry, retry_status
+            banned, sol, st = candidate_ban, retry, retry_status
         else:
-            notes.append(
+            avisos.append(
                 f"El mínimo de {min_position:.1%} no convergió en "
                 f"{MAX_MIN_POSITION_PASSES} pasadas; se reporta la última "
                 "solución factible."
             )
         if banned:
-            notes.append(
+            avisos.append(
                 f"{len(banned)} posición(es) descartada(s) por quedar debajo "
                 f"del mínimo de {min_position:.1%}: {', '.join(sorted(banned))}. "
                 "El peso se redistribuyó re-optimizando, no repartiendo a mano."
             )
+        return sol, st, banned, avisos
+
+    def annual_vol(sol: np.ndarray) -> float:
+        return float(np.sqrt(max(float(sol @ sigma @ sol), 0.0)))
+
+    solution, status, _banned, _avisos = apply_min_position(
+        solution, status, "utility")
+    notes.extend(_avisos)
+
+    # --- Risk floor: spend the mandate's budget --------------------------
+    #
+    # The utility optimum can land below the floor the mandate implies, and no
+    # constraint can pull it up: ``w'Sigma w >= min**2`` is reverse convex. What
+    # *is* convex is maximizing return under the ceiling, so when the book comes
+    # in short of its own floor it is re-solved that way -- the risk budget
+    # becomes something the portfolio is built to use rather than merely to
+    # respect. Every other limit stays in force, and the swap only happens if it
+    # actually raises the volatility.
+    # Solo con views. Sin nada que decir, la cartera ES el ancla del mandato --
+    # esa propiedad es la que hace del ancla un neutral de verdad y no se
+    # sacrifica por el piso. Si la asignación estratégica del Procedimiento
+    # produce menos riesgo del que el rango dice, eso es una contradicción entre
+    # dos documentos del Comité, y se reporta como incumplimiento en vez de
+    # taparse cambiando la asignación estratégica por una cartera de retorno
+    # máximo que nadie aprobó.
+    if views and piso_vol is not None and annual_vol(solution) < piso_vol - 1e-6:
+        alterna, alterna_status = solve(frozenset(), mode="max_return")
+        if alterna is not None:
+            alterna, alterna_status, _, avisos_alt = apply_min_position(
+                alterna, alterna_status, "max_return")
+            if annual_vol(alterna) > annual_vol(solution) + 1e-9:
+                notes.append(
+                    f"La cartera de utilidad máxima salía en "
+                    f"{annual_vol(solution):.2%} de volatilidad, por debajo del "
+                    f"piso de {piso_vol:.1%} de {strategy}. Se resolvió otra vez "
+                    f"maximizando retorno contra el techo de "
+                    f"{float(techo_vol):.1%}, y quedó en {annual_vol(alterna):.2%}. "
+                    "El presupuesto de riesgo del mandato es parte del objetivo, "
+                    "no solo un límite."
+                )
+                solution, status = alterna, alterna_status
+                notes.extend(avisos_alt)
 
     weights = pd.Series(solution, index=tickers).clip(lower=0.0)
     weights[weights < WEIGHT_EPS] = 0.0
@@ -1197,6 +1441,26 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     # sector map, a solver that returned "optimal_inaccurate", or a constraint
     # that never got built.
     allocation.breaches += audit_sectors(allocation.weights, sectors, sector_cap)
+    allocation.breaches += view_coherence_breaches(allocation.weights, pairs)
+
+    # El piso de volatilidad no se puede imponer -- es convexo al revés -- así
+    # que aquí es donde se detecta. Una cartera por debajo del piso de su
+    # mandato no es prudente, es otro mandato.
+    if piso_vol is not None and allocation.volatility < piso_vol - 1e-6:
+        allocation.risk_findings.append(
+            f"Volatilidad {allocation.volatility:.2%} por DEBAJO del piso de "
+            f"{piso_vol:.1%} que la mesa fija para {strategy}: la cartera "
+            "asume menos riesgo del que el mandato contrató, y ni siquiera "
+            "maximizando retorno contra el techo se alcanza. La cesta no da "
+            "para este mandato — amplíala o revisa el rango con el Comité."
+        )
+    if techo_vol is not None and allocation.volatility > techo_vol + 1e-6:
+        allocation.risk_findings.append(
+            f"Volatilidad {allocation.volatility:.2%} por ENCIMA del techo de "
+            f"{techo_vol:.1%} de {strategy}. No se impone como restricción a "
+            "propósito: un techo que la cesta no puede cumplir devolvería cero "
+            "cartera en vez de esta advertencia."
+        )
     if sectors:
         allocation.sector_exposure = sector_exposures(allocation.weights, sectors)
     return allocation
@@ -1270,6 +1534,146 @@ def audit_bands(allocation: Allocation,
             breaches.append(f"{clase}: {exposure:.2%} bajo la banda mínima {low:.2%}")
 
     return breaches
+
+
+def drawdown_metrics(weights: pd.Series | Mapping[str, float],
+                     returns: pd.DataFrame | None,
+                     periods_per_year: int = TRADING_DAYS) -> dict[str, float]:
+    """
+    Caída de la cartera **en la muestra**, aplicando los pesos de hoy al pasado.
+
+    No es un backtest y no debe presentarse como uno: estos pesos no existían
+    entonces, salieron de un modelo que vio ese mismo período. Es la respuesta a
+    "cuánto habría caído esta cartera si la hubieras tenido puesta", que sigue
+    siendo la pregunta que un comité hace, con la advertencia puesta al lado.
+
+    Devuelve ``max_drawdown`` (la peor caída pico a valle) y ``peor_12m`` (el
+    peor retorno móvil de doce meses), los dos como números negativos.
+    """
+    if returns is None or returns.empty:
+        return {}
+    held = {t: float(w) for t, w in
+            (weights.items() if hasattr(weights, "items") else weights)
+            if float(w) > WEIGHT_EPS and t in returns.columns}
+    if not held:
+        return {}
+
+    serie = returns[list(held)].mul(pd.Series(held), axis=1).sum(axis=1).dropna()
+    if len(serie) < periods_per_year // 4:
+        return {}
+
+    curva = (1.0 + serie).cumprod()
+    caida = curva / curva.cummax() - 1.0
+    out = {"max_drawdown": float(caida.min())}
+
+    if len(curva) > periods_per_year:
+        rodante = curva / curva.shift(periods_per_year) - 1.0
+        out["peor_12m"] = float(rodante.min())
+    return out
+
+
+def risk_profile_table(covariance: pd.DataFrame,
+                       asset_types: Mapping[str, str],
+                       caps: Mapping[str, float] | None,
+                       views: Sequence[Mapping[str, Any]],
+                       *, returns: pd.DataFrame | None = None,
+                       sector_weights: Mapping[str, Mapping[str, float]] | None = None,
+                       strategies: Sequence[str] = tuple(REGULACIONES),
+                       min_position: float | None = MIN_POSITION,
+                       ) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Retorno y riesgo esperados de los cuatro mandatos, resueltos de verdad.
+
+    Cada estrategia se resuelve entera — su propia ancla del Modelo de
+    Asignación, su propio lambda, sus bandas, su tope sectorial y su techo de
+    volatilidad — con la **misma cesta y las mismas views**. Así lo único que
+    separa una fila de otra es el mandato.
+
+    Sirve para una pregunta que el sistema no podía contestar: *¿la cartera
+    Agresiva asume más riesgo y espera más retorno que la Moderada?* Nada lo
+    garantizaba, porque las cuatro optimizaban la misma función y las bandas son
+    techos. Las notas devuelven cada inversión del orden que se encuentre.
+    """
+    filas: list[dict[str, Any]] = []
+    for estrategia in strategies:
+        presupuesto = gross_budget(estrategia)
+        ancla, _ = policy_weights(asset_types, estrategia, caps=caps,
+                                  total=presupuesto)
+        # El equilibrio usa el lambda del MERCADO, no el del cliente. Son dos
+        # cosas distintas y confundirlas rompe la comparación: pi = delta*Sigma*w
+        # describe qué retornos hacen del portafolio de mercado un óptimo para
+        # el inversionista promedio, y no cambia porque este cliente sea
+        # conservador. Al meterle el lambda del mandato, la Agresiva salía con
+        # retornos esperados mecánicamente más bajos que la Moderada — un
+        # artefacto de escala, no una propiedad de la cartera. El apetito del
+        # cliente vive en la función objetivo, que es donde lo aplica optimize().
+        pi = implied_equilibrium(ancla, covariance, risk_aversion=RISK_AVERSION)
+        er, cov_post = posterior(pi, covariance, views)
+        lam = risk_aversion_for(estrategia, RISK_AVERSION)
+        alloc = optimize(er, cov_post, asset_types, estrategia,
+                         min_position=min_position,
+                         sector_weights=sector_weights, views=views,
+                         anchor=ancla, prior=pi)
+
+        piso, techo = RISK_TARGETS.get(estrategia, (float("nan"),) * 2)
+        fila = {
+            "estrategia": estrategia,
+            "lambda": lam,
+            "estado": alloc.status,
+            "retorno_esperado": alloc.expected_return if alloc.feasible else float("nan"),
+            "volatilidad": alloc.volatility if alloc.feasible else float("nan"),
+            "vol_min_objetivo": piso,
+            "vol_max_objetivo": techo,
+            "posiciones": int((alloc.weights > WEIGHT_EPS).sum()),
+            "incumplimientos": " | ".join(alloc.breaches),
+            "riesgo_vs_mandato": " | ".join(alloc.risk_findings) or "dentro del rango",
+        }
+        fila.update(drawdown_metrics(alloc.weights, returns))
+        # Pérdida anual que solo se supera 1 año de cada 20, bajo normalidad.
+        # La normalidad es falsa en las colas y por eso el número va etiquetado
+        # en la hoja: subestima lo que pasa en un mercado malo de verdad.
+        if alloc.feasible:
+            fila["caida_1a_95"] = (alloc.expected_return
+                                   - 1.645 * alloc.volatility)
+        filas.append(fila)
+
+    tabla = pd.DataFrame(filas)
+    return tabla, coherence_notes(tabla)
+
+
+def coherence_notes(tabla: pd.DataFrame) -> list[str]:
+    """
+    Lo que hay que mirar en la tabla de riesgo antes de creérsela.
+
+    Separado de :func:`risk_profile_table` para poder verificarlo sin resolver
+    cuatro optimizaciones: una comprobación que solo se ejerce a través de un
+    solver acaba sin probarse en el caso que importa, que es cuando falla.
+    """
+    notas: list[str] = []
+    if tabla.empty or "retorno_esperado" not in tabla:
+        return notas
+
+    viables = tabla[tabla["retorno_esperado"].notna()]
+    for columna, etiqueta in (("volatilidad", "riesgo"),
+                              ("retorno_esperado", "retorno esperado")):
+        valores = list(viables[columna])
+        if valores != sorted(valores):
+            orden = ", ".join(f"{e} {v:.2%}" for e, v in
+                              zip(viables["estrategia"], valores))
+            notas.append(
+                f"El {etiqueta} NO crece con el perfil: {orden}. Un mandato más "
+                "agresivo que asume menos que uno más conservador es una "
+                "contradicción con lo que el cliente firmó."
+            )
+
+    fuera = viables[(viables["volatilidad"] < viables["vol_min_objetivo"] - 1e-6)
+                    | (viables["volatilidad"] > viables["vol_max_objetivo"] + 1e-6)]
+    for _, f in fuera.iterrows():
+        notas.append(
+            f"{f['estrategia']}: volatilidad {f['volatilidad']:.2%} fuera de su "
+            f"rango objetivo {f['vol_min_objetivo']:.1%}–{f['vol_max_objetivo']:.1%}."
+        )
+    return notas
 
 
 def allocation_table(allocation: Allocation,

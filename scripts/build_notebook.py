@@ -860,11 +860,12 @@ def build_cells() -> list[dict]:
         "resultado — así las bandas del mandato siguen cumpliéndose exactas. "
         "Pon 0 para desactivarlo.\n",
         "\n",
-        "from screener.optimizer import (core_vehicles, implied_equilibrium,\n",
-        "                               market_weights,\n",
+        "from screener.optimizer import (RISK_AVERSION, core_vehicles,\n",
+        "                               implied_equilibrium, market_weights,\n",
         "                               optimize, policy_weights, posterior,\n",
-        "                               shrunk_covariance, allocation_table,\n",
-        "                               select_basket, gross_budget)\n",
+        "                               risk_profile_table, shrunk_covariance,\n",
+        "                               allocation_table, select_basket,\n",
+        "                               gross_budget)\n",
         "from screener.cci_regulation import REGULACIONES\n",
         "from screener.cci_regulation import classify_for_bands\n",
         "from screener.yahoo_adapter import daily_returns, fetch_market_caps\n",
@@ -918,7 +919,11 @@ def build_cells() -> list[dict]:
         "    if _peso > 0.0001:\n",
         "        print(f'  {_peso:7.2%}  {_clase}')\n",
         "\n",
-        "pi = implied_equilibrium(pesos_ancla, covarianza)\n",
+        "# El equilibrio usa el lambda del MERCADO. El del cliente entra en\n",
+        "# optimize(): son dos cosas distintas y confundirlas hace que la\n",
+        "# Agresiva salga con menos retorno esperado que la Moderada.\n",
+        "pi = implied_equilibrium(pesos_ancla, covarianza,\n",
+        "                         risk_aversion=RISK_AVERSION)\n",
         "er_posterior, cov_posterior = posterior(pi, covarianza, views)\n",
         "\n",
         "tipos = tipos_todos\n",
@@ -958,7 +963,9 @@ def build_cells() -> list[dict]:
         "\n",
         "cartera = optimize(er_posterior, cov_posterior, tipos, ESTRATEGIA_CCI,\n",
         "                   min_position=POSICION_MINIMA or None,\n",
-        "                   sector_weights=mapa_sectores)\n",
+        "                   sector_weights=mapa_sectores,\n",
+        "                   views=views,\n",
+        "                   anchor=pesos_ancla, prior=pi)\n",
         "\n",
         "print(f'{ESTRATEGIA_CCI}  |  estado: {cartera.status}')\n",
         "print(f'Exposicion bruta   {cartera.gross_exposure:.1%}')\n",
@@ -978,6 +985,12 @@ def build_cells() -> list[dict]:
         "    for _s, _v in cartera.sector_exposure.items():\n",
         "        if _v > 0.0001:\n",
         "            print(f'  {_v:7.2%}  {_s}')\n",
+        "\n",
+        "if cartera.risk_findings:\n",
+        "    print('\\nRIESGO vs. MANDATO (expectativa de la mesa, no del '\n",
+        "          'Procedimiento):')\n",
+        "    for _r in cartera.risk_findings:\n",
+        "        print(f'  {_r}')\n",
         "\n",
         "if cartera.breaches:\n",
         "    print('\\nAUDITORIA — INCUMPLIMIENTOS:')\n",
@@ -1008,6 +1021,72 @@ def build_cells() -> list[dict]:
         "    .map(lambda v: escala(v, 0, 0.12), subset=['peso'])\n",
         "    .hide(axis='index')\n",
         "    .set_caption(f'Cartera optimizada — {ESTRATEGIA_CCI}'))\n",
+    ))
+
+    # ------------------------------------------------------ riesgo por perfil
+    cells.append(md(
+        "## 11c · Riesgo esperado por perfil\n",
+        "\n",
+        "Los cuatro mandatos resueltos con la **misma cesta y las mismas "
+        "views**. Lo único que cambia entre filas es el mandato.\n",
+        "\n",
+        "### El problema que cierra\n",
+        "\n",
+        "Las cuatro estrategias optimizaban **la misma función**, con "
+        "`λ = 2.5` para todas. La única diferencia entre una cartera Agresiva y "
+        "una Conservadora era el ancho de sus bandas — y una banda es un techo: "
+        "nada obligaba a la Agresiva a usarlo. Dos mandatos con distinto "
+        "apetito de riesgo que maximizan la misma utilidad no son dos "
+        "mandatos.\n",
+        "\n",
+        "Ahora cada uno lleva su propia aversión al riesgo: **8.0 / 5.0 / 2.5 / "
+        "1.5**. Un λ alto compra tranquilidad, uno bajo compra retorno "
+        "esperado, que es exactamente lo que el cliente firmó.\n",
+        "\n",
+        "### Cómo leer cada columna\n",
+        "\n",
+        "| Columna | Qué es | Cuánto creerle |\n",
+        "|---|---|---|\n",
+        "| `retorno_esperado` | `w'μ` con la posterior | Sale del modelo. "
+        "Depende del IC supuesto, que **no está calibrado**. |\n",
+        "| `volatilidad` | `√(w'Σw)` anual | Lo más sólido de la tabla: "
+        "covarianza estimada con contracción sobre datos diarios. |\n",
+        "| `max_drawdown` | Peor caída pico a valle **de estos pesos aplicados "
+        "al pasado** | No es un backtest. Estos pesos no existían entonces y "
+        "salieron de un modelo que vio ese mismo período. |\n",
+        "| `peor_12m` | Peor retorno móvil de 12 meses, misma advertencia | "
+        "Igual. Es historia de la cartera de hoy, no de la estrategia. |\n",
+        "| `caida_1a_95` | `μ − 1.645σ` | Paramétrica y **normal**. Las colas "
+        "reales son más gordas: en un mercado malo de verdad se queda corta. |\n",
+        "\n",
+        "### El techo y el piso no se tratan igual\n",
+        "\n",
+        "`w'Σw ≤ máx²` es convexa y el solver la impone. `w'Σw ≥ mín²` es "
+        "convexa **al revés** y no se puede pedir. Así que el techo se aplica y "
+        "el piso se audita: una cartera Agresiva por debajo de su piso sale "
+        "reportada como incumplimiento, porque lo es — un cliente que firmó "
+        "Agresivo no contrató una cartera Moderada.\n",
+        "\n",
+        "Los rangos de volatilidad son **de la mesa, no del Procedimiento**, "
+        "que no habla de volatilidad. Pendientes del Comité.\n",
+    ))
+    cells.append(code(
+        "riesgo_df, _notas_riesgo = risk_profile_table(\n",
+        "    covarianza, _tipos_cesta, capitalizaciones, views,\n",
+        "    returns=retornos, sector_weights=mapa_sectores,\n",
+        "    min_position=POSICION_MINIMA or None)\n",
+        "\n",
+        "for _n in _notas_riesgo:\n",
+        "    print(f'AVISO: {_n}')\n",
+        "if not _notas_riesgo:\n",
+        "    print('Riesgo y retorno crecen con el perfil, como debe ser.')\n",
+        "\n",
+        "_pct = ['retorno_esperado', 'volatilidad', 'vol_min_objetivo',\n",
+        "        'vol_max_objetivo', 'max_drawdown', 'peor_12m', 'caida_1a_95']\n",
+        "(riesgo_df[['estrategia', 'lambda'] + _pct + ['posiciones']].style\n",
+        "    .format({c: '{:.2%}' for c in _pct if c in riesgo_df})\n",
+        "    .hide(axis='index')\n",
+        "    .set_caption('Riesgo y retorno esperados por mandato'))\n",
     ))
 
     # --------------------------------------------------------- transparencia
@@ -1254,6 +1333,7 @@ def build_cells() -> list[dict]:
         "    views_excel.to_excel(_xl, sheet_name='Views BL', index=False)\n",
         "    cartera_df.to_excel(_xl, sheet_name='Cartera', index=False)\n",
         "    sectores_df.to_excel(_xl, sheet_name='Sectores', index=False)\n",
+        "    riesgo_df.to_excel(_xl, sheet_name='Riesgo', index=False)\n",
         "    cesta_df.to_excel(_xl, sheet_name='Cesta', index=False)\n",
         "    universo.to_excel(_xl, sheet_name='Universo', index=False)\n",
         "    _cov.to_excel(_xl, sheet_name='Cobertura', index=False)\n",

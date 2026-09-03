@@ -195,6 +195,58 @@ SECTOR_CAPS: dict[str, float | None] = {
 
 
 # --------------------------------------------------------------------------
+# Risk appetite
+# --------------------------------------------------------------------------
+#
+# Aversión al riesgo por mandato, el coeficiente ``lambda`` de
+# ``max w'mu - (lambda/2) w'Sigma w``.
+#
+# Hasta aquí las cuatro estrategias resolvían con **el mismo 2.5**. La única
+# diferencia entre una cartera Agresiva y una Conservadora era el ancho de sus
+# bandas, y una banda es un techo: nada obligaba a la Agresiva a *usarlo*. Dos
+# mandatos con distinto apetito de riesgo que optimizan la misma función no son
+# dos mandatos, son el mismo con distinto papel.
+#
+# Un lambda alto compra tranquilidad y un lambda bajo compra retorno esperado,
+# que es exactamente la diferencia que el cliente firmó.
+#
+# Consecuencia que conviene saber: lambda también escala el equilibrio
+# (``pi = lambda * Sigma * w``). Con lambda bajo los retornos de equilibrio son
+# más chicos, así que **las views pesan relativamente más en la Agresiva**. Es
+# coherente con el mandato — quien pide retorno paga por convicción — pero es un
+# efecto, no una casualidad.
+RISK_AVERSION_BY_STRATEGY: dict[str, float] = {
+    "Conservador_Defensivo": 8.0,
+    "Conservador": 5.0,
+    "Moderado": 2.5,          # el valor que traía el documento técnico de CCI
+    "Agresivo": 1.5,
+}
+
+#: Volatilidad anual esperada de cada mandato: ``(mínima, máxima)``.
+#:
+#: NO salen del Procedimiento de Inversión, que no habla de volatilidad. Son de
+#: la mesa y hay que confirmarlas con el Comité.
+#:
+#: Los dos extremos NO se tratan igual, y la razón es matemática, no de
+#: criterio. ``w'Sigma w <= max**2`` es una restricción convexa y el solver la
+#: aplica. ``w'Sigma w >= min**2`` es convexa al revés: no se puede pedir. Así
+#: que el techo se **impone** y el piso se **audita** — si una cartera Agresiva
+#: sale por debajo de su piso, la corrida lo reporta como incumplimiento, que es
+#: lo que es: un cliente que firmó Agresivo no contrató una cartera Moderada.
+RISK_TARGETS: dict[str, tuple[float, float]] = {
+    "Conservador_Defensivo": (0.015, 0.070),
+    "Conservador": (0.035, 0.105),
+    "Moderado": (0.065, 0.150),
+    "Agresivo": (0.100, 0.240),
+}
+
+
+def risk_aversion_for(strategy: str, default: float = 2.5) -> float:
+    """El ``lambda`` del mandato. Se usa en el equilibrio y en el objetivo."""
+    return float(RISK_AVERSION_BY_STRATEGY.get(strategy, default))
+
+
+# --------------------------------------------------------------------------
 # Core index exposures
 # --------------------------------------------------------------------------
 #

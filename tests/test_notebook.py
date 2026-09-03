@@ -350,10 +350,10 @@ def test_cells_execute() -> None:
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the ten documented sheets",
+    check("workbook has the eleven documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
-                                 "Cartera", "Sectores", "Cesta", "Universo",
-                                 "Cobertura", "Parametros"},
+                                 "Cartera", "Sectores", "Riesgo", "Cesta",
+                                 "Universo", "Cobertura", "Parametros"},
           f"got {wb.sheetnames}")
 
     # The sector ceiling is a constraint now, so it has to reach the reader of
@@ -459,7 +459,8 @@ def test_cells_execute() -> None:
           str(namespace.get("_notas_ancla")))
 
     # ---- sector ceiling ---------------------------------------------------
-    from screener.cci_regulation import SECTOR_CAPS
+    from screener.cci_regulation import REGULACIONES as _REGS, SECTOR_CAPS
+    REGULACIONES = _REGS
 
     sector_cap = SECTOR_CAPS[strategy]
     exposure = cartera.sector_exposure
@@ -485,6 +486,40 @@ def test_cells_execute() -> None:
     check("the run names the sector ceiling as the desk's, not the mandate's",
           any("Procedimiento" in n and "Comité" in n for n in cartera.notes),
           "a number we invented must not read as a regulatory limit")
+
+    # ---- risk by mandate --------------------------------------------------
+    riesgo = namespace["riesgo_df"]
+    check("the notebook solves all four mandates for comparison",
+          set(riesgo["estrategia"]) == set(REGULACIONES), str(list(riesgo["estrategia"])))
+    check("each mandate carries its own risk aversion",
+          riesgo["lambda"].nunique() == 4, str(list(riesgo["lambda"])))
+    check("the risk table reports an expected drawdown, not only volatility",
+          "max_drawdown" in riesgo and riesgo["max_drawdown"].notna().any())
+    viables = riesgo[riesgo["retorno_esperado"].notna()]
+    check("risk rises with the profile",
+          list(viables["volatilidad"]) == sorted(viables["volatilidad"]),
+          str(list(viables["volatilidad"])))
+    check("and so does expected return",
+          list(viables["retorno_esperado"]) == sorted(viables["retorno_esperado"]),
+          str(list(viables["retorno_esperado"])))
+
+    sheet = [c.value for c in next(wb["Riesgo"].iter_rows(max_row=1))]
+    check("the Riesgo sheet carries the mandate's target range beside the result",
+          {"vol_min_objetivo", "vol_max_objetivo", "volatilidad",
+           "retorno_esperado", "max_drawdown"} <= set(sheet), str(sheet))
+
+    # ---- view coherence ---------------------------------------------------
+    # The defect: a view saying MU beats LRCX, and a book holding 5.84% of MU
+    # against 5.85% of LRCX -- positioned, barely, against its own call.
+    from screener.optimizer import relative_view_pairs, view_coherence_breaches
+
+    pares = relative_view_pairs(views, cartera.weights.index)
+    check("the run states which relative views constrain the book",
+          not pares or any("Coherencia" in n for n in cartera.notes),
+          str(cartera.notes))
+    check("the portfolio never weighs the losing leg above the winning one",
+          not view_coherence_breaches(cartera.weights, pares),
+          str(view_coherence_breaches(cartera.weights, pares)))
 
     # ---- transparency (look-through) --------------------------------------
     # Colab is the only place most of this gets run, so the notebook has to

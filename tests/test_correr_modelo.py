@@ -7,7 +7,7 @@ bearing tests here are not "it produces a file" -- they are:
 
 * every stage actually ran (a script that silently skips the optimizer and
   still writes a workbook is worse than one that crashes),
-* the workbook it writes has the same ten sheets as the notebook's,
+* the workbook it writes has the same eleven sheets as the notebook's,
 * the proposals JSON lands under ``propuestas/`` and carries no internal keys,
 * and the command-line flags reach the model rather than being parsed and
   ignored -- which is the failure mode that leaves someone running Moderado
@@ -131,7 +131,7 @@ def test_every_stage_runs() -> None:
 
 
 def test_workbook_matches_the_notebook_shape() -> None:
-    """Same ten sheets the notebook writes, in the same order."""
+    """Same eleven sheets the notebook writes, in the same order."""
     from openpyxl import load_workbook
 
     _, tmp = run_script()
@@ -140,9 +140,9 @@ def test_workbook_matches_the_notebook_shape() -> None:
 
     wb = load_workbook(book)
     expected = ["Ranking", "Bloques", "Perfiles", "Views BL",
-                "Cartera", "Sectores", "Cesta", "Universo", "Cobertura",
-                "Parametros"]
-    check("ten sheets, matching the notebook", wb.sheetnames == expected,
+                "Cartera", "Sectores", "Riesgo", "Cesta", "Universo",
+                "Cobertura", "Parametros"]
+    check("eleven sheets, matching the notebook", wb.sheetnames == expected,
           str(wb.sheetnames))
     check("the Cartera sheet is never blank -- positions or a stated reason",
           wb["Cartera"].max_row > 1)
