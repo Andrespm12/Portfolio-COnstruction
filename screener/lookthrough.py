@@ -180,6 +180,11 @@ def load_holdings(directory: str | Path) -> tuple[dict[str, dict[str, float]],
         return {}, {}, [f"No existe el directorio de tenencias: {directory}"]
 
     for archivo in sorted(directory.glob("*.csv")):
+        # Los archivos que empiezan con "_" son auxiliares del descargador
+        # (_sectores.csv, _canasta.csv), no tenencias de un fondo. Intentar
+        # parsearlos generaría una nota de error por algo que está bien.
+        if archivo.name.startswith("_"):
+            continue
         etf = archivo.stem.strip().upper()
         try:
             pesos, secs = parse_holdings_csv(archivo)
@@ -250,6 +255,84 @@ def sector_exposure(exposicion: Mapping[str, float],
             s = sectores.get(emisor.upper()) or "Sin clasificar"
         out[s] = out.get(s, 0.0) + peso
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+def load_fund_sectors(path: str | Path) -> dict[str, dict[str, float]]:
+    """
+    Desglose sectorial por fondo, de ``_sectores.csv`` (fondo,sector,peso).
+
+    Es una fuente mejor que deducir el sector de las tenencias parciales: el
+    emisor publica el desglose **completo**, así que no es una muestra de las
+    mayores posiciones sino el total del fondo. Devuelve ``{}`` si no existe.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    filas = list(csv.reader(path.read_text(encoding="utf-8-sig").splitlines()))
+    for fila in filas[1:]:
+        if len(fila) < 3:
+            continue
+        fondo, sector = fila[0].strip().upper(), fila[1].strip()
+        peso = _to_float(fila[2])
+        if not fondo or not sector or peso is None or peso <= 0:
+            continue
+        mapa = out.setdefault(fondo, {})
+        mapa[sector] = mapa.get(sector, 0.0) + peso
+    # Los emisores publican en fracción o en por ciento según el campo.
+    for fondo, mapa in out.items():
+        total = sum(mapa.values())
+        if total > 0:
+            out[fondo] = {k: v / total for k, v in mapa.items()}
+    return out
+
+
+def sector_exposure_direct(weights: Mapping[str, float],
+                           fund_sectors: Mapping[str, Mapping[str, float]],
+                           stock_sectors: Mapping[str, str],
+                           ) -> tuple[dict[str, float], float, list[str]]:
+    """
+    Exposición sectorial usando el desglose completo de cada fondo.
+
+    No pasa por las tenencias: un fondo aporta sus sectores directamente, una
+    acción aporta el suyo. Eso da un número **completo** en vez de uno derivado
+    de las mayores posiciones, y funciona aunque no tengas ni un archivo de
+    tenencias.
+
+    Devuelve la exposición, la cobertura y las notas. Lo que no se puede
+    clasificar se declara, nunca se reparte entre lo conocido.
+    """
+    out: dict[str, float] = {}
+    visto = 0.0
+    sin_clasificar: list[tuple[str, float]] = []
+
+    for ticker, peso in weights.items():
+        if not peso or peso <= 0:
+            continue
+        tk = ticker.upper()
+        mapa = fund_sectors.get(tk)
+        if mapa:
+            visto += peso
+            for sector, share in mapa.items():
+                out[sector] = out.get(sector, 0.0) + peso * share
+            continue
+        sector = stock_sectors.get(tk)
+        if sector:
+            visto += peso
+            out[sector] = out.get(sector, 0.0) + peso
+        else:
+            out["Sin clasificar"] = out.get("Sin clasificar", 0.0) + peso
+            sin_clasificar.append((tk, peso))
+
+    total = sum(w for w in weights.values() if w and w > 0)
+    cobertura = visto / total if total > 0 else 0.0
+
+    notas = [f"Cobertura sectorial: {cobertura:.0%} del libro."]
+    if sin_clasificar:
+        detalle = ", ".join(f"{t} {w:.1%}" for t, w in
+                            sorted(sin_clasificar, key=lambda kv: -kv[1])[:8])
+        notas.append(f"Sin sector conocido: {detalle}.")
+    return dict(sorted(out.items(), key=lambda kv: -kv[1])), cobertura, notas
 
 
 def structural_overlap(a: str, b: str,

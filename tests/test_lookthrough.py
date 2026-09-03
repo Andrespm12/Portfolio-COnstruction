@@ -25,7 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from screener.lookthrough import (  # noqa: E402
     effective_exposure, issuer_cap_breaches, load_holdings, parse_holdings_csv,
-    report, sector_exposure, structural_overlap,
+    load_fund_sectors, report, sector_exposure,
+    sector_exposure_direct, structural_overlap,
 )
 
 PASSED = 0
@@ -272,6 +273,78 @@ def test_overlap_is_a_fact_not_an_inference() -> None:
           abs(structural_overlap("LLY", "JPM", holdings)) < 1e-9)
 
 
+SECTORES_CSV = """\
+fondo,sector,peso
+SPY,Technology,0.32
+SPY,Financials,0.13
+SPY,Healthcare,0.11
+SPY,Otros,0.44
+XLE,Energy,1.00
+"""
+
+
+def test_fund_sector_breakdown_is_complete_not_a_sample() -> None:
+    """
+    La ventaja de usar el desglose del emisor en vez de deducirlo.
+
+    Con tenencias parciales solo puedes clasificar las mayores posiciones y el
+    resto queda sin atribuir. El desglose por fondo es el total, así que la
+    exposición sectorial sale completa aunque no tengas ni un archivo de
+    tenencias.
+    """
+    tmp = _dir_with({"_sectores.csv": SECTORES_CSV})
+    fondos = load_fund_sectors(tmp / "_sectores.csv")
+
+    check("se leyeron los dos fondos", set(fondos) == {"SPY", "XLE"}, str(fondos))
+    check("cada fondo normaliza a uno",
+          all(abs(sum(v.values()) - 1.0) < 1e-9 for v in fondos.values()))
+
+    pesos = {"SPY": 0.50, "XLE": 0.20, "LLY": 0.30}
+    sec, cobertura, notas = sector_exposure_direct(
+        pesos, fondos, {"LLY": "Healthcare"})
+
+    check("el fondo aporta sus sectores prorrateados",
+          abs(sec["Technology"] - 0.16) < 1e-9, str(sec))
+    check("la acción aporta el suyo, y se suma al del fondo",
+          abs(sec["Healthcare"] - (0.055 + 0.30)) < 1e-9, str(sec))
+    check("el sectorial suma el libro entero",
+          abs(sum(sec.values()) - 1.0) < 1e-9, str(sum(sec.values())))
+    check("y la cobertura es total porque no faltó nada",
+          abs(cobertura - 1.0) < 1e-9, f"{cobertura}")
+
+    # Lo que no se puede clasificar se declara, no se reparte.
+    sec2, cob2, notas2 = sector_exposure_direct(
+        {"SPY": 0.5, "RARO": 0.5}, fondos, {})
+    check("un nombre sin sector cae en 'sin clasificar'",
+          abs(sec2["Sin clasificar"] - 0.5) < 1e-9, str(sec2))
+    check("y baja la cobertura", abs(cob2 - 0.5) < 1e-9, f"{cob2}")
+    check("y se nombra en las notas",
+          any("RARO" in n for n in notas2), str(notas2))
+
+
+def test_missing_sector_file_is_not_an_error() -> None:
+    check("sin archivo de sectores, se devuelve vacío",
+          load_fund_sectors("/no/existe/_sectores.csv") == {})
+
+
+def test_auxiliary_files_are_not_mistaken_for_holdings() -> None:
+    """
+    El descargador deja _sectores.csv y _canasta.csv junto a las tenencias.
+    Intentar parsearlos como un fondo produciría una nota de error por algo
+    que está perfectamente bien, y esa nota compite por atención con los
+    problemas de verdad.
+    """
+    tmp = _dir_with({"SPY.csv": SIMPLE, "_sectores.csv": SECTORES_CSV,
+                     "_canasta.csv": "fondo,metrica,valor\nSPY,priceToEarnings,22.4\n"})
+    holdings, _, notas = load_holdings(tmp)
+
+    check("solo el fondo entra como tenencias", set(holdings) == {"SPY"},
+          str(sorted(holdings)))
+    check("y los auxiliares no generan notas de error",
+          not any("_sectores" in n or "_canasta" in n for n in notas),
+          str(notas))
+
+
 def test_sector_exposure_declares_the_unknown() -> None:
     exp = {"AAPL": 0.4, "JPM": 0.3, "RARO": 0.3}
     sec = sector_exposure(exp, {"AAPL": "Tecnología", "JPM": "Financiero"})
@@ -293,6 +366,9 @@ def main() -> int:
         test_the_report_refuses_to_pretend_with_no_data,
         test_effective_exposure_catches_what_the_direct_cap_misses,
         test_overlap_is_a_fact_not_an_inference,
+        test_fund_sector_breakdown_is_complete_not_a_sample,
+        test_missing_sector_file_is_not_an_error,
+        test_auxiliary_files_are_not_mistaken_for_holdings,
         test_sector_exposure_declares_the_unknown,
     ]:
         fn()

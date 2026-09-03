@@ -186,7 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     from screener.cci_regulation import CLASE_EQUITY, REGULACIONES, classify_for_bands
     from screener.diagnostics import run_diagnostics
-    from screener.lookthrough import load_holdings, report
+    from screener.lookthrough import (load_fund_sectors, load_holdings,
+                                      report, sector_exposure_direct)
     from screener.optimizer import (
         ALLOW_LEVERAGE, gross_budget, allocation_table,
         implied_equilibrium, market_weights,
@@ -523,10 +524,24 @@ def main(argv: list[str] | None = None) -> int:
         print()
     acciones_cesta = [t for t in cartera.weights.index
                       if classify_for_bands(t, tipos_todos.get(t, "ETF")) == CLASE_EQUITY]
-    print(report(cartera.weights[cartera.weights > 0].to_dict(),
-                 tenencias, sectores_lt,
+    pesos_cartera = cartera.weights[cartera.weights > 0].to_dict()
+    print(report(pesos_cartera, tenencias, sectores_lt,
                  cap=REGULACIONES[args.estrategia]["max_equity_individual"],
                  only=acciones_cesta))
+
+    # El desglose sectorial del emisor es el total del fondo, no una muestra de
+    # sus mayores posiciones, así que da un número completo aunque las tenencias
+    # sean parciales. Cuando está, manda sobre el derivado de arriba.
+    fondos_sec = load_fund_sectors(Path(args.tenencias) / "_sectores.csv")
+    if fondos_sec:
+        sec_directo, cob_sec, notas_sec = sector_exposure_direct(
+            pesos_cartera, fondos_sec,
+            {r.ticker: r.sector for r in scored if r.sector})
+        print("\n  Exposición sectorial (desglose completo del emisor):")
+        for n in notas_sec:
+            print(f"    {n}")
+        for s, v in sec_directo.items():
+            print(f"    {v:>7.2%}  {s}")
 
     # ---------------------------------------------------------------- 9. export
     titulo("9 · ARCHIVOS")
