@@ -116,7 +116,13 @@ from screener.yahoo_adapter import build_market_data
 
 _frame = make_yf_frame(TICKERS, dividends={'SPY': 6.0, 'JPM': 4.0})
 if ('Volume', 'DBC') in _frame.columns:
-    _frame[('Volume', 'DBC')] = 250_000.0
+    # Land DBC's traded value at ~$25MM: above the aggressive profile's $10MM
+    # floor and below the conservative one's $50MM, so the three profiles score
+    # different sets of names. Derived from the fixture's own price rather than
+    # a fixed share count -- make_yf_frame prices a ticker by its position in
+    # the list, so a hardcoded volume silently drifts out of that window the
+    # moment a ticker is added ahead of it, which is exactly what happened.
+    _frame[('Volume', 'DBC')] = 25_000_000.0 / float(_frame[('Close', 'DBC')].mean())
 # Sectors for the single names. Without them the sector ceiling has nothing to
 # bind on for the equity sleeve, and the test would pass on a constraint that
 # never constrained anything. Four of the five are Technology on purpose: that
@@ -210,8 +216,12 @@ def test_cells_execute() -> None:
 
     # A small custom universe keeps the fixture fast and exercises the
     # custom-list branch of the parameter cell.
-    tickers = ["SPY", "QQQ", "IWM", "GLD", "TLT", "AAPL", "MSFT", "NVDA",
-               "JPM", "LLY", "DBC"]
+    # IVV is here to give one core exposure two candidates. Without a second
+    # one, core_vehicles never enters the branch that formats the runners-up,
+    # and that branch is what reached Colab with an AttributeError while every
+    # test passed: it read `.score`, and the object carries `score_0_100`.
+    tickers = ["SPY", "IVV", "QQQ", "IWM", "GLD", "TLT", "AAPL", "MSFT",
+               "NVDA", "JPM", "LLY", "DBC"]
     patched = 0
     for i, source in enumerate(cells):
         if "UNIVERSO =" in source:

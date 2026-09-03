@@ -727,22 +727,40 @@ def core_vehicles(scored: Sequence[Any],
         best = min(ranked, key=lambda t: _rank_of(eligible[t]))
         chosen[exposure] = best
         if len(ranked) > 1:
-            resto = ", ".join(f"{t} ({eligible[t].score:.0f})" for t in ranked
-                              if t != best)
+            resto = ", ".join(f"{t} ({_fmt_score(eligible[t])})"
+                              for t in ranked if t != best)
             notes.append(
                 f"Núcleo «{exposure}»: {best} "
-                f"(score {eligible[best].score:.0f}) sobre {resto}."
+                f"(score {_fmt_score(eligible[best])}) sobre {resto}."
             )
     return chosen, notes
 
 
+def _score_of(row: Any) -> float | None:
+    """
+    The 0-100 composite of a :class:`ScoredInstrument`.
+
+    Named for the attribute, not for the spreadsheet: the workbook exports the
+    column as ``score`` while the object carries ``score_0_100``, and reading
+    the sheet and assuming the field is what broke this in Colab.
+    """
+    value = getattr(row, "score_0_100", None)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if value != value else value      # descarta NaN
+
+
+def _fmt_score(row: Any) -> str:
+    score = _score_of(row)
+    return "sin score" if score is None else f"{score:.0f}"
+
+
 def _rank_of(row: Any) -> float:
     """Sort key that prefers a higher score; missing scores sort last."""
-    score = getattr(row, "score", None)
-    try:
-        return -float(score)
-    except (TypeError, ValueError):
-        return float("inf")
+    score = _score_of(row)
+    return float("inf") if score is None else -score
 
 
 def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,

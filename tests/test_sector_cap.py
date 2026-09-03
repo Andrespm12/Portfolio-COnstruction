@@ -14,7 +14,6 @@ declarado en vez de supuesto.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -28,16 +27,23 @@ from screener.lookthrough import (normalize_sector, sector_map,
                                   stock_sectors_for)
 from screener.optimizer import (audit_sectors, core_vehicles, optimize,
                                 sector_exposures, select_basket)
+from screener.scoring import ScoredInstrument
 
 
-@dataclass
-class Fila:
-    """Lo que select_basket / core_vehicles leen de un ScoredInstrument."""
-    ticker: str
-    score: float
-    asset_type: str = "ETF"
-    eligible: bool = True
-    sector: str | None = None
+def Fila(ticker: str, score: float, asset_type: str = "ETF",
+         eligible: bool = True, sector: str | None = None) -> ScoredInstrument:
+    """
+    Un ScoredInstrument de verdad, no un doble parecido.
+
+    Esto empezó como un dataclass propio con un campo ``score``, que es como se
+    llama la **columna del Excel**. El objeto real lo llama ``score_0_100``, así
+    que el código pasó todas las pruebas y reventó en Colab con
+    ``AttributeError`` en la primera corrida. Una prueba contra un doble que no
+    coincide con el original no prueba el original: prueba el doble.
+    """
+    return ScoredInstrument(
+        ticker=ticker, name=ticker, asset_type=asset_type, indices=[],
+        sector=sector, raw_metrics={}, score_0_100=score, eligible=eligible)
 
 
 def covarianza(tickers, vol=0.20, corr=0.3):
