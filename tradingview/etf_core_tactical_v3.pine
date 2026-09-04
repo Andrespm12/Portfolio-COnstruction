@@ -1,0 +1,153 @@
+//@version=6
+strategy("ETF Core + Tactical v3", overlay=true, initial_capital=100000,
+     pyramiding=2, default_qty_type=strategy.fixed,
+     commission_type=strategy.commission.percent,
+     commission_value=0.005, slippage=1,
+     process_orders_on_close=true, calc_on_order_fills=true)
+
+// Periodos de validacion
+segment = input.string("Full", "Segmento", options=["Full", "In-sample", "Out-of-sample"])
+startDate = input.time(timestamp("01 Jan 2007 00:00 +0000"), "Inicio")
+splitDate = input.time(timestamp("01 Jan 2021 00:00 +0000"), "Inicio OOS")
+endDate = input.time(timestamp("01 Jan 2027 00:00 +0000"), "Fin")
+
+insideDates = time >= startDate and time < endDate
+insideSegment = segment == "In-sample" ? insideDates and time < splitDate :
+     segment == "Out-of-sample" ? insideDates and time >= splitDate : insideDates
+
+// Parametros
+trendLength = input.int(200, "SMA diaria", minval=100, maxval=300)
+riskPctInput = input.float(1.0, "Riesgo tactico (%)", minval=0.25, maxval=2, step=0.25)
+rsiThreshold = input.float(22, "RSI tactico", minval=10, maxval=35)
+atrLength = input.int(14, "ATR", minval=5, maxval=30)
+tacticalStopAtr = input.float(1.75, "Stop tactico ATR", minval=1, maxval=3, step=0.05)
+tacticalTargetAtr = input.float(2.25, "Target tactico ATR", minval=1, maxval=5, step=0.05)
+
+isTqqq = syminfo.ticker == "TQQQ"
+coreAllocation = isTqqq ? 30.0 : 65.0
+maxAllocation = isTqqq ? 50.0 : 100.0
+riskScale = isTqqq ? 0.50 : 1.0
+atrScale = isTqqq ? 1.10 : 1.0
+
+// Datos diarios confirmados
+[dailyClose, dailySma, dailySmaPrior] = request.security(
+     syminfo.tickerid, "D",
+     [close[1], ta.sma(close, trendLength)[1], ta.sma(close, trendLength)[21]],
+     lookahead=barmerge.lookahead_on)
+
+bullRegime = dailyClose > dailySma * 1.005 and dailySma > dailySmaPrior
+bearRegime = dailyClose < dailySma * 0.995
+
+atrValue = ta.atr(atrLength)
+ema20 = ta.ema(close, 20)
+rsiValue = ta.rsi(close, 3)
+
+// Busca una entrada abierta por ID
+hasEntry(string requestedId) =>
+    bool found = false
+    if strategy.opentrades > 0
+        for tradeIndex = 0 to strategy.opentrades - 1
+            if strategy.opentrades.entry_id(tradeIndex) == requestedId
+                found := true
+    found
+
+coreOpen = hasEntry("Core")
+tacticalOpen = hasEntry("Tactical")
+
+// -----------------------------------------------------------------------------
+// Core: captura persistente del regimen alcista
+// -----------------------------------------------------------------------------
+var float coreStop = na
+var float coreHighest = na
+
+coreQty = math.floor(strategy.equity * coreAllocation / 100 / close)
+coreEntry = insideSegment and bullRegime and not coreOpen
+
+if coreEntry and coreQty >= 1
+    coreHighest := high
+    coreStop := close - atrValue * (isTqqq ? 5.0 : 4.0)
+    strategy.entry("Core", strategy.long, qty=coreQty)
+    strategy.exit("Core trail", "Core", stop=coreStop)
+
+if coreOpen
+    coreHighest := math.max(nz(coreHighest, high), high)
+    candidateCoreStop = coreHighest - atrValue * (isTqqq ? 4.5 : 3.5)
+    coreStop := math.max(nz(coreStop, candidateCoreStop), candidateCoreStop)
+    strategy.exit("Core trail", "Core", stop=coreStop)
+
+if coreOpen and bearRegime
+    strategy.close("Core", comment="Core regime exit")
+
+if not coreOpen and coreOpen[1]
+    coreStop := na
+    coreHighest := na
+
+// -----------------------------------------------------------------------------
+// Tactical: retroceso dentro del regimen alcista
+// -----------------------------------------------------------------------------
+pullbackDepth = (ema20 - close) / atrValue
+
+tacticalSignal = (
+     insideSegment and
+     coreOpen and
+     not tacticalOpen and
+     bullRegime and
+     close < ema20 and
+     close > dailySma and
+     pullbackDepth > 0 and
+     pullbackDepth < 1.75 and
+     rsiValue[1] < rsiThreshold and
+     close > close[1]
+)
+
+effectiveStopAtr = tacticalStopAtr * atrScale
+stopDistance = atrValue * effectiveStopAtr
+riskCapital = strategy.equity * riskPctInput * riskScale / 100
+riskQty = riskCapital / stopDistance
+
+currentPositionValue = math.abs(strategy.position_size) * close
+maximumPositionValue = strategy.equity * maxAllocation / 100
+remainingCapacity = math.max(maximumPositionValue - currentPositionValue, 0)
+capacityQty = remainingCapacity / close
+tacticalQty = math.floor(math.min(riskQty, capacityQty))
+
+var float tacticalEntryPrice = na
+var float tacticalStop = na
+var float tacticalTarget = na
+var bool tacticalBreakEven = false
+
+if tacticalSignal and tacticalQty >= 1
+    tacticalEntryPrice := close
+    tacticalStop := close - stopDistance
+    tacticalTarget := close + atrValue * tacticalTargetAtr * atrScale
+    tacticalBreakEven := false
+    strategy.entry("Tactical", strategy.long, qty=tacticalQty)
+    strategy.exit("Tactical exit", "Tactical",
+         stop=tacticalStop, limit=tacticalTarget)
+
+if tacticalOpen
+    if high >= tacticalEntryPrice + atrValue
+        tacticalBreakEven := true
+    if tacticalBreakEven
+        tacticalStop := math.max(tacticalStop, tacticalEntryPrice)
+    strategy.exit("Tactical exit", "Tactical",
+         stop=tacticalStop, limit=tacticalTarget)
+
+if tacticalOpen and bearRegime
+    strategy.close("Tactical", comment="Regime exit")
+
+if not tacticalOpen and tacticalOpen[1]
+    tacticalEntryPrice := na
+    tacticalStop := na
+    tacticalTarget := na
+    tacticalBreakEven := false
+
+if not insideSegment and strategy.position_size != 0
+    strategy.close_all(comment="End of test")
+
+plot(ema20, "EMA 20", color=color.orange)
+plot(dailySma, "SMA diaria", color=color.blue, linewidth=2)
+plot(coreOpen ? coreStop : na, "Core stop", color=color.red, style=plot.style_linebr)
+plot(tacticalOpen ? tacticalTarget : na, "Tactical target",
+     color=color.green, style=plot.style_linebr)
+bgcolor(bullRegime ? color.new(color.green, 93) : color.new(color.red, 95))

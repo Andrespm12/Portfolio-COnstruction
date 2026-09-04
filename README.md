@@ -782,6 +782,8 @@ snippets/
   test_notebook.py           Rebuilds, diffs and executes every notebook cell
   verify_js_engine.js        Extracts and runs the engine out of the built page
   compare_engines.py         Diffs JS output against Python at 1e-6
+tradingview/
+  etf_core_tactical_v3.pine  Pine v6 strategy: core regime position + tactical pullback add
 data/                        market_data.json, portfolio_ibkr.json
 output/                      screen_results.csv, screen_report.md
 ```
