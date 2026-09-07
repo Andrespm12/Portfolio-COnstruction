@@ -157,6 +157,47 @@ def test_el_mapa_de_tickers_se_pide_una_sola_vez(tmp_path, edgar_falso):
     assert edgar_falso.count(edgar.SEC_TICKERS) == 1
 
 
+def test_agregar_un_concepto_avisa_de_los_ceros_falsos(tmp_path, edgar_falso,
+                                                       monkeypatch, capsys):
+    # El caso literal que pasó: tres nombres bajados con una lista de conceptos
+    # anterior, después se agregan dos conceptos, y la corrida siguiente los
+    # SALTA por existir el archivo. Su cobertura para las métricas nuevas sale
+    # en cero sin ser cero, que es peor que un hueco: el hueco invita a mirar,
+    # el cero falso invita a concluir.
+    correr(tmp_path, "AAPL")
+    capsys.readouterr()
+
+    nuevo = edgar.Concepto("metrica_nueva", ("EtiquetaNueva",))
+    monkeypatch.setattr(edgar, "CONCEPTOS", edgar.CONCEPTOS + (nuevo,))
+
+    correr(tmp_path, "AAPL")
+    salida = capsys.readouterr().out
+    assert "lista de conceptos" in salida
+    assert "metrica_nueva" in salida
+    assert "--forzar" in salida
+
+
+def test_sin_conceptos_nuevos_no_hay_aviso(tmp_path, edgar_falso, capsys):
+    correr(tmp_path, "AAPL")
+    capsys.readouterr()
+    correr(tmp_path, "AAPL")
+    assert "lista de conceptos" not in capsys.readouterr().out
+
+
+def test_un_almacen_recien_creado_no_esta_desactualizado(tmp_path):
+    assert edgar.conceptos_desactualizados(tmp_path) == []
+
+
+def test_forzar_actualiza_el_manifiesto(tmp_path, edgar_falso, monkeypatch):
+    correr(tmp_path, "AAPL")
+    nuevo = edgar.Concepto("metrica_nueva", ("EtiquetaNueva",))
+    monkeypatch.setattr(edgar, "CONCEPTOS", edgar.CONCEPTOS + (nuevo,))
+    assert "metrica_nueva" in edgar.conceptos_desactualizados(tmp_path)
+
+    correr(tmp_path, "AAPL", "--forzar")
+    assert edgar.conceptos_desactualizados(tmp_path) == []
+
+
 # ------------------------------------------------------------ fallos
 def test_un_emisor_sin_cik_no_tumba_la_corrida(tmp_path, edgar_falso, capsys):
     assert correr(tmp_path, "AAPL", "NOEXISTE") == 0

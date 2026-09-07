@@ -128,6 +128,12 @@ def build_cells() -> list[dict]:
         "lo mismo repetido. Lanzar 400 peticiones para descubrir que el "
         "`User-Agent` estaba mal es la forma cara de aprenderlo.\n",
         "\n",
+        "**Si agregamos conceptos nuevos al modelo**, lo ya bajado no los "
+        "tiene y la celda lo avisa: la descarga es incremental por existencia "
+        "de archivo, así que un nombre viejo se salta y su cobertura para la "
+        "métrica nueva sale en **cero sin ser cero**. Marca `REBAJAR_TODO` "
+        "cuando eso pase.\n",
+        "\n",
         "**Guardar en Drive es lo que hace la descarga reanudable.** El disco "
         "de Colab desaparece cuando el runtime se recicla; con el almacén en "
         "Drive, volver a correr esto retoma donde quedó en vez de empezar de "
@@ -206,6 +212,19 @@ def build_cells() -> list[dict]:
         "if LIMITE:\n",
         "    TICKERS = TICKERS[:LIMITE]\n",
         "\n",
+        "_nuevos = edgar.conceptos_desactualizados(DESTINO)\n",
+        "if _nuevos and not REBAJAR_TODO:\n",
+        "    print('AVISO: el almacen se escribio con una lista de conceptos '\n",
+        "          'anterior.')\n",
+        "    print(f'       Estos {len(_nuevos)} son posteriores y NO estan en '\n",
+        "          'lo ya bajado:')\n",
+        "    print(f'       {\", \".join(_nuevos)}')\n",
+        "    print('       Su cobertura saldra en CERO SIN SER CERO. Marca '\n",
+        "          'REBAJAR_TODO')\n",
+        "    print('       para rehacerlo, o ignoralo si esas metricas no te '\n",
+        "          'importan aun.')\n",
+        "    print()\n",
+        "\n",
         "print(f'{len(TICKERS)} nombre(s) -> {DESTINO}')\n",
         "print(f'Contacto: {CONTACTO}')\n",
         "_ya = len(list(DESTINO.glob('[!_]*.csv')))\n",
@@ -281,6 +300,8 @@ def build_cells() -> list[dict]:
         "print(f'\\n{len(ok)} bajados, {len(saltados)} ya estaban, '\n",
         "      f'{len(sin_cik)} sin CIK, {len(fallaron)} fallaron '\n",
         "      f'({time.time() - _t0:.0f}s)')\n",
+        "if ok or REBAJAR_TODO:\n",
+        "    edgar.escribir_manifiesto(DESTINO)\n",
         "if sin_cik:\n",
         "    print(f'  Sin CIK: {\", \".join(sin_cik[:20])}')\n",
         "if fallaron:\n",

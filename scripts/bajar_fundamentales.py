@@ -48,10 +48,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from screener.edgar import (CONCEPTOS, Limitador, company_facts,  # noqa: E402
-                            coverage_report, escribir_hechos, extract_facts,
-                            historia_por_ticker, leer_hechos, load_ticker_map,
-                            restatements)
+from screener.edgar import (CONCEPTOS, Limitador,  # noqa: E402
+                            company_facts, conceptos_desactualizados,
+                            coverage_report, escribir_hechos,
+                            escribir_manifiesto, extract_facts,
+                            historia_por_ticker, leer_hechos,
+                            load_ticker_map, restatements)
 
 DESTINO = "datos/fundamentales"
 
@@ -97,6 +99,18 @@ def main(argv: list[str] | None = None) -> int:
     tickers = universo(args.universo, args.tickers)
     if args.limite:
         tickers = tickers[:args.limite]
+
+    nuevos = conceptos_desactualizados(destino)
+    if nuevos and not args.forzar:
+        print(f"AVISO: el almacén se escribió con una lista de conceptos "
+              f"anterior.\n"
+              f"       Estos {len(nuevos)} son posteriores y NO están en los "
+              f"archivos ya bajados:\n"
+              f"       {', '.join(nuevos)}\n"
+              f"       Su cobertura va a salir en cero sin ser cero. Corre con "
+              f"--forzar\n"
+              f"       para rebajar, o ignóralo si esas métricas no te "
+              f"importan todavía.\n")
 
     print(f"Universo: {len(tickers)} nombre(s) -> {destino}/")
     mapa = load_ticker_map(contacto=args.contacto,
@@ -151,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
             if modo == "w":
                 w.writeheader()
             w.writerows(etiquetas)
+
+    if ok and not args.forzar and not nuevos:
+        escribir_manifiesto(destino)
+    elif args.forzar:
+        escribir_manifiesto(destino)
 
     print(f"\n{len(ok)} bajados, {len(saltados)} ya estaban, "
           f"{len(sin_cik)} sin CIK, {len(fallaron)} fallaron.")

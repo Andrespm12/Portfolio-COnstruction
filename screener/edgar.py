@@ -466,6 +466,46 @@ def escribir_hechos(destino: Path | str, ticker: str,
     return archivo
 
 
+MANIFIESTO = "_conceptos.json"
+
+
+def escribir_manifiesto(destino: Path | str) -> Path:
+    """Deja constancia de con qué lista de conceptos se escribió el almacén."""
+    destino = Path(destino)
+    destino.mkdir(parents=True, exist_ok=True)
+    archivo = destino / MANIFIESTO
+    archivo.write_text(json.dumps({"conceptos": [c.clave for c in CONCEPTOS]},
+                                  indent=1, sort_keys=True), encoding="utf-8")
+    return archivo
+
+
+def conceptos_desactualizados(destino: Path | str) -> list[str]:
+    """
+    Conceptos que el almacén en disco no puede tener, por ser posteriores.
+
+    La descarga es incremental por existencia de archivo, y esa regla tiene un
+    agujero: agregar un concepto nuevo no invalida lo ya bajado, así que los
+    archivos viejos se saltan y su cobertura para la métrica nueva sale en
+    **cero sin ser cero**. Pasó de verdad — tres nombres bajados con una lista
+    anterior aparecieron como si no reportaran pasivos corrientes.
+
+    Un cero falso es peor que un hueco declarado: el hueco invita a mirar, el
+    cero falso invita a concluir.
+    """
+    destino = Path(destino)
+    archivo = destino / MANIFIESTO
+    actuales = [c.clave for c in CONCEPTOS]
+    if not any(destino.glob("[!_]*.csv")):
+        return []                       # almacén vacío: nada que desactualizar
+    if not archivo.is_file():
+        return actuales                 # sin manifiesto, todo es sospechoso
+    try:
+        previos = set(json.loads(archivo.read_text(encoding="utf-8"))["conceptos"])
+    except (ValueError, KeyError, OSError):
+        return actuales
+    return [c for c in actuales if c not in previos]
+
+
 def leer_hechos(directorio: Path | str,
                 tickers: Iterable[str] | None = None) -> "pd.DataFrame":
     """Todo el almacén como una tabla. Vacía si no hay nada bajado."""
