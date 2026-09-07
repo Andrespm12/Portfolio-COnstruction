@@ -32,6 +32,7 @@ Qué escribe
     datos/fundamentales/_tickers.json  mapa ticker -> CIK, cacheado
     datos/fundamentales/_cobertura.csv qué porcentaje del universo tiene qué
     datos/fundamentales/_etiquetas.csv qué etiqueta XBRL ganó en cada emisor
+    datos/fundamentales/_fallos.csv    qué nombre falló y por qué
 
 Ese último archivo es el que hay que leer antes de creerle a un número: dice
 literalmente de qué etiqueta salió cada métrica en cada empresa.
@@ -120,6 +121,10 @@ def main(argv: list[str] | None = None) -> int:
 
     etiquetas: list[dict] = []
     ok, sin_cik, fallaron, saltados = [], [], [], []
+    # El motivo de cada fallo, para no depender del scrollback de la consola.
+    # Un nombre que falla dos corridas seguidas necesita diagnóstico, y
+    # "sin CIK" y "404" llevan a sitios distintos.
+    motivos: list[dict] = []
 
     for i, ticker in enumerate(tickers, 1):
         archivo = destino / f"{ticker}.csv"
@@ -130,6 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         cik = mapa.get(ticker) or mapa.get(ticker.replace("-", "."))
         if not cik:
             sin_cik.append(ticker)
+            motivos.append({"ticker": ticker, "motivo": "sin CIK",
+                            "detalle": "no está en company_tickers.json"})
             print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} sin CIK en la SEC")
             continue
 
@@ -139,12 +146,17 @@ def main(argv: list[str] | None = None) -> int:
             hechos, elegidas = extract_facts(payload, ticker)
         except Exception as exc:            # noqa: BLE001 - se reporta
             fallaron.append(ticker)
+            motivos.append({"ticker": ticker, "motivo": type(exc).__name__,
+                            "detalle": f"CIK {cik}: {exc}"})
             print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} "
                   f"FALLO {type(exc).__name__}: {exc}")
             continue
 
         if not hechos:
             fallaron.append(ticker)
+            motivos.append({"ticker": ticker, "motivo": "sin etiquetas",
+                            "detalle": f"CIK {cik}: companyfacts respondió, "
+                                       "pero sin ninguna etiqueta de CONCEPTOS"})
             print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} "
                   "sin ninguna etiqueta conocida (¿emisor extranjero?)")
             continue
@@ -165,6 +177,13 @@ def main(argv: list[str] | None = None) -> int:
             if modo == "w":
                 w.writeheader()
             w.writerows(etiquetas)
+
+    if motivos:
+        with (destino / "_fallos.csv").open("w", newline="",
+                                            encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=["ticker", "motivo", "detalle"])
+            w.writeheader()
+            w.writerows(motivos)
 
     if ok and not args.forzar and not nuevos:
         escribir_manifiesto(destino)

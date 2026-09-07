@@ -219,6 +219,21 @@ def test_un_404_no_tumba_la_corrida(tmp_path, edgar_falso, monkeypatch, capsys):
     assert "FALLO" in capsys.readouterr().out
 
 
+def test_los_fallos_quedan_registrados_con_su_motivo(tmp_path, edgar_falso):
+    # Ocho nombres fallaron dos corridas seguidas en una descarga real y el
+    # motivo solo estaba en la consola. "sin CIK" y "404" llevan a sitios
+    # distintos, así que la diferencia tiene que sobrevivir a cerrar la pestaña.
+    correr(tmp_path, "AAPL", "NOEXISTE")
+    fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
+    assert fallos.loc["NOEXISTE", "motivo"] == "sin CIK"
+    assert "company_tickers" in fallos.loc["NOEXISTE", "detalle"]
+
+
+def test_sin_fallos_no_se_escribe_el_archivo(tmp_path, edgar_falso):
+    correr(tmp_path, "AAPL")
+    assert not (tmp_path / "_fallos.csv").exists()
+
+
 def test_un_almacen_vacio_no_revienta_el_reporte(tmp_path, edgar_falso, capsys):
     assert correr(tmp_path, "NOEXISTE") == 0
     assert "No hay nada en el almacén" in capsys.readouterr().out
