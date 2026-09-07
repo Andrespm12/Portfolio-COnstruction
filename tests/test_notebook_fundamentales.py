@@ -298,6 +298,46 @@ def test_el_point_in_time_distingue_las_dos_fechas(corrida):
         "números fueran iguales el point-in-time no estaría funcionando")
 
 
+def test_un_montaje_de_drive_fallido_no_tumba_la_corrida(capsys):
+    # Paso de verdad: ValueError('mount failed'). Colab lo lanza por cosas que
+    # no dependen de este codigo — popup bloqueado, cookies de terceros, o
+    # cancelarlo — y matar la celda deja la corrida sin empezar por un permiso
+    # del navegador. Tiene que degradar al disco local y decirlo.
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    params = next(c for c in executable_cells(nb) if "GUARDAR_EN_DRIVE" in c)
+    params = params.replace('UNIVERSO = "sp500"', 'UNIVERSO = "lista"')
+
+    class _DriveRota:
+        @staticmethod
+        def mount(_):
+            raise ValueError("mount failed")
+
+    colab = types.ModuleType("google.colab")
+    colab.drive = _DriveRota
+    google = types.ModuleType("google")
+    google.colab = colab
+    previos = {k: sys.modules.get(k) for k in ("google", "google.colab")}
+    sys.modules["google"], sys.modules["google.colab"] = google, colab
+
+    ns: dict = {"__name__": "__main__"}
+    sys.path.insert(0, str(ROOT))
+    try:
+        import screener.edgar as edgar_mod
+        ns["edgar"] = edgar_mod
+        exec(compile(params, "<params>", "exec"), ns)   # no debe levantar
+    finally:
+        for k, v in previos.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    assert ns["DESTINO"] == Path("/content/fundamentales")
+    salida = capsys.readouterr().out
+    assert "no se pudo montar Drive" in salida
+    assert "ZIP" in salida, "tiene que decir cómo no perder la descarga"
+
+
 def test_las_tablas_con_estilo_se_renderizan_de_verdad(corrida):
     # No basta con que la celda no levante: el estilo se evalua al renderizar,
     # asi que si nadie llama to_html() un fallo de estilo viaja hasta Colab.

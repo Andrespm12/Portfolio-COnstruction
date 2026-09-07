@@ -132,6 +132,16 @@ def build_cells() -> list[dict]:
         "de Colab desaparece cuando el runtime se recicla; con el almacén en "
         "Drive, volver a correr esto retoma donde quedó en vez de empezar de "
         "cero.\n",
+        "\n",
+        "Si el montaje falla — pasa por un popup bloqueado, por cookies de "
+        "terceros desactivadas, o por cancelarlo — **la celda sigue** y el "
+        "almacén cae en el disco de Colab. En ese caso la sección 6 deja de ser "
+        "opcional: baja el zip antes de cerrar la sesión.\n",
+        "\n",
+        "Para arreglar el montaje: permite ventanas emergentes para "
+        "`colab.research.google.com`, habilita cookies de terceros, y si "
+        "insiste prueba *Entorno de ejecución → Desconectar y eliminar el "
+        "entorno* antes de reintentar.\n",
     ))
     cells.append(code(
         "# @markdown ### Identificación ante la SEC (obligatoria)\n",
@@ -154,11 +164,27 @@ def build_cells() -> list[dict]:
         "\n",
         "edgar.user_agent(CONTACTO)   # falla aqui si falta el correo\n",
         "\n",
+        "# El montaje de Drive falla por cosas que no dependen de este codigo:\n",
+        "# un popup de autenticacion bloqueado, cookies de terceros desactivadas,\n",
+        "# o simplemente cancelarlo. Que eso mate la celda dejaria la corrida sin\n",
+        "# empezar por un problema de permisos del navegador, asi que degrada y lo\n",
+        "# dice: el almacen cae en el disco de Colab y la seccion 6 se vuelve\n",
+        "# obligatoria en vez de opcional.\n",
+        "DESTINO = None\n",
         "if GUARDAR_EN_DRIVE:\n",
-        "    from google.colab import drive\n",
-        "    drive.mount('/content/drive')\n",
-        "    DESTINO = Path('/content/drive/MyDrive/CCI_Fundamentales')\n",
-        "else:\n",
+        "    try:\n",
+        "        from google.colab import drive\n",
+        "        drive.mount('/content/drive')\n",
+        "        DESTINO = Path('/content/drive/MyDrive/CCI_Fundamentales')\n",
+        "    except Exception as _exc:\n",
+        "        print(f'AVISO: no se pudo montar Drive '\n",
+        "              f'({type(_exc).__name__}: {_exc}).')\n",
+        "        print('       El almacen va al disco de Colab, que se recicla.')\n",
+        "        print('       BAJA EL ZIP DE LA SECCION 6 antes de cerrar, o')\n",
+        "        print('       reintenta el montaje y vuelve a correr esta celda.')\n",
+        "        print()\n",
+        "\n",
+        "if DESTINO is None:\n",
         "    DESTINO = Path('/content/fundamentales')\n",
         "DESTINO.mkdir(parents=True, exist_ok=True)\n",
         "\n",
