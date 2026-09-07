@@ -30,6 +30,7 @@ Qué escribe
 -----------
     datos/fundamentales/AAPL.csv     un hecho por fila, con su fecha de filing
     datos/fundamentales/_tickers.json  mapa ticker -> CIK, cacheado
+    datos/fundamentales/_tickers_fuentes.json  cuántos emisores trajo cada lista
     datos/fundamentales/_cobertura.csv qué porcentaje del universo tiene qué
     datos/fundamentales/_etiquetas.csv qué etiqueta XBRL ganó en cada emisor
     datos/fundamentales/_fallos.csv    qué nombre falló y por qué
@@ -49,11 +50,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from screener.edgar import (CONCEPTOS, Limitador,  # noqa: E402
+from screener.edgar import (CONCEPTOS, MIN_EMISORES, Limitador,  # noqa: E402
                             company_facts, conceptos_desactualizados,
-                            coverage_report, escribir_hechos,
+                            coverage_report, detalle_sin_cik, escribir_hechos,
                             escribir_manifiesto, extract_facts,
-                            historia_por_ticker, leer_hechos,
+                            fuentes_del_mapa, historia_por_ticker, leer_hechos,
                             load_ticker_map, restatements)
 
 DESTINO = "datos/fundamentales"
@@ -89,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--salida", default=DESTINO)
     p.add_argument("--forzar", action="store_true",
                    help="Rebajar lo que ya está en disco.")
+    p.add_argument("--remapear", action="store_true",
+                   help="Volver a pedir el mapa ticker->CIK sin rebajar los "
+                        "fundamentales. Dos peticiones, no doscientas.")
     p.add_argument("--limite", type=int, default=0,
                    help="Cortar después de N nombres. Para probar.")
     args = p.parse_args(argv)
@@ -114,10 +118,18 @@ def main(argv: list[str] | None = None) -> int:
               f"importan todavía.\n")
 
     print(f"Universo: {len(tickers)} nombre(s) -> {destino}/")
-    mapa = load_ticker_map(contacto=args.contacto,
-                           cache=destino / "_tickers.json",
-                           limitador=limitador)
-    print(f"Mapa ticker->CIK: {len(mapa)} emisores\n")
+    cache_mapa = destino / "_tickers.json"
+    mapa = load_ticker_map(contacto=args.contacto, cache=cache_mapa,
+                           limitador=limitador, refrescar=args.remapear)
+    fuentes = fuentes_del_mapa(cache_mapa)
+    print(f"Mapa ticker->CIK: {len(mapa)} emisores"
+          + (f" (company_tickers={fuentes['company_tickers']}, "
+             f"company_tickers_exchange={fuentes['company_tickers_exchange']})"
+             if "company_tickers" in fuentes else ""))
+    if len(mapa) < MIN_EMISORES:
+        print(f"  AVISO: son menos de {MIN_EMISORES}. El mapa está incompleto "
+              "y lo que salga 'sin CIK' no prueba nada.")
+    print()
 
     etiquetas: list[dict] = []
     ok, sin_cik, fallaron, saltados = [], [], [], []
@@ -136,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         if not cik:
             sin_cik.append(ticker)
             motivos.append({"ticker": ticker, "motivo": "sin CIK",
-                            "detalle": "no está en company_tickers.json"})
+                            "detalle": detalle_sin_cik(fuentes)})
             print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} sin CIK en la SEC")
             continue
 
@@ -194,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(sin_cik)} sin CIK, {len(fallaron)} fallaron.")
     if sin_cik:
         print(f"  Sin CIK: {', '.join(sin_cik[:15])}")
+        print(f"           {detalle_sin_cik(fuentes)}")
     if fallaron:
         print(f"  Fallaron: {', '.join(fallaron[:15])}")
 

@@ -34,9 +34,23 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 NOTEBOOK = ROOT / "notebooks" / "fundamentales_colab.ipynb"
 
+from screener.edgar import MIN_EMISORES  # noqa: E402
+
 TICKERS_SEC = {"0": {"cik_str": 320193, "ticker": "AAPL"},
                "1": {"cik_str": 789019, "ticker": "MSFT"},
                "2": {"cik_str": 1045810, "ticker": "NVDA"}}
+# Con tres nombres el mapa se descartaria por corto en cada corrida y la prueba
+# mediria otra cosa: la lista real trae mas de diez mil.
+TICKERS_SEC |= {str(i): {"cik_str": 500000 + i, "ticker": f"T{i:05d}"}
+                for i in range(3, MIN_EMISORES + 3)}
+
+#: La segunda lista oficial. Trae AVB, que a la primera le falta: es el caso
+#: que hizo fallar ocho nombres vigentes tres corridas seguidas.
+TICKERS_SEC_EXCHANGE = {
+    "fields": ["cik", "name", "ticker", "exchange"],
+    "data": [[f["cik_str"], "X", f["ticker"], "NYSE"]
+             for f in TICKERS_SEC.values()]
+            + [[915912, "AvalonBay Communities", "AVB", "NYSE"]]}
 
 
 def _facts(cik, base, etiqueta="Revenues"):
@@ -67,6 +81,7 @@ CUERPOS = {
     "0001045810": _facts(
         1045810, 300.0,
         etiqueta="RevenueFromContractWithCustomerExcludingAssessedTax"),
+    "0000915912": _facts(915912, 400.0),
 }
 
 #: Sustituye la red y google.colab antes de que corra ninguna celda.
@@ -77,6 +92,8 @@ import screener.edgar as _edgar
 def _fetch(url, *, contacto=None, limitador=None):
     if url == _edgar.SEC_TICKERS:
         return _TICKERS_SEC
+    if url == _edgar.SEC_TICKERS_EXCHANGE:
+        return _TICKERS_SEC_EXCHANGE
     cik = url.rsplit('CIK', 1)[-1].removesuffix('.json')
     if cik not in _CUERPOS:
         raise RuntimeError(f'404 para {cik}')
@@ -174,8 +191,11 @@ def corrida():
                          .replace("GUARDAR_EN_DRIVE = True",
                                   "GUARDAR_EN_DRIVE = False")
                          .replace('UNIVERSO = "sp500"', 'UNIVERSO = "lista"')
+                         # AVB solo esta en la segunda lista de la SEC; sin
+                         # ella el cuaderno lo reporta "sin CIK", que es lo que
+                         # paso de verdad con ocho nombres vigentes.
                          .replace('TICKERS_PERSONALIZADOS = "AAPL,MSFT,NVDA"',
-                                  'TICKERS_PERSONALIZADOS = "AAPL,MSFT,NVDA,NOEXISTE"')
+                                  'TICKERS_PERSONALIZADOS = "AAPL,MSFT,NVDA,AVB,NOEXISTE"')
                          .replace("LIMITE = 3", "LIMITE = 0")
                          # /content/fundamentales es absoluto y sobrevive entre
                          # corridas del contenedor: la segunda vez se saltaria
@@ -197,7 +217,9 @@ def corrida():
                 renderizados.append(obj.to_html())
 
     ns: dict = {"__name__": "__main__", "display": _display,
-                "_TICKERS_SEC": TICKERS_SEC, "_CUERPOS": CUERPOS}
+                "_TICKERS_SEC": TICKERS_SEC,
+                "_TICKERS_SEC_EXCHANGE": TICKERS_SEC_EXCHANGE,
+                "_CUERPOS": CUERPOS}
     cwd = os.getcwd()
     fallos: list[tuple[int, str]] = []
 
@@ -236,11 +258,34 @@ def test_baja_y_escribe_el_almacen(corrida):
     destino = corrida["DESTINO"]
     assert (destino / "AAPL.csv").exists()
     assert (destino / "MSFT.csv").exists()
-    assert set(corrida["ok"]) == {"AAPL", "MSFT", "NVDA"}
+    assert set(corrida["ok"]) == {"AAPL", "MSFT", "NVDA", "AVB"}
 
 
 def test_un_nombre_sin_cik_no_tumba_la_corrida(corrida):
     assert corrida["sin_cik"] == ["NOEXISTE"]
+
+
+def test_un_nombre_solo_en_la_segunda_lista_se_baja(corrida):
+    # Con una sola fuente, AVB fallaba "sin CIK" en cada corrida, para siempre.
+    assert (corrida["DESTINO"] / "AVB.csv").exists()
+    assert corrida["mapa"]["AVB"] == "0000915912"
+
+
+def test_el_cuaderno_dice_cual_de_las_dos_causas_es(corrida):
+    import pandas as pd
+
+    fallos = pd.read_csv(corrida["DESTINO"] / "_fallos.csv").set_index("ticker")
+    detalle = fallos.loc["NOEXISTE", "detalle"]
+    # Emisor retirado y mapa incompleto llevan a sitios opuestos: uno se
+    # arregla en el universo y el otro rebajando el mapa.
+    assert "ya no cotice" in detalle
+    assert "company_tickers=" in detalle
+
+
+def test_el_cuaderno_registra_la_procedencia_del_mapa(corrida):
+    fuentes = corrida["_fuentes"]
+    assert fuentes["company_tickers"] == len(TICKERS_SEC)
+    assert fuentes["company_tickers_exchange"] == len(TICKERS_SEC) + 1
 
 
 def test_el_historico_llega_completo_en_la_primera_pasada(corrida):
@@ -252,12 +297,12 @@ def test_el_historico_llega_completo_en_la_primera_pasada(corrida):
 
 
 def test_la_cobertura_se_mide_contra_el_universo_pedido(corrida):
-    # Cuatro nombres pedidos, tres bajados: la cobertura es 3/4 y no 3/3.
+    # Cinco nombres pedidos, cuatro bajados: la cobertura es 4/5 y no 4/4.
     # Medirla sobre lo que sí bajó daría 100% siempre y no diría nada.
     cob = corrida["cobertura"].set_index("metrica")
     assert (corrida["DESTINO"] / "_cobertura.csv").exists()
-    assert cob.loc["ingresos", "cobertura"] == 0.75
-    assert cob.loc["ingresos", "con_dato"] == 3
+    assert cob.loc["ingresos", "cobertura"] == 0.8
+    assert cob.loc["ingresos", "con_dato"] == 4
     assert cob.loc["ingresos", "sin_dato"] == 1
     assert "NOEXISTE" in cob.loc["ingresos", "faltan"]
     # Una métrica que nadie reportó sale en cero, no desaparece: desaparecer se

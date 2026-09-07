@@ -18,10 +18,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from screener.edgar import (CONCEPTOS, CONCEPTO_POR_CLAVE, Limitador, as_of,
-                            company_facts, coverage_report, escribir_hechos,
-                            extract_facts, historia_por_ticker, leer_hechos,
-                            load_ticker_map, parse_ticker_map, restatements,
+from screener.edgar import (CONCEPTOS, CONCEPTO_POR_CLAVE, MIN_EMISORES,
+                            SEC_TICKERS, SEC_TICKERS_EXCHANGE, Limitador,
+                            as_of, company_facts, coverage_report,
+                            escribir_hechos, extract_facts, fuentes_del_mapa,
+                            fuentes_path, historia_por_ticker, leer_hechos,
+                            load_ticker_map, parse_ticker_map,
+                            parse_ticker_map_exchange, restatements,
                             ultimo_anual, user_agent)
 
 
@@ -67,18 +70,195 @@ def test_una_fila_rota_no_tumba_el_mapa():
     assert mapa == {"AAPL": "0000320193"}
 
 
-def test_el_mapa_se_cachea_y_no_se_vuelve_a_pedir(tmp_path):
-    llamadas = []
+def test_la_segunda_lista_tiene_otra_forma():
+    # {"fields": [...], "data": [[...]]} en vez de un objeto por fila.
+    mapa = parse_ticker_map_exchange({
+        "fields": ["cik", "name", "ticker", "exchange"],
+        "data": [[320193, "Apple Inc.", "aapl", "Nasdaq"],
+                 [1045810, "NVIDIA", "NVDA", "Nasdaq"]]})
+    assert mapa == {"AAPL": "0000320193", "NVDA": "0001045810"}
 
+
+def test_la_segunda_lista_con_otras_columnas_no_revienta():
+    assert parse_ticker_map_exchange({"fields": ["a", "b"], "data": [[1, 2]]}) == {}
+    assert parse_ticker_map_exchange({}) == {}
+
+
+def lista_grande(n=MIN_EMISORES, desde=1000):
+    """Una primera lista de tamaño plausible, para que el caché se acepte."""
+    return {str(i): {"cik_str": desde + i, "ticker": f"T{i:05d}"}
+            for i in range(n)}
+
+
+def lista_grande_exchange(n=MIN_EMISORES, desde=1000):
+    return {"fields": ["cik", "name", "ticker", "exchange"],
+            "data": [[desde + i, f"E{i}", f"T{i:05d}", "NYSE"] for i in range(n)]}
+
+
+def responder(primera, segunda=None, registro=None):
     def falso(url, **kw):
-        llamadas.append(url)
-        return {"0": {"cik_str": 320193, "ticker": "AAPL"}}
+        if registro is not None:
+            registro.append(url)
+        if url == SEC_TICKERS:
+            return primera
+        if url == SEC_TICKERS_EXCHANGE:
+            if segunda is None:
+                raise RuntimeError("404")
+            return segunda
+        raise AssertionError(f"URL inesperada: {url}")
+    return falso
+
+
+def test_el_mapa_se_cachea_y_no_se_vuelve_a_pedir(tmp_path):
+    llamadas: list[str] = []
+    falso = responder(lista_grande(), lista_grande_exchange(), llamadas)
 
     cache = tmp_path / "_tickers.json"
     a = load_ticker_map(contacto="x@y.com", cache=cache, fetch=falso)
     b = load_ticker_map(contacto="x@y.com", cache=cache, fetch=falso)
-    assert a == b == {"AAPL": "0000320193"}
-    assert len(llamadas) == 1, "la segunda vez tiene que salir del disco"
+    assert a == b and len(a) == MIN_EMISORES
+    assert llamadas == [SEC_TICKERS, SEC_TICKERS_EXCHANGE], \
+        "la segunda vez tiene que salir del disco"
+
+
+def test_un_cache_sin_procedencia_se_rehace_una_vez(tmp_path):
+    # El caché que ya está en la máquina de quien usa esto lo escribió el código
+    # de una sola fuente: tiene tamaño de sobra y le faltan los nombres. Sin
+    # esto, el arreglo no llegaría nunca a quien lo necesita.
+    cache = tmp_path / "_tickers.json"
+    viejo = {f"T{i:05d}": f"{i:010d}" for i in range(MIN_EMISORES)}
+    cache.write_text(json.dumps(viejo), encoding="utf-8")
+    assert not fuentes_del_mapa(cache)
+
+    llamadas: list[str] = []
+    segunda = lista_grande_exchange()
+    segunda["data"].append([915912, "AvalonBay", "AVB", "NYSE"])
+    kw = dict(contacto="x@y.com", cache=cache,
+              fetch=responder(lista_grande(), segunda, llamadas))
+
+    assert "AVB" in load_ticker_map(**kw), "el caché viejo no debió sobrevivir"
+    llamadas.clear()
+    assert "AVB" in load_ticker_map(**kw)
+    assert llamadas == [], "una vez, no en cada corrida"
+
+
+def test_refrescar_vuelve_a_pedir_el_mapa(tmp_path):
+    cache = tmp_path / "_tickers.json"
+    kw = dict(contacto="x@y.com", cache=cache,
+              fetch=responder(lista_grande(), lista_grande_exchange()))
+    load_ticker_map(**kw)
+
+    llamadas: list[str] = []
+    load_ticker_map(contacto="x@y.com", cache=cache, refrescar=True,
+                    fetch=responder(lista_grande(), lista_grande_exchange(),
+                                    llamadas))
+    assert llamadas == [SEC_TICKERS, SEC_TICKERS_EXCHANGE]
+
+
+def test_un_cache_a_medias_se_descarta_en_vez_de_creerse(tmp_path):
+    # El error que no se ve: un mapa incompleto es JSON válido, se devuelve
+    # igual en cada corrida, y los emisores que le faltan salen "sin CIK" para
+    # siempre. Sin piso, la corrida número cien falla idéntico a la primera.
+    cache = tmp_path / "_tickers.json"
+    cache.write_text(json.dumps({"AAPL": "0000320193"}), encoding="utf-8")
+
+    mapa = load_ticker_map(contacto="x@y.com", cache=cache,
+                           fetch=responder(lista_grande(),
+                                           lista_grande_exchange()))
+    assert len(mapa) == MIN_EMISORES, "el caché corto no debió sobrevivir"
+    assert len(json.loads(cache.read_text())) == MIN_EMISORES
+
+
+def test_un_cache_ilegible_no_tumba_la_corrida(tmp_path):
+    cache = tmp_path / "_tickers.json"
+    cache.write_text("{esto no es json", encoding="utf-8")
+    mapa = load_ticker_map(contacto="x@y.com", cache=cache,
+                           fetch=responder(lista_grande(),
+                                           lista_grande_exchange()))
+    assert len(mapa) == MIN_EMISORES
+
+
+def test_un_mapa_corto_no_se_escribe_al_cache(tmp_path):
+    # Si la SEC responde a medias, guardarlo convierte un fallo de una corrida
+    # en un fallo permanente.
+    cache = tmp_path / "_tickers.json"
+    load_ticker_map(contacto="x@y.com", cache=cache,
+                    fetch=responder({"0": {"cik_str": 320193, "ticker": "AAPL"}},
+                                    None))
+    assert not cache.exists()
+    # Pero la procedencia sí: el mapa corto es justo el caso que hay que poder
+    # explicar después.
+    assert fuentes_del_mapa(cache)["total"] == 1
+
+
+def test_la_segunda_lista_tapa_el_hueco_de_la_primera(tmp_path):
+    # AVB, BK, EQR, IPG y MMC salieron "sin CIK" tres corridas seguidas siendo
+    # registrantes vigentes. Depender de un solo archivo hace que su hueco sea
+    # un hueco del modelo.
+    primera = lista_grande()
+    segunda = lista_grande_exchange()
+    segunda["data"].append([915912, "AvalonBay Communities", "AVB", "NYSE"])
+
+    mapa = load_ticker_map(contacto="x@y.com", cache=tmp_path / "_tickers.json",
+                           fetch=responder(primera, segunda))
+    assert mapa["AVB"] == "0000915912"
+
+
+def test_la_segunda_lista_no_pisa_a_la_primera(tmp_path):
+    # Ante un desacuerdo manda company_tickers.json, que es la lista canónica.
+    primera = lista_grande()
+    primera["0"] = {"cik_str": 320193, "ticker": "AAPL"}
+    segunda = lista_grande_exchange()
+    segunda["data"].append([999999, "Impostora", "AAPL", "NYSE"])
+
+    mapa = load_ticker_map(contacto="x@y.com", cache=tmp_path / "_tickers.json",
+                           fetch=responder(primera, segunda))
+    assert mapa["AAPL"] == "0000320193"
+
+
+def test_si_la_segunda_lista_falla_la_primera_alcanza(tmp_path):
+    mapa = load_ticker_map(contacto="x@y.com", cache=tmp_path / "_tickers.json",
+                           fetch=responder(lista_grande(), None))
+    assert len(mapa) == MIN_EMISORES
+
+
+# --------------------------------------------- procedencia del mapa
+def test_queda_escrito_cuanto_trajo_cada_lista(tmp_path):
+    # Sin esto, "sin CIK" no se puede leer: no se sabe si falta el emisor o
+    # falta el mapa. Y como el caché evita la red, tiene que estar en disco.
+    cache = tmp_path / "_tickers.json"
+    load_ticker_map(contacto="x@y.com", cache=cache,
+                    fetch=responder(lista_grande(),
+                                    lista_grande_exchange(n=MIN_EMISORES - 3)))
+    fuentes = fuentes_del_mapa(cache)
+    assert fuentes["company_tickers"] == MIN_EMISORES
+    assert fuentes["company_tickers_exchange"] == MIN_EMISORES - 3
+    assert fuentes["total"] == MIN_EMISORES
+    assert fuentes["error_segunda_lista"] == ""
+
+
+def test_la_procedencia_registra_el_fallo_de_la_segunda_lista(tmp_path):
+    cache = tmp_path / "_tickers.json"
+    load_ticker_map(contacto="x@y.com", cache=cache,
+                    fetch=responder(lista_grande(), None))
+    assert "404" in fuentes_del_mapa(cache)["error_segunda_lista"]
+
+
+def test_la_procedencia_sobrevive_a_la_corrida_cacheada(tmp_path):
+    cache = tmp_path / "_tickers.json"
+    load_ticker_map(contacto="x@y.com", cache=cache,
+                    fetch=responder(lista_grande(), lista_grande_exchange()))
+    # Segunda corrida: sale del disco, no se cuenta nada, y aun así se sabe.
+    load_ticker_map(contacto="x@y.com", cache=cache,
+                    fetch=responder({}, None))
+    assert fuentes_del_mapa(cache)["company_tickers"] == MIN_EMISORES
+
+
+def test_sin_procedencia_no_se_inventa_nada(tmp_path):
+    assert fuentes_del_mapa(tmp_path / "_tickers.json") == {}
+    assert fuentes_del_mapa(None) == {}
+    fuentes_path(tmp_path / "_tickers.json").write_text("roto")
+    assert fuentes_del_mapa(tmp_path / "_tickers.json") == {}
 
 
 # ------------------------------------------------------------ extracción

@@ -27,6 +27,19 @@ import screener.edgar as edgar  # noqa: E402
 TICKERS = {"0": {"cik_str": 320193, "ticker": "AAPL"},
            "1": {"cik_str": 789019, "ticker": "MSFT"},
            "2": {"cik_str": 1045810, "ticker": "NVDA"}}
+# La lista real trae más de diez mil emisores y el guion descarta un mapa
+# demasiado corto, así que el falso también tiene que ser plausible: con tres
+# nombres nunca se cachearía y la prueba del incremental mediría otra cosa.
+TICKERS |= {str(i): {"cik_str": 500000 + i, "ticker": f"T{i:05d}"}
+            for i in range(3, edgar.MIN_EMISORES + 3)}
+
+# La segunda lista oficial, con su forma propia. Trae un nombre que a la
+# primera le falta: es el caso de AVB, BK, EQR, IPG y MMC.
+TICKERS_EXCHANGE = {
+    "fields": ["cik", "name", "ticker", "exchange"],
+    "data": [[fila["cik_str"], "X", fila["ticker"], "NYSE"]
+             for fila in TICKERS.values()]
+            + [[915912, "AvalonBay Communities", "AVB", "NYSE"]]}
 
 
 def facts(cik, ingresos, activos, *, etiqueta_ingresos="Revenues"):
@@ -52,6 +65,7 @@ CUERPOS = {
     "0001045810": facts(
         1045810, 300.0, 3000.0,
         etiqueta_ingresos="RevenueFromContractWithCustomerExcludingAssessedTax"),
+    "0000915912": facts(915912, 400.0, 4000.0),
 }
 
 
@@ -64,6 +78,8 @@ def edgar_falso(monkeypatch):
         pedidos.append(url)
         if url == edgar.SEC_TICKERS:
             return TICKERS
+        if url == edgar.SEC_TICKERS_EXCHANGE:
+            return TICKERS_EXCHANGE
         cik = url.rsplit("CIK", 1)[-1].removesuffix(".json")
         if cik not in CUERPOS:
             raise RuntimeError(f"404 para {cik}")
@@ -157,6 +173,21 @@ def test_el_mapa_de_tickers_se_pide_una_sola_vez(tmp_path, edgar_falso):
     assert edgar_falso.count(edgar.SEC_TICKERS) == 1
 
 
+def test_remapear_rehace_el_mapa_sin_rebajar_los_fundamentales(tmp_path,
+                                                               edgar_falso):
+    # Rebajar 280 companyfacts para arreglar el mapa serían gigabytes por dos
+    # peticiones de trabajo.
+    correr(tmp_path, "AAPL")
+    antes = [u for u in edgar_falso if "companyfacts" in u]
+
+    edgar_falso.clear()
+    correr(tmp_path, "AAPL", "--remapear")
+    assert edgar.SEC_TICKERS in edgar_falso
+    assert [u for u in edgar_falso if "companyfacts" in u] == [], \
+        "AAPL.csv ya estaba: --remapear no debe tocar los fundamentales"
+    assert antes, "la primera corrida sí bajó AAPL"
+
+
 def test_agregar_un_concepto_avisa_de_los_ceros_falsos(tmp_path, edgar_falso,
                                                        monkeypatch, capsys):
     # El caso literal que pasó: tres nombres bajados con una lista de conceptos
@@ -227,6 +258,47 @@ def test_los_fallos_quedan_registrados_con_su_motivo(tmp_path, edgar_falso):
     fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
     assert fallos.loc["NOEXISTE", "motivo"] == "sin CIK"
     assert "company_tickers" in fallos.loc["NOEXISTE", "detalle"]
+
+
+def test_un_nombre_que_solo_esta_en_la_segunda_lista_se_baja(tmp_path,
+                                                             edgar_falso):
+    # AVB es el caso literal: registrante vigente ausente de la primera lista.
+    # Con una sola fuente falla "sin CIK" en cada corrida, para siempre.
+    assert correr(tmp_path, "AVB") == 0
+    assert (tmp_path / "AVB.csv").exists()
+
+
+def test_el_fallo_distingue_emisor_retirado_de_mapa_incompleto(tmp_path,
+                                                               edgar_falso):
+    # Las dos causas llevan a sitios opuestos: una se arregla en el universo,
+    # la otra rebajando el mapa. El CSV tiene que decir cuál es.
+    correr(tmp_path, "AAPL", "NOEXISTE")
+    fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
+    detalle = fallos.loc["NOEXISTE", "detalle"]
+    assert "ya no cotice" in detalle
+    assert "revisa el universo" in detalle
+    assert str(edgar.MIN_EMISORES) in detalle or "company_tickers=" in detalle
+
+
+def test_con_el_mapa_corto_el_fallo_no_culpa_al_emisor(tmp_path, monkeypatch,
+                                                       capsys):
+    # Si el mapa vino a medias, "sin CIK" no prueba nada sobre el emisor.
+    monkeypatch.setattr(edgar, "SEC_MAX_RPS", 0)
+    monkeypatch.setattr(edgar, "fetch_json",
+                        lambda url, **kw: TICKERS_EXCHANGE
+                        if url == edgar.SEC_TICKERS_EXCHANGE
+                        else {"0": {"cik_str": 320193, "ticker": "AAPL"}}
+                        if url == edgar.SEC_TICKERS
+                        else CUERPOS[url.rsplit("CIK", 1)[-1].removesuffix(".json")])
+    monkeypatch.setattr(edgar, "MIN_EMISORES", 10 ** 9)
+    monkeypatch.setattr(guion, "MIN_EMISORES", 10 ** 9)
+
+    correr(tmp_path, "AAPL", "NOEXISTE")
+    fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
+    detalle = fallos.loc["NOEXISTE", "detalle"]
+    assert "incompleto" in detalle
+    assert "ya no cotice" not in detalle
+    assert "El mapa está incompleto" in capsys.readouterr().out
 
 
 def test_sin_fallos_no_se_escribe_el_archivo(tmp_path, edgar_falso):

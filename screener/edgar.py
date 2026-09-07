@@ -53,6 +53,18 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 SEC_DATA = "https://data.sec.gov"
 SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
+#: Segunda lista oficial, con otra forma y otra generación. Existe aquí porque
+#: la primera falló: ocho emisores vigentes — AvalonBay, BNY Mellon, Equity
+#: Residential, Interpublic, Marsh McLennan entre ellos — salieron "sin CIK"
+#: tres corridas seguidas. Depender de un solo archivo hace que un hueco suyo
+#: sea un hueco del modelo.
+SEC_TICKERS_EXCHANGE = "https://www.sec.gov/files/company_tickers_exchange.json"
+
+#: Mínimo plausible de emisores en el mapa. La lista real trae más de 10.000;
+#: bastante menos que esto es un archivo truncado, no la verdad. Sin este piso
+#: un caché a medio escribir se devuelve para siempre y los nombres que le
+#: faltan fallan idéntico en cada corrida, que es justo lo que pasó.
+MIN_EMISORES = 5000
 
 #: Tope de la SEC. Pasarse es la forma de que te bloqueen la IP.
 SEC_MAX_RPS = 8.0
@@ -342,21 +354,152 @@ def parse_ticker_map(payload: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+def parse_ticker_map_exchange(payload: Mapping[str, Any]) -> dict[str, str]:
+    """
+    La otra lista de la SEC: ``{"fields": [...], "data": [[cik, nombre, ticker,
+    bolsa], ...]}``.
+
+    Misma información, otra forma y otra generación. Se usa para tapar los
+    huecos de la primera.
+    """
+    campos = [str(c).lower() for c in (payload.get("fields") or [])]
+    try:
+        i_cik, i_tk = campos.index("cik"), campos.index("ticker")
+    except ValueError:
+        return {}
+
+    out: dict[str, str] = {}
+    for fila in payload.get("data") or ():
+        try:
+            ticker = str(fila[i_tk]).strip().upper()
+            cik = f"{int(fila[i_cik]):010d}"
+        except (IndexError, TypeError, ValueError):
+            continue
+        if ticker:
+            out.setdefault(ticker, cik)
+    return out
+
+
+def fuentes_path(cache: Path | str) -> Path:
+    """Dónde vive la procedencia del mapa que está en ``cache``."""
+    cache = Path(cache)
+    return cache.with_name(f"{cache.stem}_fuentes.json")
+
+
+def fuentes_del_mapa(cache: Path | str | None) -> dict[str, Any]:
+    """
+    Cuántos emisores trajo cada lista la última vez que se pidieron.
+
+    Vive en disco y no en memoria porque el caso que importa es justo el que no
+    sale a la red: con el mapa cacheado nadie vuelve a contar nada, y sin esto
+    un "sin CIK" no se puede distinguir de un mapa a medias.
+    """
+    if not cache:
+        return {}
+    ruta = fuentes_path(cache)
+    if not ruta.is_file():
+        return {}
+    try:
+        datos = json.loads(ruta.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    return datos if isinstance(datos, dict) else {}
+
+
+def detalle_sin_cik(fuentes: Mapping[str, Any]) -> str:
+    """
+    Qué significa que un ticker no esté en el mapa.
+
+    Hay dos causas y llevan a sitios opuestos. Si las listas de la SEC vinieron
+    completas, el ticker no está porque ese emisor ya no cotiza — lo compraron,
+    lo fusionaron, lo sacaron — y lo que hay que arreglar es nuestro universo, no
+    la descarga. Si vinieron cortas, el mapa está a medias y el nombre volverá a
+    fallar hasta que se rebaje. Distinguirlas sin salir a mirar es todo el punto
+    de escribir la procedencia.
+
+    Vive aquí, y no en el guion, porque el cuaderno de Colab repite el mismo
+    lazo de descarga: dos copias de este texto se separan a la primera
+    corrección.
+    """
+    a = fuentes.get("company_tickers")
+    b = fuentes.get("company_tickers_exchange")
+    if a is None:
+        return ("no está en el mapa ticker->CIK; no hay registro de qué "
+                "trajeron las listas (borra _tickers.json y vuelve a correr)")
+    conteos = f"company_tickers={a}, company_tickers_exchange={b}"
+    if a >= MIN_EMISORES or (b or 0) >= MIN_EMISORES:
+        return (f"no está en ninguna de las dos listas de la SEC ({conteos}); "
+                "las listas vinieron completas, así que lo más probable es que "
+                "ese emisor ya no cotice: revisa el universo")
+    return (f"no está en el mapa y las listas vinieron cortas ({conteos}, "
+            f"mínimo {MIN_EMISORES}); el mapa está incompleto, no el emisor")
+
+
 def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
                     fetch: Callable[..., dict] | None = None,
-                    limitador: Limitador | None = None) -> dict[str, str]:
-    """Mapa ticker->CIK, del disco si ya está y de la SEC si no."""
+                    limitador: Limitador | None = None,
+                    refrescar: bool = False) -> dict[str, str]:
+    """
+    Mapa ticker->CIK, de las **dos** listas oficiales, con el caché validado.
+
+    Un caché sin validar es un error silencioso permanente: se devuelve tal cual
+    en cada corrida y los emisores que le falten salen "sin CIK" para siempre.
+    Pasó — ocho nombres fallaron idéntico tres corridas seguidas. Un mapa por
+    debajo de :data:`MIN_EMISORES` se descarta y se vuelve a pedir.
+
+    Y se consultan las dos listas porque depender de una sola hace que su hueco
+    sea un hueco del modelo. La segunda solo aporta lo que a la primera le
+    falta; nunca pisa lo que ya está.
+
+    Queda escrito al lado del caché cuántos emisores trajo cada lista. Con eso,
+    un ticker ausente se puede leer: si las dos listas vinieron completas y el
+    ticker no está en ninguna, no es que falte el mapa — es que ese emisor ya no
+    cotiza, y lo que hay que corregir es el universo.
+
+    Ese archivo de procedencia hace además de marca de versión. Un caché sin él
+    lo escribió el código de una sola fuente, así que se descarta una vez: si no,
+    el arreglo no llegaría nunca a quien ya tiene el mapa viejo en disco, que es
+    exactamente quien lo necesita. ``refrescar=True`` lo fuerza igual.
+    """
     fetch = fetch_json if fetch is None else fetch
     cache = Path(cache) if cache else None
-    if cache and cache.is_file():
-        return json.loads(cache.read_text(encoding="utf-8"))
+
+    if cache and cache.is_file() and not refrescar:
+        try:
+            guardado = json.loads(cache.read_text(encoding="utf-8"))
+        except ValueError:
+            guardado = {}
+        if (isinstance(guardado, dict) and len(guardado) >= MIN_EMISORES
+                and fuentes_del_mapa(cache)):
+            return guardado
 
     mapa = parse_ticker_map(fetch(SEC_TICKERS, contacto=contacto,
                                   limitador=limitador))
+    primera = len(mapa)
+    try:
+        otra = parse_ticker_map_exchange(
+            fetch(SEC_TICKERS_EXCHANGE, contacto=contacto, limitador=limitador))
+    except Exception as exc:            # noqa: BLE001 - la segunda es apoyo
+        otra, fallo = {}, f"{type(exc).__name__}: {exc}"
+    else:
+        fallo = ""
+    for ticker, cik in otra.items():
+        mapa.setdefault(ticker, cik)
+
     if cache:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(mapa, indent=0, sort_keys=True),
-                         encoding="utf-8")
+        # La procedencia se escribe siempre, y el mapa solo si es plausible.
+        # Al revés sería justo al revés de lo útil: el caso donde hay que
+        # explicar qué pasó es el del mapa corto, que es el que no se guarda.
+        fuentes_path(cache).write_text(json.dumps(
+            {"company_tickers": primera, "company_tickers_exchange": len(otra),
+             "total": len(mapa), "minimo_exigido": MIN_EMISORES,
+             "error_segunda_lista": fallo,
+             "cuando": time.strftime("%Y-%m-%d %H:%M:%S")},
+            indent=1, sort_keys=True), encoding="utf-8")
+        if len(mapa) >= MIN_EMISORES:
+            cache.write_text(json.dumps(mapa, indent=0, sort_keys=True),
+                             encoding="utf-8")
     return mapa
 
 
