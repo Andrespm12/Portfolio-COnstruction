@@ -254,6 +254,30 @@ def build_cells() -> list[dict]:
         "Un emisor que falle no tumba la corrida. Los extranjeros que "
         "presentan 20-F suelen traer menos etiquetas, y algunos ninguna de "
         "las que conocemos; salen listados al final en vez de rellenarse.\n",
+        "\n",
+        "### Si un nombre vigente sale «sin CIK»\n",
+        "\n",
+        "El ticker→CIK sale de tres archivos oficiales — `company_tickers.json`, "
+        "`company_tickers_exchange.json` y `ticker.txt` — y la SEC dice de "
+        "ellos que los actualiza pero **no garantiza su exactitud ni su "
+        "alcance**. Un registrante vivo puede faltar en los tres. Ya pasó: en "
+        "una corrida con las tres listas completas faltaban ocho miembros del "
+        "S&P 500.\n",
+        "\n",
+        "Faltar, entonces, no prueba nada sobre el emisor. Búscalo en "
+        "[CIK Lookup](https://www.sec.gov/search-filings/cik-lookup) y anota "
+        "una línea en `_ciks_manuales.csv`, dentro de la carpeta del almacén:\n",
+        "\n",
+        "```\n",
+        "ticker,cik,por_que\n",
+        "AVB,915912,verificado en EDGAR 2026-09\n",
+        "```\n",
+        "\n",
+        "Se lee en cada corrida, también con el mapa cacheado, y **solo "
+        "rellena huecos**: nunca contradice a la SEC en silencio. El nombre "
+        "que la SEC tiene para ese CIK queda impreso y en `_emisores.csv` — "
+        "míralo, porque un CIK equivocado no da error: da los estados "
+        "financieros de otra empresa con tu ticker encima.\n",
     ))
     cells.append(code(
         "import time\n",
@@ -265,16 +289,25 @@ def build_cells() -> list[dict]:
         "# De que lista salio cada cosa. Sin esto, 'sin CIK' no se puede leer:\n",
         "# no se sabe si falta el emisor o si falta el mapa.\n",
         "_fuentes = edgar.fuentes_del_mapa(_cache_mapa)\n",
+        "_manuales = edgar.leer_overrides(DESTINO)\n",
         "print(f'Mapa ticker->CIK: {len(mapa):,} emisores'\n",
-        "      + (f\" (company_tickers={_fuentes['company_tickers']:,}, \"\n",
-        "         f\"company_tickers_exchange={_fuentes['company_tickers_exchange']:,})\"\n",
+        "      + (' (' + ', '.join(f'{_k}={_fuentes[_k]:,}' for _k in\n",
+        "                          ('company_tickers', 'company_tickers_exchange',\n",
+        "                           'ticker_txt') if _k in _fuentes) + ')'\n",
         "         if 'company_tickers' in _fuentes else ''))\n",
+        "if _manuales:\n",
+        "    print(f'  + {len(_manuales)} CIK a mano en '\n",
+        "          f'{edgar.ARCHIVO_OVERRIDES}: ' + ', '.join(sorted(_manuales)))\n",
         "if len(mapa) < edgar.MIN_EMISORES:\n",
         "    print(f'  AVISO: son menos de {edgar.MIN_EMISORES:,}. El mapa esta '\n",
         "          'incompleto y lo que salga sin CIK no prueba nada.')\n",
         "print()\n",
         "\n",
         "etiquetas, ok, sin_cik, fallaron, saltados = [], [], [], [], []\n",
+        "# Que nombre tiene la SEC para cada CIK. Es la comprobacion de que el\n",
+        "# CIK es el correcto: uno equivocado no da error, da los estados de\n",
+        "# otra empresa con nuestro ticker encima.\n",
+        "emisores = []\n",
         "# El motivo de cada fallo, para no depender del scrollback: un nombre\n",
         "# que falla dos corridas seguidas necesita diagnostico, y 'sin CIK' y\n",
         "# '404' llevan a sitios distintos.\n",
@@ -317,6 +350,9 @@ def build_cells() -> list[dict]:
         "\n",
         "    edgar.escribir_hechos(DESTINO, _tk, _hechos)\n",
         "    ok.append(_tk)\n",
+        "    emisores.append({'ticker': _tk, 'cik': _cik,\n",
+        "                     'entidad': _payload.get('entityName', ''),\n",
+        "                     'fuente': 'a mano' if _tk in _manuales else 'SEC'})\n",
         "    for _m, _e in _elegidas.items():\n",
         "        etiquetas.append({'ticker': _tk, 'metrica': _m, 'etiqueta': _e})\n",
         "    print(f'  [{_i:3d}/{len(TICKERS)}] {_tk:6s} {len(_hechos):5d} hechos, '\n",
@@ -331,9 +367,23 @@ def build_cells() -> list[dict]:
         "    print(f'  Motivos en _fallos.csv ({len(motivos)} nombre(s))')\n",
         "if ok or REBAJAR_TODO:\n",
         "    edgar.escribir_manifiesto(DESTINO)\n",
+        "if emisores:\n",
+        "    import pandas as _pd\n",
+        "    _pd.DataFrame(emisores).to_csv(DESTINO / '_emisores.csv',\n",
+        "                                   index=False)\n",
+        "    _a_mano = [_e for _e in emisores if _e['fuente'] == 'a mano']\n",
+        "    if _a_mano:\n",
+        "        print('\\nCIK puestos a mano — verifica que el nombre sea el '\n",
+        "              'que esperas:')\n",
+        "        for _e in _a_mano:\n",
+        "            print(f\"  {_e['ticker']:6s} {_e['cik']}  {_e['entidad']}\")\n",
         "if sin_cik:\n",
         "    print(f'  Sin CIK: {\", \".join(sin_cik[:20])}')\n",
         "    print(f'           {edgar.detalle_sin_cik(_fuentes)}')\n",
+        "    _plantilla = edgar.plantilla_overrides(DESTINO, sin_cik)\n",
+        "    if _plantilla:\n",
+        "        print(f'  Te deje {_plantilla} con esos nombres y el CIK en '\n",
+        "              'blanco: llenalo y vuelve a correr esta celda.')\n",
         "if fallaron:\n",
         "    print(f'  Fallaron: {\", \".join(fallaron[:20])}')\n",
     ))

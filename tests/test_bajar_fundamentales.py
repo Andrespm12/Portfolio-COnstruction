@@ -41,9 +41,14 @@ TICKERS_EXCHANGE = {
              for fila in TICKERS.values()]
             + [[915912, "AvalonBay Communities", "AVB", "NYSE"]]}
 
+# La tercera lista oficial, en texto plano. No trae AVB: es el caso real, en el
+# que las tres vienen completas y el nombre no esta en ninguna.
+TICKER_TXT = "\n".join(f"{f['ticker'].lower()}\t{f['cik_str']}"
+                       for f in TICKERS.values())
+
 
 def facts(cik, ingresos, activos, *, etiqueta_ingresos="Revenues"):
-    return {"cik": cik, "facts": {"us-gaap": {
+    return {"cik": cik, "entityName": "PRUEBA INC", "facts": {"us-gaap": {
         etiqueta_ingresos: {"units": {"USD": [
             {"val": ingresos, "start": "2024-01-01", "end": "2024-12-31",
              "filed": "2025-02-01", "form": "10-K", "accn": "a", "fy": 2024,
@@ -85,7 +90,16 @@ def edgar_falso(monkeypatch):
             raise RuntimeError(f"404 para {cik}")
         return CUERPOS[cik]
 
+    def fetch_txt(url, *, contacto=None, limitador=None):
+        pedidos.append(url)
+        assert url == edgar.SEC_TICKER_TXT, f"URL inesperada: {url}"
+        return TICKER_TXT
+
     monkeypatch.setattr(edgar, "fetch_json", fetch)
+    # Hay DOS líneas que salen a la red desde que ticker.txt no es JSON. Sin
+    # sustituir las dos, la prueba marca en verde porque el fallo de red se
+    # degrada en silencio, que es exactamente lo que no queremos probar.
+    monkeypatch.setattr(edgar, "fetch_text", fetch_txt)
     # Sin espera entre peticiones: la cortesía con la SEC se prueba aparte.
     # Limitador lee SEC_MAX_RPS al construir, así que basta con bajarlo.
     monkeypatch.setattr(edgar, "SEC_MAX_RPS", 0)
@@ -165,6 +179,16 @@ def test_forzar_vuelve_a_bajar(tmp_path, edgar_falso):
     antes = len(edgar_falso)
     correr(tmp_path, "AAPL", "--forzar")
     assert len(edgar_falso) > antes
+
+
+def test_se_consultan_las_tres_listas_oficiales(tmp_path, edgar_falso):
+    # Un fallo de red en cualquiera de las tres se degrada en silencio — es lo
+    # correcto en producción y una trampa en las pruebas, porque una lista que
+    # dejara de consultarse marcaría en verde igual.
+    correr(tmp_path, "AAPL")
+    for url in (edgar.SEC_TICKERS, edgar.SEC_TICKERS_EXCHANGE,
+                edgar.SEC_TICKER_TXT):
+        assert url in edgar_falso, f"nadie pidió {url}"
 
 
 def test_el_mapa_de_tickers_se_pide_una_sola_vez(tmp_path, edgar_falso):
@@ -268,16 +292,47 @@ def test_un_nombre_que_solo_esta_en_la_segunda_lista_se_baja(tmp_path,
     assert (tmp_path / "AVB.csv").exists()
 
 
-def test_el_fallo_distingue_emisor_retirado_de_mapa_incompleto(tmp_path,
-                                                               edgar_falso):
-    # Las dos causas llevan a sitios opuestos: una se arregla en el universo,
-    # la otra rebajando el mapa. El CSV tiene que decir cuál es.
+def test_el_fallo_dice_donde_mirar_en_vez_de_concluir(tmp_path, edgar_falso):
+    # Con las listas sanas, faltar no prueba nada: la SEC las publica sin
+    # garantizar su alcance. El CSV manda a EDGAR, no a una conclusión.
     correr(tmp_path, "AAPL", "NOEXISTE")
     fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
     detalle = fallos.loc["NOEXISTE", "detalle"]
-    assert "ya no cotice" in detalle
-    assert "revisa el universo" in detalle
-    assert str(edgar.MIN_EMISORES) in detalle or "company_tickers=" in detalle
+    assert "NO prueba" in detalle
+    assert "cik-lookup" in detalle
+    assert "company_tickers=" in detalle
+
+
+def test_un_cik_a_mano_desbloquea_el_nombre_de_punta_a_punta(tmp_path,
+                                                             edgar_falso):
+    # El camino completo para los ocho que ninguna lista trae: una línea
+    # verificada a mano y el nombre baja como cualquier otro.
+    (tmp_path / "_ciks_manuales.csv").write_text(
+        "ticker,cik,por_que\nAVB,915912,verificado en EDGAR\n",
+        encoding="utf-8")
+    assert correr(tmp_path, "AVB") == 0
+    assert (tmp_path / "AVB.csv").exists()
+    assert not (tmp_path / "_fallos.csv").exists()
+
+
+def test_queda_registrado_que_nombre_tiene_la_sec_para_cada_cik(tmp_path,
+                                                                edgar_falso,
+                                                                capsys):
+    # Un CIK equivocado no da error: da los estados de otra empresa con nuestro
+    # ticker encima. La única defensa es ver el nombre.
+    (tmp_path / "_ciks_manuales.csv").write_text(
+        "ticker,cik,por_que\nAVB,915912,verificado\n", encoding="utf-8")
+    correr(tmp_path, "AAPL", "AVB")
+
+    emisores = pd.read_csv(tmp_path / "_emisores.csv").set_index("ticker")
+    assert emisores.loc["AVB", "cik"] == 915912
+    assert emisores.loc["AVB", "fuente"] == "a mano"
+    assert emisores.loc["AAPL", "fuente"] == "SEC"
+    assert emisores.loc["AVB", "entidad"] == "PRUEBA INC"
+    # Y se imprime, porque un CSV que nadie abre no verifica nada.
+    salida = capsys.readouterr().out
+    assert "verifica que el nombre sea el que esperas" in salida
+    assert "PRUEBA INC" in salida
 
 
 def test_con_el_mapa_corto_el_fallo_no_culpa_al_emisor(tmp_path, monkeypatch,
@@ -299,6 +354,25 @@ def test_con_el_mapa_corto_el_fallo_no_culpa_al_emisor(tmp_path, monkeypatch,
     assert "incompleto" in detalle
     assert "ya no cotice" not in detalle
     assert "El mapa está incompleto" in capsys.readouterr().out
+
+
+def test_se_deja_el_formulario_de_overrides_ya_con_los_nombres(tmp_path,
+                                                               edgar_falso,
+                                                               capsys):
+    # Un archivo que hay que crear desde cero se pospone; uno que ya está
+    # escrito con las filas pendientes se llena.
+    correr(tmp_path, "AAPL", "NOEXISTE")
+    filas = list(csv.DictReader((tmp_path / "_ciks_manuales.csv").open()))
+    assert [f["ticker"] for f in filas] == ["NOEXISTE"]
+    assert filas[0]["cik"] == "", "el CIK lo pone una persona, no el guion"
+    assert "llénalo y vuelve a correr" in capsys.readouterr().out
+
+
+def test_el_formulario_no_pisa_lo_que_ya_escribiste(tmp_path, edgar_falso):
+    (tmp_path / "_ciks_manuales.csv").write_text(
+        "ticker,cik,por_que\nAVB,915912,verificado\n", encoding="utf-8")
+    correr(tmp_path, "NOEXISTE")
+    assert "915912" in (tmp_path / "_ciks_manuales.csv").read_text()
 
 
 def test_sin_fallos_no_se_escribe_el_archivo(tmp_path, edgar_falso):

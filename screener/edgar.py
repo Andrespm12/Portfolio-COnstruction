@@ -59,6 +59,17 @@ SEC_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 #: tres corridas seguidas. Depender de un solo archivo hace que un hueco suyo
 #: sea un hueco del modelo.
 SEC_TICKERS_EXCHANGE = "https://www.sec.gov/files/company_tickers_exchange.json"
+#: Tercera lista oficial, en texto plano y generada aparte de las dos JSON.
+#: La SEC dice de estos archivos que los actualiza pero **no garantiza su
+#: exactitud ni su alcance**, así que un emisor vigente puede faltar en uno sin
+#: que eso signifique nada sobre el emisor. Por eso se consultan las tres.
+SEC_TICKER_TXT = "https://www.sec.gov/include/ticker.txt"
+
+#: Overrides a mano: ``ticker,cik,por_que``. Es la salida cuando las tres
+#: listas fallan. Solo rellena huecos — nunca contradice a la SEC en silencio —
+#: y cada línea pide un porqué porque un CIK equivocado no da error: da los
+#: estados financieros de otra empresa con el nombre nuestro encima.
+ARCHIVO_OVERRIDES = "_ciks_manuales.csv"
 
 #: Mínimo plausible de emisores en el mapa. La lista real trae más de 10.000;
 #: bastante menos que esto es un archivo truncado, no la verdad. Sin este piso
@@ -315,9 +326,7 @@ def user_agent(contacto: str) -> str:
     return contacto
 
 
-def fetch_json(url: str, *, contacto: str,
-               limitador: Limitador | None = None) -> dict:
-    """La única línea que toca la red. Sustituible en pruebas."""
+def _get(url: str, contacto: str, limitador: Limitador | None):
     import requests
 
     if limitador is not None:
@@ -327,7 +336,19 @@ def fetch_json(url: str, *, contacto: str,
         headers={"User-Agent": user_agent(contacto),
                  "Accept-Encoding": "gzip, deflate"})
     respuesta.raise_for_status()
-    return respuesta.json()
+    return respuesta
+
+
+def fetch_json(url: str, *, contacto: str,
+               limitador: Limitador | None = None) -> dict:
+    """La única línea que toca la red. Sustituible en pruebas."""
+    return _get(url, contacto, limitador).json()
+
+
+def fetch_text(url: str, *, contacto: str,
+               limitador: Limitador | None = None) -> str:
+    """Igual, para los archivos de la SEC que no son JSON."""
+    return _get(url, contacto, limitador).text
 
 
 # --------------------------------------------------------------------------
@@ -380,6 +401,84 @@ def parse_ticker_map_exchange(payload: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
+def parse_ticker_txt(texto: str) -> dict[str, str]:
+    """
+    ``ticker.txt``: una línea por emisor, ``aapl<TAB>320193``.
+
+    Sin encabezado y sin comillas. Se ignora en silencio la línea que no tenga
+    esa forma: el archivo lo genera la SEC y su formato no es un contrato.
+    """
+    out: dict[str, str] = {}
+    for linea in (texto or "").splitlines():
+        partes = linea.replace(",", "\t").split("\t")
+        if len(partes) < 2:
+            continue
+        try:
+            ticker = partes[0].strip().upper()
+            cik = f"{int(partes[1].strip()):010d}"
+        except ValueError:
+            continue
+        if ticker:
+            out.setdefault(ticker, cik)
+    return out
+
+
+def leer_overrides(directorio: Path | str | None) -> dict[str, str]:
+    """
+    Los CIK puestos a mano en ``_ciks_manuales.csv``, si el archivo existe.
+
+    Es deliberadamente un CSV editable y no una constante en el código: quien
+    tiene que verificar que el CIK 0000915912 es de verdad AvalonBay y no de
+    otra cosa es una persona, una vez, mirando EDGAR.
+    """
+    if not directorio:
+        return {}
+    ruta = Path(directorio) / ARCHIVO_OVERRIDES
+    if not ruta.is_file():
+        return {}
+
+    import csv as _csv
+
+    out: dict[str, str] = {}
+    with ruta.open(encoding="utf-8", newline="") as fh:
+        for fila in _csv.DictReader(fh):
+            ticker = (fila.get("ticker") or "").strip().upper()
+            crudo = (fila.get("cik") or "").strip()
+            if not ticker or not crudo:
+                continue
+            try:
+                out[ticker] = f"{int(crudo):010d}"
+            except ValueError:
+                continue
+    return out
+
+
+def plantilla_overrides(directorio: Path | str,
+                        tickers: Iterable[str]) -> Path | None:
+    """
+    Deja el CSV de overrides ya con los nombres que fallaron y el CIK en blanco.
+
+    Un archivo que hay que crear desde cero se pospone; uno que ya está escrito
+    con las ocho filas pendientes se llena. No pisa nada: si el archivo existe,
+    no lo toca.
+    """
+    directorio = Path(directorio)
+    ruta = directorio / ARCHIVO_OVERRIDES
+    tickers = sorted({t.strip().upper() for t in tickers if t and t.strip()})
+    if ruta.exists() or not tickers:
+        return None
+
+    import csv as _csv
+
+    directorio.mkdir(parents=True, exist_ok=True)
+    with ruta.open("w", newline="", encoding="utf-8") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["ticker", "cik", "por_que"])
+        for ticker in tickers:
+            w.writerow([ticker, "", ""])
+    return ruta
+
+
 def fuentes_path(cache: Path | str) -> Path:
     """Dónde vive la procedencia del mapa que está en ``cache``."""
     cache = Path(cache)
@@ -408,35 +507,46 @@ def fuentes_del_mapa(cache: Path | str | None) -> dict[str, Any]:
 
 def detalle_sin_cik(fuentes: Mapping[str, Any]) -> str:
     """
-    Qué significa que un ticker no esté en el mapa.
+    Qué significa que un ticker no esté en el mapa — y qué NO significa.
 
-    Hay dos causas y llevan a sitios opuestos. Si las listas de la SEC vinieron
-    completas, el ticker no está porque ese emisor ya no cotiza — lo compraron,
-    lo fusionaron, lo sacaron — y lo que hay que arreglar es nuestro universo, no
-    la descarga. Si vinieron cortas, el mapa está a medias y el nombre volverá a
-    fallar hasta que se rebaje. Distinguirlas sin salir a mirar es todo el punto
-    de escribir la procedencia.
+    Una versión anterior de esta función concluía que un ticker ausente de las
+    listas completas era un emisor que ya no cotiza. Está mal, y la corrida que
+    lo demostró venía con las listas sanas y AvalonBay, BNY Mellon, Equity
+    Residential, Interpublic y Marsh McLennan adentro: cinco miembros del S&P
+    500 vivos. La SEC dice de estos archivos, con esas palabras, que los
+    actualiza pero **no garantiza su exactitud ni su alcance**. Un registrante
+    vigente puede faltar, y faltar no es evidencia de nada sobre el emisor.
+
+    Así que esto ya no concluye: reporta qué se consultó y deja el diagnóstico
+    donde se puede hacer, que es mirando EDGAR una vez y anotando el CIK.
 
     Vive aquí, y no en el guion, porque el cuaderno de Colab repite el mismo
     lazo de descarga: dos copias de este texto se separan a la primera
     corrección.
     """
     a = fuentes.get("company_tickers")
-    b = fuentes.get("company_tickers_exchange")
     if a is None:
         return ("no está en el mapa ticker->CIK; no hay registro de qué "
                 "trajeron las listas (borra _tickers.json y vuelve a correr)")
-    conteos = f"company_tickers={a}, company_tickers_exchange={b}"
-    if a >= MIN_EMISORES or (b or 0) >= MIN_EMISORES:
-        return (f"no está en ninguna de las dos listas de la SEC ({conteos}); "
-                "las listas vinieron completas, así que lo más probable es que "
-                "ese emisor ya no cotice: revisa el universo")
-    return (f"no está en el mapa y las listas vinieron cortas ({conteos}, "
-            f"mínimo {MIN_EMISORES}); el mapa está incompleto, no el emisor")
+    conteos = ", ".join(
+        f"{k}={fuentes.get(k)}"
+        for k in ("company_tickers", "company_tickers_exchange", "ticker_txt")
+        if fuentes.get(k) is not None)
+    if max(a, fuentes.get("company_tickers_exchange") or 0,
+           fuentes.get("ticker_txt") or 0) < MIN_EMISORES:
+        return (f"no está en el mapa y las listas vinieron cortas ({conteos}, "
+                f"mínimo {MIN_EMISORES}); el mapa está incompleto, no el emisor")
+    return (f"no está en ninguna de las listas de la SEC ({conteos}). Las "
+            "listas vinieron completas, pero la SEC no garantiza su alcance, "
+            f"así que esto NO prueba que el emisor no cotice. Búscalo en "
+            f"https://www.sec.gov/search-filings/cik-lookup y anota el CIK en "
+            f"{ARCHIVO_OVERRIDES} (ticker,cik,por_que); si de verdad ya no "
+            "cotiza, sácalo del universo")
 
 
 def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
                     fetch: Callable[..., dict] | None = None,
+                    fetch_texto: Callable[..., str] | None = None,
                     limitador: Limitador | None = None,
                     refrescar: bool = False) -> dict[str, str]:
     """
@@ -447,9 +557,11 @@ def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
     Pasó — ocho nombres fallaron idéntico tres corridas seguidas. Un mapa por
     debajo de :data:`MIN_EMISORES` se descarta y se vuelve a pedir.
 
-    Y se consultan las dos listas porque depender de una sola hace que su hueco
-    sea un hueco del modelo. La segunda solo aporta lo que a la primera le
-    falta; nunca pisa lo que ya está.
+    Y se consultan las **tres** listas oficiales porque depender de una sola
+    hace que su hueco sea un hueco del modelo: la SEC las publica sin garantizar
+    su alcance. Cada una solo aporta lo que a la anterior le falta; ninguna pisa
+    lo que ya está, así que ante un desacuerdo manda ``company_tickers.json``,
+    que es la canónica. Al final entran los overrides a mano, también sin pisar.
 
     Queda escrito al lado del caché cuántos emisores trajo cada lista. Con eso,
     un ticker ausente se puede leer: si las dos listas vinieron completas y el
@@ -462,7 +574,12 @@ def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
     exactamente quien lo necesita. ``refrescar=True`` lo fuerza igual.
     """
     fetch = fetch_json if fetch is None else fetch
+    fetch_texto = fetch_text if fetch_texto is None else fetch_texto
     cache = Path(cache) if cache else None
+    # Los overrides se releen siempre, también con el mapa cacheado: si no,
+    # agregar una línea al CSV no haría nada hasta la próxima descarga y quien
+    # lo edita concluiría, con razón, que no sirve.
+    manuales = leer_overrides(cache.parent if cache else None)
 
     if cache and cache.is_file() and not refrescar:
         try:
@@ -471,20 +588,29 @@ def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
             guardado = {}
         if (isinstance(guardado, dict) and len(guardado) >= MIN_EMISORES
                 and fuentes_del_mapa(cache)):
+            for ticker, cik in manuales.items():
+                guardado.setdefault(ticker, cik)
             return guardado
 
     mapa = parse_ticker_map(fetch(SEC_TICKERS, contacto=contacto,
                                   limitador=limitador))
-    primera = len(mapa)
-    try:
-        otra = parse_ticker_map_exchange(
-            fetch(SEC_TICKERS_EXCHANGE, contacto=contacto, limitador=limitador))
-    except Exception as exc:            # noqa: BLE001 - la segunda es apoyo
-        otra, fallo = {}, f"{type(exc).__name__}: {exc}"
-    else:
-        fallo = ""
-    for ticker, cik in otra.items():
-        mapa.setdefault(ticker, cik)
+    conteos = {"company_tickers": len(mapa)}
+    errores: dict[str, str] = {}
+
+    def agregar(nombre, traer):
+        try:
+            otra = traer()
+        except Exception as exc:        # noqa: BLE001 - cada lista es apoyo
+            conteos[nombre], errores[nombre] = 0, f"{type(exc).__name__}: {exc}"
+            return
+        conteos[nombre] = len(otra)
+        for ticker, cik in otra.items():
+            mapa.setdefault(ticker, cik)
+
+    agregar("company_tickers_exchange", lambda: parse_ticker_map_exchange(
+        fetch(SEC_TICKERS_EXCHANGE, contacto=contacto, limitador=limitador)))
+    agregar("ticker_txt", lambda: parse_ticker_txt(
+        fetch_texto(SEC_TICKER_TXT, contacto=contacto, limitador=limitador)))
 
     if cache:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -492,14 +618,17 @@ def load_ticker_map(*, contacto: str, cache: Path | str | None = None,
         # Al revés sería justo al revés de lo útil: el caso donde hay que
         # explicar qué pasó es el del mapa corto, que es el que no se guarda.
         fuentes_path(cache).write_text(json.dumps(
-            {"company_tickers": primera, "company_tickers_exchange": len(otra),
-             "total": len(mapa), "minimo_exigido": MIN_EMISORES,
-             "error_segunda_lista": fallo,
+            {**conteos, "total": len(mapa), "minimo_exigido": MIN_EMISORES,
+             "errores": errores, "overrides": len(manuales),
              "cuando": time.strftime("%Y-%m-%d %H:%M:%S")},
             indent=1, sort_keys=True), encoding="utf-8")
         if len(mapa) >= MIN_EMISORES:
             cache.write_text(json.dumps(mapa, indent=0, sort_keys=True),
                              encoding="utf-8")
+
+    # Al final y sin pisar: un override nunca contradice a la SEC en silencio.
+    for ticker, cik in manuales.items():
+        mapa.setdefault(ticker, cik)
     return mapa
 
 

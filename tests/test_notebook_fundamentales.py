@@ -44,13 +44,18 @@ TICKERS_SEC = {"0": {"cik_str": 320193, "ticker": "AAPL"},
 TICKERS_SEC |= {str(i): {"cik_str": 500000 + i, "ticker": f"T{i:05d}"}
                 for i in range(3, MIN_EMISORES + 3)}
 
-#: La segunda lista oficial. Trae AVB, que a la primera le falta: es el caso
-#: que hizo fallar ocho nombres vigentes tres corridas seguidas.
+#: La segunda lista oficial. Tampoco trae AVB — ese es el caso real: las tres
+#: listas completas y el nombre en ninguna.
 TICKERS_SEC_EXCHANGE = {
     "fields": ["cik", "name", "ticker", "exchange"],
     "data": [[f["cik_str"], "X", f["ticker"], "NYSE"]
              for f in TICKERS_SEC.values()]
-            + [[915912, "AvalonBay Communities", "AVB", "NYSE"]]}
+}
+
+#: La tercera lista oficial. Tampoco trae AVB: en el cuaderno se prueba el
+#: camino que de verdad lo rescata, que es el CIK puesto a mano.
+TICKER_TXT_SEC = "\n".join(f"{f['ticker'].lower()}\t{f['cik_str']}"
+                           for f in TICKERS_SEC.values())
 
 
 def _facts(cik, base, etiqueta="Revenues"):
@@ -69,7 +74,8 @@ def _facts(cik, base, etiqueta="Revenues"):
     ingresos.append({"val": base * (1.08 ** 5) * 1.15, "start": "2020-01-01",
                      "end": "2020-12-31", "filed": "2023-02-15", "form": "10-K",
                      "accn": "corr", "fy": 2022, "fp": "FY"})
-    return {"cik": cik, "facts": {"us-gaap": {
+    return {"cik": cik, "entityName": f"EMISOR {cik}",
+            "facts": {"us-gaap": {
         etiqueta: {"units": {"USD": ingresos}},
         "Assets": {"units": {"USD": activos}},
         "StockholdersEquity": {"units": {"USD": activos}}}}}
@@ -99,7 +105,14 @@ def _fetch(url, *, contacto=None, limitador=None):
         raise RuntimeError(f'404 para {cik}')
     return _CUERPOS[cik]
 
+def _fetch_texto(url, *, contacto=None, limitador=None):
+    assert url == _edgar.SEC_TICKER_TXT, url
+    return _TICKER_TXT_SEC
+
 _edgar.fetch_json = _fetch
+# Son DOS lineas a la red desde que ticker.txt no es JSON. Sin sustituir las
+# dos, la celda sale a internet de verdad y el fallo se degrada en silencio.
+_edgar.fetch_text = _fetch_texto
 _edgar.SEC_MAX_RPS = 0          # sin espera artificial en la prueba
 
 # google.colab no existe fuera de Colab. Se declara ausente en vez de
@@ -183,6 +196,11 @@ def corrida():
     celdas = executable_cells(nb)
 
     trabajo = tempfile.mkdtemp(prefix="nb-fund-")
+    # AVB no esta en ninguna de las tres listas de la SEC — el caso real. Su
+    # unica via es el CIK puesto a mano, y este archivo es esa via.
+    (Path(trabajo) / "_ciks_manuales.csv").write_text(
+        "ticker,cik,por_que\nAVB,915912,verificado en EDGAR\n",
+        encoding="utf-8")
 
     parcheadas = 0
     for i, fuente in enumerate(celdas):
@@ -219,6 +237,7 @@ def corrida():
     ns: dict = {"__name__": "__main__", "display": _display,
                 "_TICKERS_SEC": TICKERS_SEC,
                 "_TICKERS_SEC_EXCHANGE": TICKERS_SEC_EXCHANGE,
+                "_TICKER_TXT_SEC": TICKER_TXT_SEC,
                 "_CUERPOS": CUERPOS}
     cwd = os.getcwd()
     fallos: list[tuple[int, str]] = []
@@ -265,27 +284,43 @@ def test_un_nombre_sin_cik_no_tumba_la_corrida(corrida):
     assert corrida["sin_cik"] == ["NOEXISTE"]
 
 
-def test_un_nombre_solo_en_la_segunda_lista_se_baja(corrida):
-    # Con una sola fuente, AVB fallaba "sin CIK" en cada corrida, para siempre.
+def test_un_cik_a_mano_rescata_lo_que_ninguna_lista_trae(corrida):
+    # Las tres listas completas y AVB en ninguna: es lo que pasó de verdad.
+    # La salida es una línea que una persona verificó en EDGAR.
     assert (corrida["DESTINO"] / "AVB.csv").exists()
     assert corrida["mapa"]["AVB"] == "0000915912"
 
 
-def test_el_cuaderno_dice_cual_de_las_dos_causas_es(corrida):
+def test_el_cuaderno_deja_ver_que_nombre_tiene_la_sec_para_ese_cik(corrida):
+    import pandas as pd
+
+    emisores = pd.read_csv(corrida["DESTINO"] / "_emisores.csv").set_index(
+        "ticker")
+    assert emisores.loc["AVB", "fuente"] == "a mano"
+    assert emisores.loc["AAPL", "fuente"] == "SEC"
+    # Un CIK equivocado no da error: da los estados de otra empresa. El nombre
+    # es la única forma de verlo.
+    assert emisores.loc["AVB", "entidad"] == "EMISOR 915912"
+
+
+def test_el_cuaderno_manda_a_edgar_en_vez_de_concluir(corrida):
     import pandas as pd
 
     fallos = pd.read_csv(corrida["DESTINO"] / "_fallos.csv").set_index("ticker")
     detalle = fallos.loc["NOEXISTE", "detalle"]
-    # Emisor retirado y mapa incompleto llevan a sitios opuestos: uno se
-    # arregla en el universo y el otro rebajando el mapa.
-    assert "ya no cotice" in detalle
+    # Con las listas sanas, faltar no prueba nada: la SEC no garantiza su
+    # alcance. Lo que corresponde es mirar EDGAR, no sacar una conclusión.
+    assert "NO prueba" in detalle
+    assert "cik-lookup" in detalle
+    assert "_ciks_manuales.csv" in detalle
     assert "company_tickers=" in detalle
 
 
 def test_el_cuaderno_registra_la_procedencia_del_mapa(corrida):
     fuentes = corrida["_fuentes"]
     assert fuentes["company_tickers"] == len(TICKERS_SEC)
-    assert fuentes["company_tickers_exchange"] == len(TICKERS_SEC) + 1
+    assert fuentes["company_tickers_exchange"] == len(TICKERS_SEC)
+    assert fuentes["ticker_txt"] == len(TICKERS_SEC)
 
 
 def test_el_historico_llega_completo_en_la_primera_pasada(corrida):

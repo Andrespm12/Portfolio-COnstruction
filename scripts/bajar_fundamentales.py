@@ -33,10 +33,20 @@ Qué escribe
     datos/fundamentales/_tickers_fuentes.json  cuántos emisores trajo cada lista
     datos/fundamentales/_cobertura.csv qué porcentaje del universo tiene qué
     datos/fundamentales/_etiquetas.csv qué etiqueta XBRL ganó en cada emisor
+    datos/fundamentales/_emisores.csv  qué nombre tiene la SEC para cada CIK
     datos/fundamentales/_fallos.csv    qué nombre falló y por qué
 
-Ese último archivo es el que hay que leer antes de creerle a un número: dice
-literalmente de qué etiqueta salió cada métrica en cada empresa.
+Y uno que escribes tú, no el guion:
+
+    datos/fundamentales/_ciks_manuales.csv   ticker,cik,por_que
+
+La SEC publica sus listas de tickers sin garantizar su alcance, así que un
+emisor vigente puede faltar en las tres. Cuando pase, búscalo en
+https://www.sec.gov/search-filings/cik-lookup y anota el CIK ahí. Se lee en cada
+corrida y solo rellena huecos: nunca contradice a la SEC en silencio.
+
+Y ``_etiquetas.csv`` es el que hay que leer antes de creerle a un número: dice
+literalmente de qué etiqueta XBRL salió cada métrica en cada empresa.
 """
 
 from __future__ import annotations
@@ -55,7 +65,8 @@ from screener.edgar import (CONCEPTOS, MIN_EMISORES, Limitador,  # noqa: E402
                             coverage_report, detalle_sin_cik, escribir_hechos,
                             escribir_manifiesto, extract_facts,
                             fuentes_del_mapa, historia_por_ticker, leer_hechos,
-                            load_ticker_map, restatements)
+                            leer_overrides, load_ticker_map,
+                            plantilla_overrides, restatements)
 
 DESTINO = "datos/fundamentales"
 
@@ -122,16 +133,23 @@ def main(argv: list[str] | None = None) -> int:
     mapa = load_ticker_map(contacto=args.contacto, cache=cache_mapa,
                            limitador=limitador, refrescar=args.remapear)
     fuentes = fuentes_del_mapa(cache_mapa)
+    manuales = leer_overrides(destino)
     print(f"Mapa ticker->CIK: {len(mapa)} emisores"
-          + (f" (company_tickers={fuentes['company_tickers']}, "
-             f"company_tickers_exchange={fuentes['company_tickers_exchange']})"
+          + (" (" + ", ".join(
+              f"{k}={fuentes[k]}" for k in ("company_tickers",
+                                            "company_tickers_exchange",
+                                            "ticker_txt") if k in fuentes) + ")"
              if "company_tickers" in fuentes else ""))
+    if manuales:
+        print(f"  + {len(manuales)} CIK puesto(s) a mano en "
+              f"_ciks_manuales.csv: {', '.join(sorted(manuales))}")
     if len(mapa) < MIN_EMISORES:
         print(f"  AVISO: son menos de {MIN_EMISORES}. El mapa está incompleto "
               "y lo que salga 'sin CIK' no prueba nada.")
     print()
 
     etiquetas: list[dict] = []
+    emisores: list[dict] = []
     ok, sin_cik, fallaron, saltados = [], [], [], []
     # El motivo de cada fallo, para no depender del scrollback de la consola.
     # Un nombre que falla dos corridas seguidas necesita diagnóstico, y
@@ -175,6 +193,13 @@ def main(argv: list[str] | None = None) -> int:
 
         escribir_hechos(destino, ticker, hechos)
         ok.append(ticker)
+        # El nombre que la SEC tiene para ese CIK. Es la comprobación de que el
+        # CIK es el correcto: un CIK equivocado no da error, da los estados
+        # financieros de otra empresa con nuestro ticker encima. Con esto la
+        # confusión se ve de un vistazo en vez de propagarse al modelo.
+        emisores.append({"ticker": ticker, "cik": cik,
+                         "entidad": payload.get("entityName", ""),
+                         "fuente": "a mano" if ticker in manuales else "SEC"})
         for metrica, etiqueta in elegidas.items():
             etiquetas.append({"ticker": ticker, "metrica": metrica,
                               "etiqueta": etiqueta})
@@ -189,6 +214,22 @@ def main(argv: list[str] | None = None) -> int:
             if modo == "w":
                 w.writeheader()
             w.writerows(etiquetas)
+
+    if emisores:
+        modo = "w" if args.forzar or not (destino / "_emisores.csv").exists() else "a"
+        with (destino / "_emisores.csv").open(modo, newline="",
+                                              encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=["ticker", "cik", "entidad",
+                                               "fuente"])
+            if modo == "w":
+                w.writeheader()
+            w.writerows(emisores)
+        a_mano = [e for e in emisores if e["fuente"] == "a mano"]
+        if a_mano:
+            print("\nCIK puestos a mano — verifica que el nombre sea el que "
+                  "esperas:")
+            for e in a_mano:
+                print(f"  {e['ticker']:6s} {e['cik']}  {e['entidad']}")
 
     if motivos:
         with (destino / "_fallos.csv").open("w", newline="",
@@ -207,6 +248,10 @@ def main(argv: list[str] | None = None) -> int:
     if sin_cik:
         print(f"  Sin CIK: {', '.join(sin_cik[:15])}")
         print(f"           {detalle_sin_cik(fuentes)}")
+        plantilla = plantilla_overrides(destino, sin_cik)
+        if plantilla:
+            print(f"  Te dejé {plantilla} con esos nombres y el CIK en blanco: "
+                  "llénalo y vuelve a correr.")
     if fallaron:
         print(f"  Fallaron: {', '.join(fallaron[:15])}")
 
