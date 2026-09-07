@@ -439,6 +439,21 @@ def test_un_emisor_sin_liabilities_igual_trae_sus_componentes():
     assert sorted(h.valor for h in hechos) == [300.0, 700.0]
 
 
+def test_ninguna_partida_residual_hace_de_subtotal():
+    # El error que una corrida real destapó: `OtherLiabilitiesNoncurrent` como
+    # respaldo de `LiabilitiesNoncurrent`. Gana en 173 de 221 emisores porque
+    # casi nadie presenta el subtotal, así que la mayoría habría quedado con el
+    # renglón «otros» etiquetado como su pasivo no corriente completo.
+    #
+    # La regla general: una etiqueta que empieza con `Other` es una partida
+    # residual dentro de un subtotal, nunca el subtotal.
+    for c in CONCEPTOS:
+        residuales = [e for e in c.etiquetas if e.startswith("Other")]
+        assert not residuales, (
+            f"{c.clave} usa {residuales} como si fuera un total; "
+            "una partida «otros» mide una fracción, no el agregado")
+
+
 def test_los_saldos_estan_marcados_como_instantaneos():
     # Si un saldo se marcara como flujo, ultimo_anual le exigiría un período de
     # un año y lo descartaría entero.

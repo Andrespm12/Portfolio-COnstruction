@@ -175,8 +175,16 @@ CONCEPTOS: tuple[Concepto, ...] = (
     ),
     Concepto(
         "pasivos_no_corrientes",
-        ("LiabilitiesNoncurrent", "OtherLiabilitiesNoncurrent"),
+        ("LiabilitiesNoncurrent",),
         instantaneo=True,
+        descripcion="Solo el subtotal. `OtherLiabilitiesNoncurrent` estuvo aquí "
+                    "como respaldo y era un error: es el renglón residual "
+                    "«otros», no el total. En una corrida de 280 nombres ganó "
+                    "en 173 de 221, o sea que la mayoría habría quedado con una "
+                    "partida menor etiquetada como su pasivo no corriente "
+                    "completo. Pocos emisores presentan este subtotal, y 17% de "
+                    "cobertura honesta vale más que 79% de un número que mide "
+                    "otra cosa.",
     ),
     Concepto(
         "patrimonio",
