@@ -23,6 +23,7 @@ import io
 import json
 import sys
 import tempfile
+from datetime import date
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -169,14 +170,49 @@ def test_workbook_matches_the_notebook_shape() -> None:
           str(params.get("Nota sobre el ancla"))[:160])
 
 
+def _companyfacts(anio: int, base: float) -> dict:
+    """Un companyfacts con la forma real, para el EDGAR sustituido."""
+    fin, ini = f"{anio}-12-31", f"{anio}-01-01"
+    filed = f"{anio + 1}-02-15"
+
+    def flujo(v):
+        return {"units": {"USD": [{"val": v, "start": ini, "end": fin,
+                                   "filed": filed, "form": "10-K",
+                                   "accn": "a", "fy": anio, "fp": "FY"}]}}
+
+    def saldo(v):
+        return {"units": {"USD": [{"val": v, "end": fin, "filed": filed,
+                                   "form": "10-K", "accn": "a", "fy": anio,
+                                   "fp": "FY"}]}}
+
+    return {"cik": 1, "entityName": "PRUEBA INC", "facts": {"us-gaap": {
+        "Revenues": flujo(1000.0 * base),
+        "NetIncomeLoss": flujo(100.0 * base),
+        "OperatingIncomeLoss": flujo(150.0 * base),
+        "DepreciationDepletionAndAmortization": flujo(50.0 * base),
+        "NetCashProvidedByUsedInOperatingActivities": flujo(180.0 * base),
+        "PaymentsToAcquirePropertyPlantAndEquipment": flujo(40.0 * base),
+        "EarningsPerShareDiluted": {"units": {"USD/shares": [
+            {"val": base, "start": ini, "end": fin, "filed": filed,
+             "form": "10-K", "accn": "a", "fy": anio, "fp": "FY"}]}},
+        "Assets": saldo(2000.0 * base),
+        "StockholdersEquity": saldo(800.0 * base),
+        "CashAndCashEquivalentsAtCarryingValue": saldo(100.0 * base),
+        "LongTermDebtCurrent": saldo(50.0 * base),
+        "LongTermDebtNoncurrent": saldo(350.0 * base),
+        "LiabilitiesCurrent": saldo(300.0 * base),
+        "CommonStockSharesOutstanding": {"units": {"shares": [
+            {"val": 100.0, "end": fin, "filed": filed, "form": "10-K",
+             "accn": "a", "fy": anio, "fp": "FY"}]}},
+    }}}
+
+
 def _almacen_falso(tickers) -> Path:
     """Un almacén de EDGAR con un ejercicio anual completo por nombre."""
     from screener.edgar import escribir_hechos
     from test_fundamentales import emisor  # noqa: E402
 
     from screener.edgar import Hecho
-
-    from datetime import date
 
     # El ejercicio tiene que ser reciente de verdad: el módulo descarta un
     # cierre de más de 550 días porque un emisor que dejó de reportar no
@@ -229,6 +265,79 @@ def test_the_fundamental_block_runs_on_real_edgar_facts() -> None:
     check("one row per name with fundamentals",
           wb["Fundamentales"].max_row > 3,
           f"{wb['Fundamentales'].max_row} rows")
+
+
+def test_the_run_fills_an_empty_store_by_itself() -> None:
+    """
+    The point of wiring the download into the run: an empty folder and a
+    contact address are enough. Nobody has to remember a separate step.
+    """
+    import screener.descarga as descarga
+    import screener.edgar as edgar
+    from openpyxl import load_workbook
+    from test_bajar_fundamentales import CUERPOS, TICKERS_EXCHANGE
+
+    from screener.yahoo_adapter import classify
+
+    # Un ETF no tiene estados financieros, así que la corrida ni se los pide.
+    acciones = [t for t in TICKERS if classify(t) != "ETF"]
+    anio = date.today().year - 1
+    mapa = {str(i): {"cik_str": 900000 + i, "ticker": t}
+            for i, t in enumerate(acciones)}
+    mapa |= {str(i): {"cik_str": 500000 + i, "ticker": f"T{i:05d}"}
+             for i in range(len(acciones), edgar.MIN_EMISORES + 1)}
+    cuerpos = {f"{900000 + i:010d}": _companyfacts(anio, float(i + 1))
+               for i in range(len(acciones))}
+
+    vacio = Path(tempfile.mkdtemp(prefix="fund-vacio-"))
+    real_json, real_text = edgar.fetch_json, edgar.fetch_text
+    edgar.fetch_json = lambda url, **kw: (
+        mapa if url == edgar.SEC_TICKERS
+        else TICKERS_EXCHANGE if url == edgar.SEC_TICKERS_EXCHANGE
+        else cuerpos[url.rsplit("CIK", 1)[-1].removesuffix(".json")])
+    edgar.fetch_text = lambda url, **kw: ""
+    real_rps = edgar.SEC_MAX_RPS
+    edgar.SEC_MAX_RPS = 0
+    try:
+        out, tmp = run_script("--fundamentales", str(vacio),
+                              "--contacto-sec", "Pruebas x@y.com")
+    finally:
+        edgar.fetch_json, edgar.fetch_text = real_json, real_text
+        edgar.SEC_MAX_RPS = real_rps
+
+    check("the run says it is filling the store",
+          "Bajando de EDGAR" in out, out[:800])
+    check("it downloaded one file per name",
+          all((vacio / f"{t}.csv").exists() for t in acciones),
+          str(sorted(p.name for p in vacio.glob("*.csv"))))
+    check("and then scored on what it just downloaded",
+          "Fundamentales" in load_workbook(tmp / "screening.xlsx").sheetnames)
+
+    # Segunda corrida sobre el mismo almacén: nada que bajar.
+    edgar.fetch_json = lambda url, **kw: (_ for _ in ()).throw(
+        AssertionError("no debió salir a la red"))
+    edgar.fetch_text = lambda url, **kw: ""
+    try:
+        out2, _ = run_script("--fundamentales", str(vacio),
+                             "--contacto-sec", "Pruebas x@y.com")
+    finally:
+        edgar.fetch_json, edgar.fetch_text = real_json, real_text
+    check("the second run downloads nothing",
+          "Bajando de EDGAR" not in out2, out2[:800])
+    check("and says everything was already there",
+          "ya estaban" in out2, out2[:600])
+
+
+def test_without_a_contact_the_run_explains_instead_of_failing() -> None:
+    """
+    The SEC blocks by IP whoever does not identify. An empty block that
+    explains itself is fine; one that looks like a bug is not.
+    """
+    vacio = Path(tempfile.mkdtemp(prefix="fund-sin-contacto-"))
+    out, _ = run_script("--fundamentales", str(vacio))
+    check("it names the reason and the remedy",
+          "Sin --contacto-sec" in out and "bloquea por IP" in out, out[:600])
+    check("and the model still runs", "8 · CARTERA" in out)
 
 
 def test_without_a_store_the_model_runs_exactly_as_before() -> None:

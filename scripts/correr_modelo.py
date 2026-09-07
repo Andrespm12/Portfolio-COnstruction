@@ -55,6 +55,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+# Los dos únicos nombres del paquete que hacen falta antes de main(): argparse
+# los usa como valores por defecto, y repetirlos aquí los dejaría desincronizados
+# del módulo que de verdad los aplica.
+from screener.descarga import MAX_REFRESCOS, REFRESCO_DIAS  # noqa: E402
+
 
 # ==========================================================================
 # PARÁMETROS
@@ -108,9 +113,13 @@ POSICION_MINIMA = 0.01         # posición mínima ejecutable; 0 la desactiva
 #: (SPY.csv, IVV.csv...). Sin él, la sección de transparencia dice que
 #: no puede ver nada en vez de estimar.
 TENENCIAS_DIR = "tenencias"
-#: Almacén de SEC EDGAR. Sin él, el bloque de valuación corre solo con los
-#: proxies de mercado, como antes de la fase 3.
+#: Almacén de SEC EDGAR. La corrida lo llena sola: baja lo que falta y refresca
+#: lo vencido, de forma incremental, así que solo la primera vez cuesta minutos.
 FUNDAMENTALES_DIR = "datos/fundamentales"
+
+#: User-Agent para la SEC. Sin correo real bloquean por IP, así que sin esto la
+#: corrida no baja nada y se conforma con lo que ya esté en el almacén.
+CONTACTO_SEC = ""
 
 EXPORTAR_JSON_PARA_BL = True
 
@@ -180,6 +189,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fecha-fundamentales", default=None,
                    help="Reconstruir lo que se sabía ese día (YYYY-MM-DD). "
                         "Por defecto, todo lo conocido hoy.")
+    p.add_argument("--contacto-sec", default=CONTACTO_SEC, dest="contacto_sec",
+                   help="User-Agent con correo real. Lo exige la SEC, que "
+                        "bloquea por IP a quien no se identifica. Sin esto la "
+                        "corrida usa lo que ya haya en el almacén.")
+    p.add_argument("--sin-descargar-fundamentales", dest="sin_descargar",
+                   action="store_true",
+                   help="Usar el almacén tal como está, sin salir a EDGAR.")
+    p.add_argument("--refrescar-dias", type=int, default=REFRESCO_DIAS,
+                   dest="refrescar_dias",
+                   help="Rebajar un nombre cuyo archivo tenga más días que "
+                        "esto. 0 lo desactiva.")
+    p.add_argument("--max-refrescos", type=int, default=MAX_REFRESCOS,
+                   dest="max_refrescos",
+                   help="Tope de refrescos por corrida, del más viejo al más "
+                        "nuevo, para que un vencimiento masivo no convierta la "
+                        "corrida diaria en una descarga de varios GB.")
     p.add_argument("--tenencias", default=TENENCIAS_DIR,
                    help="Directorio con los CSV de tenencias por ETF, "
                         "para el reporte de transparencia.")
@@ -216,7 +241,9 @@ def main(argv: list[str] | None = None) -> int:
         optimize, policy_weights, posterior, risk_profile_table, select_basket,
         shrunk_covariance,
     )
-    from screener.edgar import leer_hechos
+    from screener.descarga import sincronizar
+    from screener.yahoo_adapter import classify
+    from screener.edgar import detalle_sin_cik, leer_hechos
     from screener.fundamentales import MAX_ANTIGUEDAD_DIAS, adjuntar
     from screener.profiles import PROFILES, get_profile, profile_for_strategy
     from screener.report import console_summary
@@ -292,11 +319,40 @@ def main(argv: list[str] | None = None) -> int:
     fund_meta = {}
     if args.fundamentales:
         titulo("2b · FUNDAMENTALES (SEC EDGAR, point-in-time)")
+
+        # La descarga es parte de la corrida, no un paso aparte que haya que
+        # acordarse de hacer. Es incremental: un nombre con CSV en disco no se
+        # vuelve a pedir, así que solo la primera vez cuesta minutos.
+        # Un ETF no tiene estados financieros. Pedírselos a EDGAR no es un dato
+        # que falta, es un error de categoría — y contarlos como "faltantes"
+        # hacía que cada corrida anunciara una descarga que nunca ocurría.
+        emisores = [t for t in tickers if classify(t) != "ETF"]
+
+        if args.contacto_sec and not args.sin_descargar:
+            res = sincronizar(
+                args.fundamentales, emisores, contacto=args.contacto_sec,
+                refrescar_dias=args.refrescar_dias,
+                max_refrescos=args.max_refrescos, progreso=print)
+            print(res.resumen())
+            if res.sin_cik:
+                print(f"  Sin CIK: {', '.join(res.sin_cik[:15])}")
+                print(f"           {detalle_sin_cik(res.fuentes)}")
+            if res.pendientes:
+                print(f"  {len(res.pendientes)} vencidos quedaron para la "
+                      f"próxima corrida (tope {args.max_refrescos}).")
+        elif not args.contacto_sec:
+            # No se puede bajar sin identificarse: la SEC bloquea por IP a quien
+            # no lo hace. Decirlo aquí es la diferencia entre un bloque vacío
+            # que se entiende y uno que parece un bug.
+            print("Sin --contacto-sec no se puede bajar de EDGAR: la SEC exige "
+                  "un User-Agent con correo real y bloquea por IP a quien no se "
+                  "identifica.\nSe usará lo que ya esté en el almacén.")
+
         hechos = leer_hechos(args.fundamentales, tickers)
         if hechos.empty:
-            print(f"No hay nada en {args.fundamentales}/. El bloque de "
-                  "valuación corre solo con proxies de mercado.\n"
-                  "Baja el almacén con scripts/bajar_fundamentales.py.")
+            print(f"\nNo hay nada en {args.fundamentales}/. El bloque de "
+                  "valuación corre solo con proxies de mercado, como antes de "
+                  "la fase 3.")
         else:
             adjuntar(market_data, hechos, args.fecha_fundamentales)
             fund_meta = market_data.get("fundamentals_meta", {})

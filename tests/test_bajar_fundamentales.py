@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import bajar_fundamentales as guion  # noqa: E402
+import screener.descarga as descarga  # noqa: E402
 import screener.edgar as edgar  # noqa: E402
 
 TICKERS = {"0": {"cik_str": 320193, "ticker": "AAPL"},
@@ -346,14 +347,14 @@ def test_con_el_mapa_corto_el_fallo_no_culpa_al_emisor(tmp_path, monkeypatch,
                         if url == edgar.SEC_TICKERS
                         else CUERPOS[url.rsplit("CIK", 1)[-1].removesuffix(".json")])
     monkeypatch.setattr(edgar, "MIN_EMISORES", 10 ** 9)
-    monkeypatch.setattr(guion, "MIN_EMISORES", 10 ** 9)
+    monkeypatch.setattr(descarga, "MIN_EMISORES", 10 ** 9)
 
     correr(tmp_path, "AAPL", "NOEXISTE")
     fallos = pd.read_csv(tmp_path / "_fallos.csv").set_index("ticker")
     detalle = fallos.loc["NOEXISTE", "detalle"]
     assert "incompleto" in detalle
     assert "ya no cotice" not in detalle
-    assert "El mapa está incompleto" in capsys.readouterr().out
+    assert "Está incompleto" in capsys.readouterr().out
 
 
 def test_se_deja_el_formulario_de_overrides_ya_con_los_nombres(tmp_path,

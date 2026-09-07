@@ -318,11 +318,21 @@ def build_cells() -> list[dict]:
     cells.append(md(
         "## 3b · Fundamentales (SEC EDGAR, point-in-time)\n",
         "\n",
-        "Opcional, y hasta que exista el almacén el modelo corre igual que "
-        "antes: el bloque de valuación se queda con los proxies de mercado. "
-        "El almacén lo produce el otro cuaderno, "
-        "`fundamentales_colab.ipynb`; apunta `ALMACEN_FUNDAMENTALES` a la "
-        "misma carpeta de Drive.\n",
+        "**Esta celda se abastece sola.** Baja de EDGAR lo que le falte al "
+        "almacén y refresca lo vencido; no hay que correr otro cuaderno antes. "
+        "Es incremental: un nombre con archivo en disco no se vuelve a pedir, "
+        "así que solo la primera vez cuesta minutos. Las siguientes, "
+        "segundos.\n",
+        "\n",
+        "Dos cosas la condicionan. **`CONTACTO_SEC` no es opcional para "
+        "bajar**: la SEC exige un User-Agent con correo real y bloquea por IP "
+        "a quien no se identifica. Sin él la celda no sale a la red y se "
+        "conforma con lo que ya haya. Y **el almacén tiene que vivir en "
+        "Drive**: el disco de Colab desaparece al reciclarse el runtime, y con "
+        "el almacén fuera de Drive cada sesión volvería a bajar varios GB.\n",
+        "\n",
+        "Los ETF no entran: no tienen estados financieros, así que pedírselos "
+        "a EDGAR no es un dato que falte sino un error de categoría.\n",
         "\n",
         "**Cada ratio casa un fundamental con el precio del mismo día.** El "
         "precio sale del `market_data` que acabas de bajar y el fundamental "
@@ -346,6 +356,16 @@ def build_cells() -> list[dict]:
         'ALMACEN_FUNDAMENTALES = "/content/drive/MyDrive/fundamentales"  '
         '# @param {type:"string"}\n',
         '# @markdown Vacío = sin bloque fundamental.\n',
+        'CONTACTO_SEC = "CCI Puesto de Bolsa tucorreo@dominio.com"  '
+        '# @param {type:"string"}\n',
+        "# @markdown Obligatorio para bajar. Sin correo real la SEC bloquea\n",
+        "# @markdown por IP. Vacio = usar solo lo que ya este en el almacen.\n",
+        "DESCARGAR_FUNDAMENTALES = True  # @param {type:\"boolean\"}\n",
+        "REFRESCAR_DIAS = 30  # @param {type:\"integer\"}\n",
+        "# @markdown Rebajar un nombre cuyo archivo tenga mas dias que esto.\n",
+        "MAX_REFRESCOS = 40  # @param {type:\"integer\"}\n",
+        "# @markdown Tope por corrida, del mas viejo al mas nuevo, para que un\n",
+        "# @markdown vencimiento masivo no vuelva la corrida una descarga de GB.\n",
         'FECHA_FUNDAMENTALES = ""  # @param {type:"date"}\n',
         "# @markdown Reconstruir lo que se sabia ese dia. Vacio = todo lo\n",
         "# @markdown conocido hoy, que es lo que quiere una corrida normal.\n",
@@ -353,15 +373,48 @@ def build_cells() -> list[dict]:
         "from pathlib import Path\n",
         "\n",
         "from screener import fundamentales as fx\n",
-        "from screener.edgar import leer_hechos\n",
+        "from screener.descarga import sincronizar\n",
+        "from screener.edgar import detalle_sin_cik, leer_hechos\n",
+        "from screener.yahoo_adapter import classify\n",
         "\n",
         "fund_meta = {}\n",
         "_ruta = Path(ALMACEN_FUNDAMENTALES) if ALMACEN_FUNDAMENTALES else None\n",
+        "# Sin el directorio padre no se baja nada. Crearlo a ciegas sobre una\n",
+        "# ruta de Drive sin montar deja el almacen en el disco efimero de Colab\n",
+        "# con nombre de Drive: se pierde al reciclarse el runtime y la proxima\n",
+        "# sesion vuelve a bajar varios GB creyendo que estaba guardado.\n",
+        "_padre_ok = _ruta is not None and _ruta.parent.is_dir()\n",
+        "\n",
+        "if _ruta and DESCARGAR_FUNDAMENTALES and CONTACTO_SEC and _padre_ok:\n",
+        "    if not str(_ruta).startswith('/content/drive'):\n",
+        "        print(f'AVISO: {_ruta} no esta en Drive. El disco de Colab se '\n",
+        "              'recicla, y la proxima sesion volveria a bajarlo todo.\\n')\n",
+        "    # Un ETF no tiene estados financieros: pedirselos a EDGAR no es un\n",
+        "    # dato que falta, es un error de categoria.\n",
+        "    _emisores = [t for t in TICKERS if classify(t) != 'ETF']\n",
+        "    _res = sincronizar(_ruta, _emisores, contacto=CONTACTO_SEC,\n",
+        "                       refrescar_dias=REFRESCAR_DIAS,\n",
+        "                       max_refrescos=MAX_REFRESCOS, progreso=print)\n",
+        "    print(_res.resumen())\n",
+        "    if _res.sin_cik:\n",
+        "        print(f\"  Sin CIK: {', '.join(_res.sin_cik[:15])}\")\n",
+        "        print(f'           {detalle_sin_cik(_res.fuentes)}')\n",
+        "    if _res.pendientes:\n",
+        "        print(f'  {len(_res.pendientes)} vencidos quedaron para la '\n",
+        "              f'proxima corrida (tope {MAX_REFRESCOS}).')\n",
+        "elif _ruta and DESCARGAR_FUNDAMENTALES and not _padre_ok:\n",
+        "    print(f'No existe {_ruta.parent}, asi que no se baja nada. Si es una '\n",
+        "          'ruta de Drive, monta Drive primero (seccion 2).')\n",
+        "elif _ruta and DESCARGAR_FUNDAMENTALES:\n",
+        "    print('Sin CONTACTO_SEC no se puede bajar de EDGAR: la SEC exige un '\n",
+        "          'User-Agent con correo real y bloquea por IP a quien no se '\n",
+        "          'identifica.\\nSe usara lo que ya este en el almacen.')\n",
+        "\n",
         "_hechos = (leer_hechos(_ruta, TICKERS) if _ruta and _ruta.is_dir()\n",
         "           else None)\n",
         "\n",
         "if _hechos is None or _hechos.empty:\n",
-        "    print('Sin almacen de fundamentales. El bloque de valuacion corre '\n",
+        "    print('\\nSin almacen de fundamentales. El bloque de valuacion corre '\n",
         "          'solo con proxies de mercado, como antes de la fase 3.')\n",
         "    if _ruta and not _ruta.is_dir():\n",
         "        print(f'  (no existe {_ruta})')\n",
@@ -381,13 +434,18 @@ def build_cells() -> list[dict]:
         "            print(f'  {_t:8s} ultimo cierre {_f}')\n",
         "\n",
         "_cob_fund = pd.DataFrame(fund_meta.get('cobertura', []))\n",
+        "_tabla_fund = None\n",
         "if not _cob_fund.empty:\n",
-        "    display(_cob_fund[['ratio', 'familia', 'etiqueta', 'formula',\n",
-        "                       'cobertura', 'con_dato', 'mediana', 'puntuable']]\n",
-        "            .style\n",
-        "            .format({'cobertura': '{:.0%}', 'mediana': '{:,.3f}'})\n",
-        "            .map(lambda v: escala(v, 0.0, 1.0), subset=['cobertura'])\n",
-        "            .hide(axis='index'))\n",
+        "    _tabla_fund = (_cob_fund[['ratio', 'familia', 'etiqueta', 'formula',\n",
+        "                              'cobertura', 'con_dato', 'mediana',\n",
+        "                              'puntuable']]\n",
+        "                   .style\n",
+        "                   .format({'cobertura': '{:.0%}',\n",
+        "                            'mediana': '{:,.3f}'})\n",
+        "                   .map(lambda v: escala(v, 0.0, 1.0),\n",
+        "                        subset=['cobertura'])\n",
+        "                   .hide(axis='index'))\n",
+        "_tabla_fund\n",
     ))
 
     # ------------------------------------------------------------- coverage

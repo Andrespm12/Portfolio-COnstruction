@@ -60,13 +60,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from screener.edgar import (CONCEPTOS, MIN_EMISORES, Limitador,  # noqa: E402
-                            company_facts, conceptos_desactualizados,
-                            coverage_report, detalle_sin_cik, escribir_hechos,
-                            escribir_manifiesto, extract_facts,
-                            fuentes_del_mapa, historia_por_ticker, leer_hechos,
-                            leer_overrides, load_ticker_map,
-                            plantilla_overrides, restatements)
+from screener.descarga import (MAX_REFRESCOS, REFRESCO_DIAS,  # noqa: E402
+                               sincronizar)
+from screener.edgar import (ARCHIVO_OVERRIDES, Limitador,  # noqa: E402
+                            coverage_report, detalle_sin_cik,
+                            historia_por_ticker, leer_hechos, restatements)
 
 DESTINO = "datos/fundamentales"
 
@@ -104,6 +102,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--remapear", action="store_true",
                    help="Volver a pedir el mapa ticker->CIK sin rebajar los "
                         "fundamentales. Dos peticiones, no doscientas.")
+    p.add_argument("--refrescar-dias", type=int, default=REFRESCO_DIAS,
+                   dest="refrescar_dias",
+                   help="Rebajar un nombre cuyo archivo tenga más días que "
+                        "esto. 0 lo desactiva.")
+    p.add_argument("--max-refrescos", type=int, default=MAX_REFRESCOS,
+                   dest="max_refrescos",
+                   help="Tope de refrescos por corrida, del más viejo al más "
+                        "nuevo. 0 = sin tope.")
     p.add_argument("--limite", type=int, default=0,
                    help="Cortar después de N nombres. Para probar.")
     args = p.parse_args(argv)
@@ -116,151 +122,55 @@ def main(argv: list[str] | None = None) -> int:
     if args.limite:
         tickers = tickers[:args.limite]
 
-    nuevos = conceptos_desactualizados(destino)
-    if nuevos and not args.forzar:
-        print(f"AVISO: el almacén se escribió con una lista de conceptos "
+    print(f"Universo: {len(tickers)} nombre(s) -> {destino}/")
+    res = sincronizar(destino, tickers, contacto=args.contacto,
+                      forzar=args.forzar, remapear=args.remapear,
+                      refrescar_dias=args.refrescar_dias,
+                      max_refrescos=args.max_refrescos,
+                      limitador=limitador, progreso=print)
+
+    if res.conceptos_nuevos and not args.forzar:
+        print(f"\nAVISO: el almacén se escribió con una lista de conceptos "
               f"anterior.\n"
-              f"       Estos {len(nuevos)} son posteriores y NO están en los "
-              f"archivos ya bajados:\n"
-              f"       {', '.join(nuevos)}\n"
+              f"       Estos {len(res.conceptos_nuevos)} son posteriores y NO "
+              f"están en los archivos ya bajados:\n"
+              f"       {', '.join(res.conceptos_nuevos)}\n"
               f"       Su cobertura va a salir en cero sin ser cero. Corre con "
               f"--forzar\n"
               f"       para rebajar, o ignóralo si esas métricas no te "
-              f"importan todavía.\n")
+              f"importan todavía.")
 
-    print(f"Universo: {len(tickers)} nombre(s) -> {destino}/")
-    cache_mapa = destino / "_tickers.json"
-    mapa = load_ticker_map(contacto=args.contacto, cache=cache_mapa,
-                           limitador=limitador, refrescar=args.remapear)
-    fuentes = fuentes_del_mapa(cache_mapa)
-    manuales = leer_overrides(destino)
-    print(f"Mapa ticker->CIK: {len(mapa)} emisores"
+    print(f"\nMapa ticker->CIK: {res.mapa} emisores"
           + (" (" + ", ".join(
-              f"{k}={fuentes[k]}" for k in ("company_tickers",
-                                            "company_tickers_exchange",
-                                            "ticker_txt") if k in fuentes) + ")"
-             if "company_tickers" in fuentes else ""))
-    if manuales:
-        print(f"  + {len(manuales)} CIK puesto(s) a mano en "
-              f"_ciks_manuales.csv: {', '.join(sorted(manuales))}")
-    if len(mapa) < MIN_EMISORES:
-        print(f"  AVISO: son menos de {MIN_EMISORES}. El mapa está incompleto "
-              "y lo que salga 'sin CIK' no prueba nada.")
-    print()
+              f"{k}={res.fuentes[k]}" for k in ("company_tickers",
+                                                "company_tickers_exchange",
+                                                "ticker_txt")
+              if k in res.fuentes) + ")" if "company_tickers" in res.fuentes
+             else ""))
+    if res.manuales:
+        print(f"  + {len(res.manuales)} CIK puesto(s) a mano en "
+              f"_ciks_manuales.csv: {', '.join(res.manuales)}")
 
-    etiquetas: list[dict] = []
-    emisores: list[dict] = []
-    ok, sin_cik, fallaron, saltados = [], [], [], []
-    # El motivo de cada fallo, para no depender del scrollback de la consola.
-    # Un nombre que falla dos corridas seguidas necesita diagnóstico, y
-    # "sin CIK" y "404" llevan a sitios distintos.
-    motivos: list[dict] = []
+    a_mano = [e for e in res.emisores if e["fuente"] == "a mano"]
+    if a_mano:
+        print("\nCIK puestos a mano — verifica que el nombre sea el que "
+              "esperas:")
+        for e in a_mano:
+            print(f"  {e['ticker']:6s} {e['cik']}  {e['entidad']}")
 
-    for i, ticker in enumerate(tickers, 1):
-        archivo = destino / f"{ticker}.csv"
-        if archivo.exists() and not args.forzar:
-            saltados.append(ticker)
-            continue
-
-        cik = mapa.get(ticker) or mapa.get(ticker.replace("-", "."))
-        if not cik:
-            sin_cik.append(ticker)
-            motivos.append({"ticker": ticker, "motivo": "sin CIK",
-                            "detalle": detalle_sin_cik(fuentes)})
-            print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} sin CIK en la SEC")
-            continue
-
-        try:
-            payload = company_facts(cik, contacto=args.contacto,
-                                    limitador=limitador)
-            hechos, elegidas = extract_facts(payload, ticker)
-        except Exception as exc:            # noqa: BLE001 - se reporta
-            fallaron.append(ticker)
-            motivos.append({"ticker": ticker, "motivo": type(exc).__name__,
-                            "detalle": f"CIK {cik}: {exc}"})
-            print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} "
-                  f"FALLO {type(exc).__name__}: {exc}")
-            continue
-
-        if not hechos:
-            fallaron.append(ticker)
-            motivos.append({"ticker": ticker, "motivo": "sin etiquetas",
-                            "detalle": f"CIK {cik}: companyfacts respondió, "
-                                       "pero sin ninguna etiqueta de CONCEPTOS"})
-            print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} "
-                  "sin ninguna etiqueta conocida (¿emisor extranjero?)")
-            continue
-
-        escribir_hechos(destino, ticker, hechos)
-        ok.append(ticker)
-        # El nombre que la SEC tiene para ese CIK. Es la comprobación de que el
-        # CIK es el correcto: un CIK equivocado no da error, da los estados
-        # financieros de otra empresa con nuestro ticker encima. Con esto la
-        # confusión se ve de un vistazo en vez de propagarse al modelo.
-        emisores.append({"ticker": ticker, "cik": cik,
-                         "entidad": payload.get("entityName", ""),
-                         "fuente": "a mano" if ticker in manuales else "SEC"})
-        for metrica, etiqueta in elegidas.items():
-            etiquetas.append({"ticker": ticker, "metrica": metrica,
-                              "etiqueta": etiqueta})
-        print(f"  [{i:3d}/{len(tickers)}] {ticker:6s} "
-              f"{len(hechos):5d} hechos, {len(elegidas)}/{len(CONCEPTOS)} métricas")
-
-    if etiquetas:
-        modo = "w" if args.forzar or not (destino / "_etiquetas.csv").exists() else "a"
-        with (destino / "_etiquetas.csv").open(modo, newline="",
-                                               encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=["ticker", "metrica", "etiqueta"])
-            if modo == "w":
-                w.writeheader()
-            w.writerows(etiquetas)
-
-    if emisores:
-        modo = "w" if args.forzar or not (destino / "_emisores.csv").exists() else "a"
-        with (destino / "_emisores.csv").open(modo, newline="",
-                                              encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=["ticker", "cik", "entidad",
-                                               "fuente"])
-            if modo == "w":
-                w.writeheader()
-            w.writerows(emisores)
-        a_mano = [e for e in emisores if e["fuente"] == "a mano"]
-        if a_mano:
-            print("\nCIK puestos a mano — verifica que el nombre sea el que "
-                  "esperas:")
-            for e in a_mano:
-                print(f"  {e['ticker']:6s} {e['cik']}  {e['entidad']}")
-
-    # _fallos.csv describe la ÚLTIMA corrida, así que si esta no tuvo fallos hay
-    # que borrarlo. Dejarlo puesto es peor que no escribirlo nunca: la corrida
-    # que arregló los ocho nombres los dejó ahí, con el diagnóstico viejo, junto
-    # a una cobertura del 100%. Dos archivos que se contradicen y ninguna forma
-    # de saber cuál es el de hoy.
-    fallos_csv = destino / "_fallos.csv"
-    if ok or sin_cik or fallaron:            # la corrida intentó algo
-        with fallos_csv.open("w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=["ticker", "motivo", "detalle"])
-            w.writeheader()
-            w.writerows(motivos)
-        if not motivos:
-            print("  _fallos.csv queda vacío: no falló ninguno.")
-
-    if ok and not args.forzar and not nuevos:
-        escribir_manifiesto(destino)
-    elif args.forzar:
-        escribir_manifiesto(destino)
-
-    print(f"\n{len(ok)} bajados, {len(saltados)} ya estaban, "
-          f"{len(sin_cik)} sin CIK, {len(fallaron)} fallaron.")
-    if sin_cik:
-        print(f"  Sin CIK: {', '.join(sin_cik[:15])}")
-        print(f"           {detalle_sin_cik(fuentes)}")
-        plantilla = plantilla_overrides(destino, sin_cik)
-        if plantilla:
-            print(f"  Te dejé {plantilla} con esos nombres y el CIK en blanco: "
-                  "llénalo y vuelve a correr.")
-    if fallaron:
-        print(f"  Fallaron: {', '.join(fallaron[:15])}")
+    print(f"\n{res.resumen()}")
+    if res.intento and not res.motivos:
+        print("  _fallos.csv queda vacío: no falló ninguno.")
+    if res.sin_cik:
+        print(f"  Sin CIK: {', '.join(res.sin_cik[:15])}")
+        print(f"           {detalle_sin_cik(res.fuentes)}")
+        print(f"  Te dejé {destino / ARCHIVO_OVERRIDES} con esos nombres y el "
+              "CIK en blanco: llénalo y vuelve a correr.")
+    if res.fallaron:
+        print(f"  Fallaron: {', '.join(res.fallaron[:15])}")
+    if res.pendientes:
+        print(f"  {len(res.pendientes)} vencidos quedaron para la próxima "
+              f"corrida (tope {args.max_refrescos}).")
 
     # ---- Cobertura: el entregable que decide si seguimos ------------------
     hechos = leer_hechos(destino, tickers)

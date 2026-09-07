@@ -263,6 +263,89 @@ def run_cell(source: str, label: str, namespace: dict,
         rendered.append(valor.to_html())
 
 
+_EDGAR_REAL: dict = {}
+
+
+def _companyfacts_falso(anio: int, base: float) -> dict:
+    fin, ini, filed = f"{anio}-12-31", f"{anio}-01-01", f"{anio + 1}-02-15"
+
+    def flujo(v):
+        return {"units": {"USD": [{"val": v, "start": ini, "end": fin,
+                                   "filed": filed, "form": "10-K", "accn": "a",
+                                   "fy": anio, "fp": "FY"}]}}
+
+    def saldo(v, unidad="USD"):
+        return {"units": {unidad: [{"val": v, "end": fin, "filed": filed,
+                                    "form": "10-K", "accn": "a", "fy": anio,
+                                    "fp": "FY"}]}}
+
+    return {"cik": 1, "entityName": "PRUEBA INC", "facts": {"us-gaap": {
+        "Revenues": flujo(1000.0 * base),
+        "NetIncomeLoss": flujo(100.0 * base),
+        "OperatingIncomeLoss": flujo(150.0 * base),
+        "DepreciationDepletionAndAmortization": flujo(50.0 * base),
+        "NetCashProvidedByUsedInOperatingActivities": flujo(180.0 * base),
+        "PaymentsToAcquirePropertyPlantAndEquipment": flujo(40.0 * base),
+        "EarningsPerShareDiluted": {"units": {"USD/shares": [
+            {"val": base, "start": ini, "end": fin, "filed": filed,
+             "form": "10-K", "accn": "a", "fy": anio, "fp": "FY"}]}},
+        "Assets": saldo(2000.0 * base),
+        "StockholdersEquity": saldo(800.0 * base),
+        "CashAndCashEquivalentsAtCarryingValue": saldo(100.0 * base),
+        "LongTermDebtCurrent": saldo(50.0 * base),
+        "LongTermDebtNoncurrent": saldo(350.0 * base),
+        "LiabilitiesCurrent": saldo(300.0 * base),
+        "CommonStockSharesOutstanding": saldo(100.0, "shares"),
+    }}}
+
+
+def _sustituir_edgar(namespace: dict, tickers: list[str]) -> None:
+    """
+    Reemplaza las dos líneas que salen a la SEC, después de desempacar el motor.
+
+    El motor se extrae en la celda 1, así que ``screener.edgar`` no existe como
+    módulo importable hasta entonces. Sustituirlo antes no tendría efecto.
+    """
+    import importlib
+    from datetime import date
+
+    edgar = importlib.import_module("screener.edgar")
+    if not _EDGAR_REAL:
+        _EDGAR_REAL["modulo"] = edgar
+        _EDGAR_REAL["json"] = edgar.fetch_json
+        _EDGAR_REAL["text"] = edgar.fetch_text
+        _EDGAR_REAL["rps"] = edgar.SEC_MAX_RPS
+
+    anio = date.today().year - 1
+    mapa = {str(i): {"cik_str": 900000 + i, "ticker": t}
+            for i, t in enumerate(tickers)}
+    mapa |= {str(i): {"cik_str": 500000 + i, "ticker": f"T{i:05d}"}
+             for i in range(len(tickers), edgar.MIN_EMISORES + 1)}
+    cuerpos = {f"{900000 + i:010d}": _companyfacts_falso(anio, float(i + 1))
+               for i in range(len(tickers))}
+
+    def fetch(url, **kw):
+        if url == edgar.SEC_TICKERS:
+            return mapa
+        if url == edgar.SEC_TICKERS_EXCHANGE:
+            return {"fields": ["cik", "name", "ticker"], "data": []}
+        return cuerpos[url.rsplit("CIK", 1)[-1].removesuffix(".json")]
+
+    edgar.fetch_json = fetch
+    edgar.fetch_text = lambda url, **kw: ""
+    edgar.SEC_MAX_RPS = 0
+
+
+def _restaurar_edgar() -> None:
+    if not _EDGAR_REAL:
+        return
+    edgar = _EDGAR_REAL["modulo"]
+    edgar.fetch_json = _EDGAR_REAL["json"]
+    edgar.fetch_text = _EDGAR_REAL["text"]
+    edgar.SEC_MAX_RPS = _EDGAR_REAL["rps"]
+    _EDGAR_REAL.clear()
+
+
 def test_cells_execute() -> None:
     nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     cells = executable_cells(nb)
@@ -288,6 +371,20 @@ def test_cells_execute() -> None:
             patched += 1
     check("parameter cell exposes the knobs the test needs to patch", patched == 1)
 
+    # El almacén de fundamentales apunta a Drive por defecto. Aquí va a un
+    # directorio del test, y EDGAR se sustituye igual que Yahoo: la celda baja
+    # de verdad contra un servidor falso, que es la única forma de ejercitar el
+    # camino que va a correr en Colab.
+    almacen = Path(tempfile.mkdtemp(prefix="nb-fund-")) / "fundamentales"
+    fund_patched = 0
+    for i, source in enumerate(cells):
+        if "ALMACEN_FUNDAMENTALES =" in source:
+            cells[i] = source.replace(
+                'ALMACEN_FUNDAMENTALES = "/content/drive/MyDrive/fundamentales"',
+                f'ALMACEN_FUNDAMENTALES = "{almacen}"')
+            fund_patched += 1
+    check("the fundamentals cell exposes the store path", fund_patched == 1)
+
     namespace: dict = {"__name__": "__main__"}
     rendered: list[str] = []
     cwd = os.getcwd()
@@ -303,8 +400,11 @@ def test_cells_execute() -> None:
                     run_cell(source, f"<cell {i}>", namespace, rendered)
                 except Exception as exc:  # noqa: BLE001 - reporting, not handling
                     failures.append((i, f"{type(exc).__name__}: {exc}"))
+                if "ENGINE_B64" in source:
+                    _sustituir_edgar(namespace, tickers)
     finally:
         os.chdir(cwd)
+        _restaurar_edgar()
 
     check("every code cell executes without raising",
           not failures,
@@ -329,6 +429,26 @@ def test_cells_execute() -> None:
     check("ranking table was built with one row per scored name",
           len(namespace["tabla"]) == len(namespace["scored"]))
     check("coverage report was computed", not namespace["_cov"].empty)
+
+    # ---- fase 3: la corrida se abastece sola de EDGAR ---------------------
+    acciones = [t for t in tickers
+                if __import__("screener.yahoo_adapter", fromlist=["classify"])
+                .classify(t) != "ETF"]
+    check("the run downloaded the fundamentals it was missing",
+          all((almacen / f"{t}.csv").exists() for t in acciones),
+          f"store has {sorted(p.name for p in almacen.glob('*.csv'))}")
+    check("no ETF was asked of EDGAR -- they have no financial statements",
+          not any((almacen / f"{t}.csv").exists()
+                  for t in tickers if t not in acciones))
+    meta = namespace.get("fund_meta") or {}
+    check("and the ratios reached the model",
+          meta.get("con_ratios", 0) >= 3, str(meta.get("con_ratios")))
+    con_fund = [r for r in namespace["scored"]
+                if "earnings_yield" in r.raw_metrics]
+    check("the valuation block is scoring on real fundamentals",
+          len(con_fund) >= 3 and all(r.metric_z.get("earnings_yield") is not None
+                                     for r in con_fund),
+          f"{len(con_fund)} names carry the ratio")
 
     # ---- the screen is independent of any book ---------------------------
     model = namespace["MODELO"]
