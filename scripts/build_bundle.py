@@ -7,13 +7,13 @@ Arma modelo_cci.zip: el modelo para correr en una máquina, sin clonar el repo.
 
 Qué lleva y qué no
 ------------------
-Lleva el paquete ``screener/``, los dos programas que se corren a mano
-(``correr_modelo.py`` y ``bajar_tenencias.py``), el ``requirements.txt`` y la
-carpeta ``tenencias/`` con sus instrucciones. No lleva pruebas, notebook, web
+Lleva el paquete ``screener/``, los tres programas que se corren a mano
+(``correr_modelo.py``, ``bajar_tenencias.py`` y ``bajar_fundamentales.py``), el
+``requirements.txt`` y la carpeta ``tenencias/`` con sus instrucciones. No lleva pruebas, notebook, web
 ni documentación: quien recibe el zip lo quiere para correr, y cada archivo de
 más es una pregunta de más.
 
-Los dos programas viven en ``scripts/`` dentro del repo y en la raíz dentro del
+Los programas viven en ``scripts/`` dentro del repo y en la raíz dentro del
 zip, así que la línea que arma ``ROOT`` no puede ser la misma. Se reescribe
 aquí, y ``tests/test_bundle.py`` verifica que el zip resultante importa y corre.
 
@@ -30,7 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Programas que se corren a mano. En el repo cuelgan de ``scripts/``.
-PROGRAMAS = ("correr_modelo.py", "bajar_tenencias.py")
+PROGRAMAS = ("correr_modelo.py", "bajar_tenencias.py",
+             "bajar_fundamentales.py")
 
 #: La línea que hay que reescribir, y por qué. Dentro del repo el programa está
 #: en ``scripts/`` y la raíz es el padre; dentro del zip está en la raíz.
@@ -96,10 +97,23 @@ LEEME = """MODELO CCI — cómo correrlo
     python3 modelo/bajar_tenencias.py --salida modelo/tenencias   # una vez
     python3 modelo/correr_modelo.py --tenencias modelo/tenencias
 
-El primero baja la composición de los ETFs (necesita internet, y solo hace
-falta repetirlo cuando quieras refrescarla). El segundo corre el modelo entero
-y escribe el Excel y el JSON de views en el directorio actual; con --salida los
-manda a otro lado.
+El primero baja la composición de los ETFs, que es lo que el tope sectorial
+necesita para mirar a través de los fondos. Solo hace falta repetirlo cuando
+quieras refrescarla. El segundo corre el modelo entero y escribe el Excel y el
+JSON de views en el directorio actual; con --salida los manda a otro lado.
+
+Fundamentales de SEC EDGAR (gratis, con fecha de presentación)
+--------------------------------------------------------------
+    python3 modelo/bajar_fundamentales.py --contacto "TuFirma tucorreo@dominio.com"
+
+El --contacto no es opcional: la SEC exige identificarse y bloquea por IP a
+quien no lo hace.
+
+La primera corrida baja unos diez años de historia por emisor — el histórico NO
+hay que acumularlo, viene entero desde el día uno. Las siguientes solo bajan lo
+que falta. Escribe _cobertura.csv, que dice qué porcentaje del universo tiene
+cada métrica de verdad, y _etiquetas.csv, que dice de qué etiqueta XBRL salió
+cada número en cada emisor.
 
 Opciones que se usan
 --------------------

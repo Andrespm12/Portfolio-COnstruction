@@ -35,7 +35,7 @@ MODULES = (
     "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
     "profiles.py", "black_litterman.py", "cci_regulation.py",
     "optimizer.py", "diagnostics.py", "seleccion.py", "lookthrough.py",
-    "tenencias_yahoo.py",
+    "tenencias_yahoo.py", "edgar.py",
 )
 
 

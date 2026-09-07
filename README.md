@@ -56,8 +56,8 @@ unchanged.
 python3 scripts/build_bundle.py           # -> output/modelo_cci.zip
 ```
 
-The package, the two runnable programs and their requirements — no tests, no
-notebook, no web. `tests/test_bundle.py` extracts it and runs both programs from
+The package, the three runnable programs and their requirements — no tests, no
+notebook, no web. `tests/test_bundle.py` extracts it and runs each program from
 the extracted copy, so a missing module fails here rather than on the recipient's
 machine.
 
@@ -79,7 +79,8 @@ python3 tests/test_optimizer.py          # posterior, regulatory bands, audit
 python3 tests/test_notebook.py           # notebook drift + full execution
 python3 tests/test_diagnostics.py        # block overlap + view saturation
 python3 tests/test_correr_modelo.py      # the runner script, end to end
-python3 -m pytest tests/test_bundle.py tests/test_tenencias_yahoo.py
+python3 -m pytest tests/test_bundle.py tests/test_tenencias_yahoo.py \
+                  tests/test_edgar.py tests/test_bajar_fundamentales.py
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
@@ -163,6 +164,60 @@ view saying MU wins -- the portfolio was marginally short its own call. It is a
 floor and not a margin: `0 >= 0` satisfies it, so it forbids the contradiction
 without forcing a position into the book. Long-only cannot express the short
 leg, and sizing to the spread anyway would put on a bet nobody approved.
+
+---
+
+## Fundamentals: SEC EDGAR, point-in-time
+
+The `valuation_carry` block carries 10-12% of the composite and its own text
+admits it runs on proxies: *"IBKR's market-data surface exposes no fundamental
+valuation ratios, so this block uses market-implied proxies rather than
+pretending to have P/E or EV/EBITDA."* In a live run two of its three metrics
+came back `UNAVAILABLE from Yahoo`.
+
+Any vendor of multiples fixes that. None fixes the problem that matters. A
+vendor hands you today's number, already restated, and a backtest fed restated
+fundamentals is being told things nobody knew at the time -- the IC that comes
+out of it is inflated by construction.
+
+EDGAR does not have that problem because it is not a vendor, it is the archive.
+Every fact carries the `filed` date of the submission that brought it, and
+successive versions **coexist** as separate entries. Filtering `filed <= date`
+reconstructs what was knowable that day by construction rather than by a
+vendor's promise. It is free, needs no key, and is the primary source those
+vendors resell.
+
+```bash
+python3 scripts/bajar_fundamentales.py --contacto "Your Firm you@domain.com"
+```
+
+`--contacto` is not optional: the SEC requires an identifying User-Agent and
+blocks by IP without one.
+
+**The history arrives on the first run.** Unlike prices, there is nothing to
+accumulate -- one `companyfacts` call returns everything a company has ever
+reported under XBRL, roughly ten years. Later runs fetch only what is missing.
+
+Two output files decide whether the data is usable:
+
+- `_cobertura.csv` -- what share of the universe actually has each metric. A
+  metric absent from a filer is reported at 0%, not hidden: disappearing reads
+  as "not applicable", zero reads as "we do not have it".
+- `_etiquetas.csv` -- which XBRL tag each number came from, per issuer. XBRL is
+  a vocabulary rather than a schema, and issuers pick different words for the
+  same idea: revenue is `Revenues` in some, `RevenueFromContractWith
+  CustomerExcludingAssessedTax` in others since ASC 606, `SalesRevenueNet` in
+  those that never re-tagged. `CONCEPTOS` lists candidates in priority order and
+  the run records which one won, so an odd number traces back to the tag that
+  produced it instead of staying a mystery in a spreadsheet.
+
+`instantaneo` separates balances from flows, and it is not cosmetic: summing
+four quarters makes sense for revenue and none for total assets, and confusing
+them is the fastest way to an EV/EBITDA four times too large.
+
+What this does **not** do is compute ratios. It downloads facts, maps them to
+declared concepts and reports coverage. A P/E needs a fundamental matched to a
+price with both dates aligned, and that is a separate decision.
 
 ---
 
