@@ -30,13 +30,20 @@ OUT = ROOT / "notebooks" / "screener_colab.ipynb"
 
 #: Package modules embedded in the notebook. Ordered for readability of the
 #: printed manifest only -- import order is resolved by Python.
-MODULES = (
-    "__init__.py", "config.py", "universe.py", "metrics.py", "portfolio.py",
-    "scoring.py", "report.py", "run_screen.py", "yahoo_adapter.py", "tuning.py",
-    "profiles.py", "black_litterman.py", "cci_regulation.py",
-    "optimizer.py", "diagnostics.py", "seleccion.py", "lookthrough.py",
-    "tenencias_yahoo.py", "edgar.py",
-)
+def modules() -> tuple[str, ...]:
+    """
+    Todo ``screener/*.py``, en orden fijo.
+
+    Era una lista escrita a mano y eso es una trampa que ya se disparó: agregar
+    un módulo al paquete no lo mete en el tarball, el cuaderno se construye sin
+    quejarse, y el error aparece en Colab como un ``ModuleNotFoundError`` a
+    mitad de la corrida. El directorio ya sabe qué hay adentro; preguntarle es
+    más barato que acordarse.
+    """
+    return tuple(sorted(p.name for p in (ROOT / "screener").glob("*.py")))
+
+
+MODULES = modules()
 
 
 def build_payload() -> tuple[str, str]:
@@ -305,6 +312,82 @@ def build_cells() -> list[dict]:
         "        print(f'  {_t:8s} {_r}')\n",
         "    if len(_dropped) > 15:\n",
         "        print(f'  ... y {len(_dropped) - 15} mas')\n",
+    ))
+
+    # ------------------------------------------------------ fundamentales
+    cells.append(md(
+        "## 3b · Fundamentales (SEC EDGAR, point-in-time)\n",
+        "\n",
+        "Opcional, y hasta que exista el almacén el modelo corre igual que "
+        "antes: el bloque de valuación se queda con los proxies de mercado. "
+        "El almacén lo produce el otro cuaderno, "
+        "`fundamentales_colab.ipynb`; apunta `ALMACEN_FUNDAMENTALES` a la "
+        "misma carpeta de Drive.\n",
+        "\n",
+        "**Cada ratio casa un fundamental con el precio del mismo día.** El "
+        "precio sale del `market_data` que acabas de bajar y el fundamental "
+        "de lo que estaba presentado a esa fecha, así que no hay forma de "
+        "casar el balance de un año con la cotización de otro por descuido.\n",
+        "\n",
+        "**Todos los ratios de valuación son rendimientos, no múltiplos**, y "
+        "eso no es una preferencia de presentación. Un P/E se rompe en el "
+        "cero: una empresa que gana un centavo por acción a \\$100 cotiza a "
+        "10.000x, y si pierde un centavo cotiza a −10.000x — que en un "
+        "ranking de «P/E bajo es mejor» queda **primero**, por delante de "
+        "cualquier empresa sana. El rendimiento de utilidades ordena bien "
+        "atravesando el cero. Los múltiplos de siempre se calculan igual, "
+        "para leer, y salen vacíos donde el rendimiento no es positivo.\n",
+        "\n",
+        "Los ratios de **calidad** — ROE, márgenes, devengos, apalancamiento "
+        "— se calculan y se reportan, pero todavía **no puntúan**: ponerlos a "
+        "puntuar exige decidir su peso, y un peso es una decisión del Comité.\n",
+    ))
+    cells.append(code(
+        'ALMACEN_FUNDAMENTALES = "/content/drive/MyDrive/fundamentales"  '
+        '# @param {type:"string"}\n',
+        '# @markdown Vacío = sin bloque fundamental.\n',
+        'FECHA_FUNDAMENTALES = ""  # @param {type:"date"}\n',
+        "# @markdown Reconstruir lo que se sabia ese dia. Vacio = todo lo\n",
+        "# @markdown conocido hoy, que es lo que quiere una corrida normal.\n",
+        "\n",
+        "from pathlib import Path\n",
+        "\n",
+        "from screener import fundamentales as fx\n",
+        "from screener.edgar import leer_hechos\n",
+        "\n",
+        "fund_meta = {}\n",
+        "_ruta = Path(ALMACEN_FUNDAMENTALES) if ALMACEN_FUNDAMENTALES else None\n",
+        "_hechos = (leer_hechos(_ruta, TICKERS) if _ruta and _ruta.is_dir()\n",
+        "           else None)\n",
+        "\n",
+        "if _hechos is None or _hechos.empty:\n",
+        "    print('Sin almacen de fundamentales. El bloque de valuacion corre '\n",
+        "          'solo con proxies de mercado, como antes de la fase 3.')\n",
+        "    if _ruta and not _ruta.is_dir():\n",
+        "        print(f'  (no existe {_ruta})')\n",
+        "else:\n",
+        "    fx.adjuntar(market_data, _hechos, FECHA_FUNDAMENTALES or None)\n",
+        "    fund_meta = market_data.get('fundamentals_meta', {})\n",
+        "    print(f\"{fund_meta['con_ratios']} de {len(TICKERS)} nombres con \"\n",
+        "          f\"ratios, al {fund_meta['as_of'] or 'ultimo dato conocido'}. \"\n",
+        "          f\"Cohorte minima por ratio: {fund_meta['cohorte_minima']}.\")\n",
+        "    # Un cero sin explicacion se lee como 'no hay datos' cuando lo que\n",
+        "    # hay es 'los datos son viejos', y son dos problemas distintos.\n",
+        "    _viejos = fund_meta.get('obsoletos') or {}\n",
+        "    if _viejos:\n",
+        "        print(f'\\n{len(_viejos)} con el ultimo ejercicio vencido '\n",
+        "              f'(>{fx.MAX_ANTIGUEDAD_DIAS} dias); no reciben ratios:')\n",
+        "        for _t, _f in sorted(_viejos.items())[:12]:\n",
+        "            print(f'  {_t:8s} ultimo cierre {_f}')\n",
+        "\n",
+        "_cob_fund = pd.DataFrame(fund_meta.get('cobertura', []))\n",
+        "if not _cob_fund.empty:\n",
+        "    display(_cob_fund[['ratio', 'familia', 'etiqueta', 'formula',\n",
+        "                       'cobertura', 'con_dato', 'mediana', 'puntuable']]\n",
+        "            .style\n",
+        "            .format({'cobertura': '{:.0%}', 'mediana': '{:,.3f}'})\n",
+        "            .map(lambda v: escala(v, 0.0, 1.0), subset=['cobertura'])\n",
+        "            .hide(axis='index'))\n",
     ))
 
     # ------------------------------------------------------------- coverage

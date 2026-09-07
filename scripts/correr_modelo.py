@@ -32,12 +32,13 @@ Qué produce
 -----------
 En el directorio de salida (por defecto, el actual):
 
-    screening.xlsx                             11 hojas, se explica solo
+    screening.xlsx                             11-12 hojas, se explica solo
     {Estrategia}_screener_propuestas_{fecha}.json   entrada para el BL de CCI
 
 Las once hojas: Ranking, Bloques, Perfiles, Views BL, Cartera, Sectores,
 Riesgo, Cesta, Universo (qué entró al ranking y qué se rechazó, con el motivo), Cobertura y
-Parametros.
+Parametros. Con el almacén de EDGAR presente se agrega Fundamentales, con los
+ratios point-in-time y el ejercicio del que salió cada uno.
 
 El JSON va a ``propuestas/``, nunca a ``aprobadas/``: esa carpeta es solo para
 views que un gestor ya revisó y firmó, y el propio ``write_views`` se niega a
@@ -107,6 +108,9 @@ POSICION_MINIMA = 0.01         # posición mínima ejecutable; 0 la desactiva
 #: (SPY.csv, IVV.csv...). Sin él, la sección de transparencia dice que
 #: no puede ver nada en vez de estimar.
 TENENCIAS_DIR = "tenencias"
+#: Almacén de SEC EDGAR. Sin él, el bloque de valuación corre solo con los
+#: proxies de mercado, como antes de la fase 3.
+FUNDAMENTALES_DIR = "datos/fundamentales"
 
 EXPORTAR_JSON_PARA_BL = True
 
@@ -171,6 +175,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    action="store_false", default=True,
                    help="Permitir que la cartera pese más la pata corta de una "
                         "view relativa que la larga.")
+    p.add_argument("--fundamentales", default=FUNDAMENTALES_DIR,
+                   help="Almacén de SEC EDGAR. Vacío = sin bloque fundamental.")
+    p.add_argument("--fecha-fundamentales", default=None,
+                   help="Reconstruir lo que se sabía ese día (YYYY-MM-DD). "
+                        "Por defecto, todo lo conocido hoy.")
     p.add_argument("--tenencias", default=TENENCIAS_DIR,
                    help="Directorio con los CSV de tenencias por ETF, "
                         "para el reporte de transparencia.")
@@ -207,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
         optimize, policy_weights, posterior, risk_profile_table, select_basket,
         shrunk_covariance,
     )
+    from screener.edgar import leer_hechos
+    from screener.fundamentales import MAX_ANTIGUEDAD_DIAS, adjuntar
     from screener.profiles import PROFILES, get_profile, profile_for_strategy
     from screener.report import console_summary
     from screener.run_screen import run_standalone
@@ -273,6 +284,45 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {t:8s} {r}")
         if len(dropped) > 15:
             print(f"  ... y {len(dropped) - 15} más")
+
+    # ------------------------------------------------------- 2b. fundamentales
+    # El almacén de EDGAR es opcional: si no está, el modelo corre igual que
+    # antes y el bloque de valuación se queda con los proxies de mercado. Lo que
+    # no puede pasar es que corra con fundamentales sin decirlo.
+    fund_meta = {}
+    if args.fundamentales:
+        titulo("2b · FUNDAMENTALES (SEC EDGAR, point-in-time)")
+        hechos = leer_hechos(args.fundamentales, tickers)
+        if hechos.empty:
+            print(f"No hay nada en {args.fundamentales}/. El bloque de "
+                  "valuación corre solo con proxies de mercado.\n"
+                  "Baja el almacén con scripts/bajar_fundamentales.py.")
+        else:
+            adjuntar(market_data, hechos, args.fecha_fundamentales)
+            fund_meta = market_data.get("fundamentals_meta", {})
+            print(f"{fund_meta.get('con_ratios', 0)} de {len(tickers)} nombres "
+                  f"con ratios, al "
+                  f"{args.fecha_fundamentales or 'último dato conocido'}. "
+                  f"Cohorte mínima por ratio: {fund_meta.get('cohorte_minima')}.")
+            viejos = fund_meta.get("obsoletos") or {}
+            if viejos:
+                # Un cero sin explicación se lee como "no hay datos" cuando lo
+                # que hay es "los datos son viejos", y son dos problemas
+                # distintos: uno se arregla bajando, el otro no se arregla.
+                print(f"\n{len(viejos)} nombre(s) con el último ejercicio "
+                      f"vencido (>{MAX_ANTIGUEDAD_DIAS} días); no reciben ratios:")
+                for t, f in sorted(viejos.items())[:12]:
+                    print(f"  {t:8s} último cierre {f}")
+            cob_fund = pd.DataFrame(fund_meta.get("cobertura", []))
+            if not cob_fund.empty:
+                print()
+                print(cob_fund[["ratio", "familia", "cobertura", "con_dato",
+                                "mediana", "puntuable"]].to_string(
+                    index=False, formatters={"cobertura": "{:.1%}".format,
+                                             "mediana": "{:,.3f}".format}))
+                print("\nSolo las de familia 'valuacion' con puntuable=True "
+                      "entran al score. La calidad se calcula y se reporta: "
+                      "ponerla a puntuar exige decidir su peso.")
 
     # ---------------------------------------------------------------- 3. cobertura
     titulo("3 · COBERTURA DE MÉTRICAS")
@@ -721,6 +771,23 @@ def main(argv: list[str] | None = None) -> int:
         "justificacion": v["justificacion"],
     } for v in views])
 
+    # Los ratios, con el período y la presentación de los que salieron. Sin esas
+    # dos columnas un P/E es un número sin fecha, y un número sin fecha no se
+    # puede auditar contra el 10-K que lo produjo.
+    fundamentales_df = pd.DataFrame()
+    if fund_meta.get("con_ratios"):
+        filas = []
+        for inst in market_data.get("instruments", []):
+            nodo = inst.get("fundamentals")
+            if not nodo:
+                continue
+            filas.append({"ticker": inst.get("ticker"),
+                          "periodo": nodo.get("periodo"),
+                          "filed": nodo.get("filed"),
+                          "acciones": nodo.get("acciones_fuente"),
+                          **nodo.get("metricas", {})})
+        fundamentales_df = pd.DataFrame(filas)
+
     with pd.ExcelWriter(archivo_excel, engine="openpyxl") as xl:
         tabla.to_excel(xl, sheet_name="Ranking", index=False)
         mapa.to_excel(xl, sheet_name="Bloques")
@@ -732,6 +799,9 @@ def main(argv: list[str] | None = None) -> int:
         cesta_df.to_excel(xl, sheet_name="Cesta", index=False)
         universo_df.to_excel(xl, sheet_name="Universo", index=False)
         cov.to_excel(xl, sheet_name="Cobertura", index=False)
+        if not fundamentales_df.empty:
+            fundamentales_df.to_excel(xl, sheet_name="Fundamentales",
+                                      index=False)
         parametros.to_excel(xl, sheet_name="Parametros", index=False)
 
         for hoja in xl.book.worksheets:

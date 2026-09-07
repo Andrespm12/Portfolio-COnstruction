@@ -169,6 +169,79 @@ def test_workbook_matches_the_notebook_shape() -> None:
           str(params.get("Nota sobre el ancla"))[:160])
 
 
+def _almacen_falso(tickers) -> Path:
+    """Un almacén de EDGAR con un ejercicio anual completo por nombre."""
+    from screener.edgar import escribir_hechos
+    from test_fundamentales import emisor  # noqa: E402
+
+    from screener.edgar import Hecho
+
+    from datetime import date
+
+    # El ejercicio tiene que ser reciente de verdad: el módulo descarta un
+    # cierre de más de 550 días porque un emisor que dejó de reportar no
+    # describe a la empresa de hoy. Con un año fijo la prueba caducaría sola.
+    destino = Path(tempfile.mkdtemp(prefix="fund-"))
+    for n, ticker in enumerate(tickers):
+        filas = emisor(ticker, anio=date.today().year - 1,
+                       eps=float(n + 1), utilidad=100.0 * (n + 1))
+        escribir_hechos(destino, ticker,
+                        [Hecho(**{k: (v or None) if k in ("inicio", "fp")
+                                  else v for k, v in f.items()})
+                         for f in filas])
+    return destino
+
+
+def test_the_fundamental_block_runs_on_real_edgar_facts() -> None:
+    """
+    Phase 3 end to end: the store on disk becomes point-in-time ratios, and
+    those ratios land in the workbook with the period they came from.
+
+    A P/E with no date cannot be audited against the 10-K that produced it,
+    which is why the sheet carries `periodo` and `filed` next to every ratio.
+    """
+    from openpyxl import load_workbook
+
+    almacen = _almacen_falso([t for t in TICKERS if t not in
+                              ("SPY", "QQQ", "IWM", "GLD", "TLT", "XLE",
+                               "XLV", "DBC")])
+    out, tmp = run_script("--fundamentales", str(almacen))
+
+    check("the run announces the fundamental stage",
+          "2b · FUNDAMENTALES" in out, out[:400])
+    check("it says how many names got ratios",
+          "con ratios" in out, out[:400])
+    check("it reports the cohort per ratio, not just a total",
+          "earnings_yield" in out and "puntuable" in out)
+    check("quality ratios are computed but declared unscored",
+          "roe" in out and "ponerla a puntuar exige decidir su peso" in out)
+
+    wb = load_workbook(tmp / "screening.xlsx")
+    check("the workbook gained the Fundamentales sheet",
+          "Fundamentales" in wb.sheetnames, str(wb.sheetnames))
+    encabezados = [c.value for c in wb["Fundamentales"][1]]
+    check("every ratio carries the fiscal year it came from",
+          {"periodo", "filed"} <= set(encabezados), str(encabezados))
+    check("the scored yields are there", "earnings_yield" in encabezados,
+          str(encabezados))
+    check("the unscored quality ratios are NOT in the scored columns",
+          "roe" not in encabezados, str(encabezados))
+    check("one row per name with fundamentals",
+          wb["Fundamentales"].max_row > 3,
+          f"{wb['Fundamentales'].max_row} rows")
+
+
+def test_without_a_store_the_model_runs_exactly_as_before() -> None:
+    """The store is optional. What is not optional is saying which one ran."""
+    from openpyxl import load_workbook
+
+    out, tmp = run_script("--fundamentales", "")
+    check("no fundamental stage without a store", "2b · FUNDAMENTALES" not in out)
+    wb = load_workbook(tmp / "screening.xlsx")
+    check("and no Fundamentales sheet either",
+          "Fundamentales" not in wb.sheetnames, str(wb.sheetnames))
+
+
 def test_proposals_land_in_the_right_folder() -> None:
     """
     The governance boundary. Proposals go to propuestas/, never aprobadas/,

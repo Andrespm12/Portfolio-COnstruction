@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import BENCHMARK_TICKER, ELIGIBILITY, RISK_FREE_RATE, SIZING
+from .fundamentales import metricas_del_instrumento
 from .metrics import compute_metrics, diagnostics, simple_returns
 from .portfolio import (
     build_portfolio_return_series, compute_portfolio_fit, concentration_stats,
@@ -125,6 +126,11 @@ def run(market_data: dict, portfolio: dict,
             base_position_weight=base_position_weight,
             rf=rf,
         )
+        # Los ratios fundamentales ya vienen calculados contra el precio de este
+        # mismo payload — ver fundamentales.adjuntar. Aquí solo se mezclan, y si
+        # nadie los adjuntó el modelo corre exactamente como antes.
+        m.update(metricas_del_instrumento(inst))
+
         if not standalone:
             m.update(compute_portfolio_fit(inst, port_returns, weights_by_nlv))
 

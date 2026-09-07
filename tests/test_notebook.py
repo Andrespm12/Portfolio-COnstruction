@@ -68,6 +68,32 @@ def test_notebook_matches_source() -> None:
           json.dumps(builder.build_notebook(), indent=1, ensure_ascii=False) + "\n" == fresh)
 
 
+def test_every_module_travels_in_the_notebook() -> None:
+    """
+    Un módulo del paquete que no viaje es un ModuleNotFoundError a mitad de la
+    corrida en Colab, con la suite en verde. Pasó al agregar fundamentales.py:
+    la lista de módulos estaba escrita a mano.
+    """
+    import base64
+    import gzip
+    import io
+    import re
+    import tarfile
+
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    celda = next(c for c in nb["cells"] if c["cell_type"] == "code"
+                 and "ENGINE_B64" in "".join(c["source"]))
+    blob = "".join(re.findall(r'^\s*"([A-Za-z0-9+/=]+)"\s*$',
+                              "".join(celda["source"]), re.M))
+    with tarfile.open(fileobj=io.BytesIO(
+            gzip.decompress(base64.b64decode(blob)))) as tar:
+        embarcados = {n.split("/", 1)[-1] for n in tar.getnames()}
+
+    en_disco = {p.name for p in (ROOT / "screener").glob("*.py")}
+    check("every screener module is embedded", en_disco <= embarcados,
+          f"missing: {sorted(en_disco - embarcados)}")
+
+
 def test_embedded_engine_is_current() -> None:
     """The embedded tarball must contain byte-identical module sources."""
     import base64

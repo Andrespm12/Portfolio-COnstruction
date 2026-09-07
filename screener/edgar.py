@@ -844,16 +844,18 @@ def as_of(hechos: "pd.DataFrame", fecha: str | None = None,
                  .reset_index(drop=True))
 
 
-def ultimo_anual(hechos: "pd.DataFrame", fecha: str | None = None,
-                 ) -> "pd.DataFrame":
+def anuales(hechos: "pd.DataFrame", fecha: str | None = None) -> "pd.DataFrame":
     """
-    Una fila por ticker y métrica: el período anual más reciente conocible.
+    **Todos** los períodos anuales conocibles en ``fecha``, sin quedarse con uno.
 
-    Para un saldo se toma el corte más reciente. Para un flujo se exige un
-    período de entre 300 y 400 días — es decir, un año — porque sumar cuatro
-    trimestres desde XBRL tiene trampas (los 10-Q traen acumulados de ejercicio
-    en unos emisores y trimestres sueltos en otros) y un TTM mal armado es un
-    número peor que no tener número.
+    Para un saldo vale cualquier corte. Para un flujo se exige un período de
+    entre 300 y 400 días — es decir, un año — porque sumar cuatro trimestres
+    desde XBRL tiene trampas (los 10-Q traen acumulados de ejercicio en unos
+    emisores y trimestres sueltos en otros) y un TTM mal armado es un número
+    peor que no tener número.
+
+    Devuelve la serie entera porque hay preguntas que necesitan más de un año:
+    un crecimiento necesita dos, y una tendencia de márgenes necesita varios.
     """
     import pandas as pd
 
@@ -871,7 +873,13 @@ def ultimo_anual(hechos: "pd.DataFrame", fecha: str | None = None,
 
     anual = (es_instantaneo & inicio.isna()) | (~es_instantaneo
                                                 & dias.between(300, 400))
-    vista = vista[anual.fillna(False)]
+    return vista[anual.fillna(False)].reset_index(drop=True)
+
+
+def ultimo_anual(hechos: "pd.DataFrame", fecha: str | None = None,
+                 ) -> "pd.DataFrame":
+    """Una fila por ticker y métrica: el período anual más reciente conocible."""
+    vista = anuales(hechos, fecha)
     if vista.empty:
         return vista
 

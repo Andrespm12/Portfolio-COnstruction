@@ -247,23 +247,41 @@ FACTOR_MODEL: tuple[Block, ...] = (
     ),
     Block(
         key="valuation_carry",
-        label="Valuation Proxy & Carry",
+        label="Valuation & Carry",
         weight=0.10,
         rationale=(
-            "IBKR's market-data surface exposes no fundamental valuation ratios, so "
-            "this block uses market-implied proxies rather than pretending to have "
-            "P/E or EV/EBITDA. IV-vs-HV spread is a genuine richness signal: options "
-            "priced far above realized vol signal crowded positioning and elevated "
-            "expected turbulence. See docs for wiring a fundamentals feed."
+            "Real valuation, from SEC EDGAR, point-in-time: each ratio pairs a "
+            "fundamental with the price of the same date, and nothing filed after "
+            "that date is visible. The block used to run on market-implied proxies "
+            "alone because no fundamentals feed was wired; the proxies stay, "
+            "because ETFs have no financial statements and because implied-vol "
+            "richness is a genuine signal that no balance sheet carries.\n\n"
+            "Every valuation ratio is a YIELD, never a multiple, and that is not a "
+            "presentation choice. A P/E is discontinuous at zero: a company earning "
+            "a cent a share trades at 10,000x, and one losing a cent trades at "
+            "-10,000x, which in a 'low P/E is better' ranking sorts FIRST -- ahead "
+            "of every healthy business. Earnings yield orders correctly straight "
+            "through zero. The familiar multiples are reported for reading, in "
+            "screener.fundamentales.multiplos_legibles, and never scored."
         ),
         metrics=(
-            Metric("dividend_yield", "Dividend yield", 1, 0.30,
-                   description="Cash carry. Also a mild quality/maturity proxy."),
-            Metric("iv_hv_spread", "IV minus realized vol", -1, 0.30,
+            Metric("earnings_yield", "Earnings yield (EPS/price)", 1, 0.18,
+                   description="Inverse P/E. Negative when the company loses money, which is where it belongs."),
+            Metric("fcf_yield", "Free cash flow yield", 1, 0.18,
+                   description="Operating cash flow minus capex, over market cap. Harder to dress up than accounting earnings."),
+            Metric("ebitda_ev", "EBITDA / enterprise value", 1, 0.12,
+                   description="Inverse EV/EBITDA. Comparable across capital structures. Absent for banks, which report no operating income."),
+            Metric("sales_yield", "Sales / market cap", 1, 0.08,
+                   description="Inverse P/S. Survives a loss year, which is when the other yields stop ordering."),
+            Metric("book_yield", "Book equity / market cap", 1, 0.06,
+                   description="Inverse P/B. Negative equity gives a negative yield -- the correct reading."),
+            Metric("dividend_yield", "Dividend yield", 1, 0.14,
+                   description="Cash carry. The one valuation-side metric an ETF also has."),
+            Metric("iv_hv_spread", "IV minus realized vol", -1, 0.10,
                    description="Options rich vs realized. High spread = expensive hedges, crowded name."),
-            Metric("iv_percentile", "IV percentile (52w)", -1, 0.20,
+            Metric("iv_percentile", "IV percentile (52w)", -1, 0.06,
                    description="Where implied vol sits in its own 1-year range."),
-            Metric("range_position", "52-week range position", -1, 0.20,
+            Metric("range_position", "52-week range position", -1, 0.08,
                    description="Position within the 52w high-low band. Mean-reversion counterweight to momentum."),
         ),
     ),
