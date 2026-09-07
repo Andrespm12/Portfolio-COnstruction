@@ -313,6 +313,52 @@ def test_la_cobertura_dice_que_etiqueta_se_uso(tmp_path):
     assert cob.set_index("metrica").loc["activos", "etiqueta_principal"] == "Assets"
 
 
+def test_la_etiqueta_principal_es_la_mas_usada_no_la_primera_del_alfabeto(tmp_path):
+    # El defecto real: la columna reportaba `Depreciation` — el ULTIMO recurso
+    # de la lista de candidatos — solo porque ordena antes alfabeticamente que
+    # `DepreciationDepletionAndAmortization`, que era la que traia los numeros.
+    # Una columna de trazabilidad que apunta a la etiqueta equivocada invita a
+    # buscar el problema donde no esta.
+    def con(etiqueta):
+        return companyfacts(Assets=serie("USD", hecho(1, "2024-12-31",
+                                                      "2025-02-01")),
+                            **{etiqueta: serie("USD", hecho(
+                                7, "2024-12-31", "2025-02-01",
+                                start="2024-01-01"))})
+
+    # Dos emisores con la etiqueta preferida, uno con el ultimo recurso.
+    for t in ("AAA", "BBB"):
+        escribir_hechos(tmp_path, t, extract_facts(
+            con("DepreciationDepletionAndAmortization"), t)[0])
+    escribir_hechos(tmp_path, "CCC",
+                    extract_facts(con("Depreciation"), "CCC")[0])
+
+    cob = coverage_report(leer_hechos(tmp_path),
+                          ["AAA", "BBB", "CCC"]).set_index("metrica")
+    fila = cob.loc["depreciacion"]
+    assert fila["etiqueta_principal"] == "DepreciationDepletionAndAmortization"
+    assert fila["etiquetas_usadas"] == 2
+    assert "DepreciationDepletionAndAmortization×2" in fila["etiquetas_detalle"]
+    assert "Depreciation×1" in fila["etiquetas_detalle"]
+
+
+def test_un_empate_se_rompe_por_el_orden_declarado(tmp_path):
+    # Con un emisor cada una manda la prioridad de CONCEPTOS, que es la
+    # preferencia real, y no otra vez el alfabeto.
+    def con(etiqueta):
+        return companyfacts(**{etiqueta: serie("USD", hecho(
+            7, "2024-12-31", "2025-02-01", start="2024-01-01"))})
+
+    escribir_hechos(tmp_path, "AAA",
+                    extract_facts(con("Depreciation"), "AAA")[0])
+    escribir_hechos(tmp_path, "BBB", extract_facts(
+        con("DepreciationDepletionAndAmortization"), "BBB")[0])
+
+    cob = coverage_report(leer_hechos(tmp_path), ["AAA", "BBB"]).set_index("metrica")
+    assert cob.loc["depreciacion", "etiqueta_principal"] == \
+        "DepreciationDepletionAndAmortization"
+
+
 def test_la_cobertura_de_un_almacen_vacio_es_cero():
     cob = coverage_report(pd.DataFrame(columns=["ticker", "metrica", "fin",
                                                 "inicio", "filed", "accn",
@@ -368,6 +414,29 @@ def test_ninguna_etiqueta_se_reparte_entre_dos_metricas():
         for e in c.etiquetas:
             assert e not in vistas, f"{e} está en {vistas[e]} y en {c.clave}"
             vistas[e] = c.clave
+
+
+def test_los_componentes_de_pasivos_no_son_sinonimos_del_total():
+    # ABBV no reporta `Liabilities`: es opcional en US GAAP. La tentación es
+    # meter LiabilitiesCurrent como candidato del total para tapar el hueco,
+    # y eso etiquetaría el pasivo corriente como pasivo total en todo emisor
+    # que reporte ambos — subestimando el apalancamiento en silencio.
+    total = set(CONCEPTO_POR_CLAVE["pasivos"].etiquetas)
+    for clave in ("pasivos_corrientes", "pasivos_no_corrientes"):
+        assert not total & set(CONCEPTO_POR_CLAVE[clave].etiquetas)
+        assert CONCEPTO_POR_CLAVE[clave].instantaneo
+
+
+def test_un_emisor_sin_liabilities_igual_trae_sus_componentes():
+    payload = companyfacts(
+        LiabilitiesCurrent=serie("USD", hecho(300, "2024-12-31", "2025-02-01")),
+        LiabilitiesNoncurrent=serie("USD", hecho(700, "2024-12-31",
+                                                 "2025-02-01")))
+    hechos, elegidas = extract_facts(payload, "ABBV")
+    assert "pasivos" not in elegidas
+    assert elegidas["pasivos_corrientes"] == "LiabilitiesCurrent"
+    assert elegidas["pasivos_no_corrientes"] == "LiabilitiesNoncurrent"
+    assert sorted(h.valor for h in hechos) == [300.0, 700.0]
 
 
 def test_los_saldos_estan_marcados_como_instantaneos():

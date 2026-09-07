@@ -160,6 +160,23 @@ CONCEPTOS: tuple[Concepto, ...] = (
     ),
     Concepto(
         "pasivos", ("Liabilities",), instantaneo=True,
+        descripcion="El total. Es OPCIONAL en US GAAP: un emisor con balance "
+                    "clasificado puede publicar solo los componentes y el "
+                    "renglón LiabilitiesAndStockholdersEquity. En una corrida "
+                    "real ABBV no lo trae. Para esos, los dos conceptos de "
+                    "abajo permiten reconstruirlo sumando.",
+    ),
+    # Componentes, NO sinónimos. Ponerlos como candidatos de `pasivos` haría
+    # que un emisor que reporta los dos quedara con solo el corriente
+    # etiquetado como "pasivos totales" -- una subestimación silenciosa del
+    # apalancamiento, que es peor que el hueco que vendría a tapar.
+    Concepto(
+        "pasivos_corrientes", ("LiabilitiesCurrent",), instantaneo=True,
+    ),
+    Concepto(
+        "pasivos_no_corrientes",
+        ("LiabilitiesNoncurrent", "OtherLiabilitiesNoncurrent"),
+        instantaneo=True,
     ),
     Concepto(
         "patrimonio",
@@ -555,6 +572,13 @@ def coverage_report(hechos: "pd.DataFrame", tickers: Sequence[str],
     Es la pregunta que decide si vale la pena construir el bloque fundamental.
     Con 60% de cobertura un z-score transversal compara a los que reportaron
     contra un hueco, y eso no es una medición.
+
+    ``etiqueta_principal`` es la **más usada**, no la primera del alfabeto.
+    Ordenar alfabéticamente parecía inofensivo y no lo era: en una corrida real
+    la columna reportó ``Depreciation``, que es el último recurso de la lista de
+    candidatos, cuando la etiqueta que trajo casi todos los números era otra. Una
+    columna de trazabilidad que apunta a la etiqueta equivocada es peor que no
+    tenerla, porque invita a buscar el problema donde no está.
     """
     import pandas as pd
 
@@ -566,7 +590,16 @@ def coverage_report(hechos: "pd.DataFrame", tickers: Sequence[str],
         sub = anual[anual["metrica"] == concepto.clave] if not anual.empty \
             else pd.DataFrame(columns=list(COLUMNAS))
         con_dato = set(sub["ticker"]) & set(pedidos)
-        etiquetas = sorted(sub["etiqueta"].unique()) if not sub.empty else []
+
+        # Cuántos emisores trajo cada etiqueta. Se desempata por el orden
+        # declarado en CONCEPTOS, que es el orden de preferencia real.
+        conteo = (sub[sub["ticker"].isin(pedidos)]
+                  .drop_duplicates(subset=["ticker"])["etiqueta"]
+                  .value_counts() if not sub.empty else pd.Series(dtype=int))
+        prioridad = {e: i for i, e in enumerate(concepto.etiquetas)}
+        etiquetas = sorted(conteo.index,
+                           key=lambda e: (-int(conteo[e]),
+                                          prioridad.get(e, len(prioridad))))
         filas.append({
             "metrica": concepto.clave,
             "instantaneo": concepto.instantaneo,
@@ -575,6 +608,8 @@ def coverage_report(hechos: "pd.DataFrame", tickers: Sequence[str],
             "sin_dato": len(pedidos) - len(con_dato),
             "etiquetas_usadas": len(etiquetas),
             "etiqueta_principal": etiquetas[0] if etiquetas else "",
+            "etiquetas_detalle": " | ".join(f"{e}×{int(conteo[e])}"
+                                            for e in etiquetas),
             "faltan": ", ".join(sorted(set(pedidos) - con_dato)[:12]),
         })
     return pd.DataFrame(filas).sort_values("cobertura", ascending=False,
