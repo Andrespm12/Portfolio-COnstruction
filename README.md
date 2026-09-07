@@ -69,6 +69,7 @@ python3 scripts/build_market_data.py     # regenerate data/ from the IBKR pull
 python3 -m screener.run_screen           # score, gate, size, report
 python3 scripts/build_page.py            # bundle the page -> web/screener.html
 python3 scripts/build_notebook.py        # bundle the notebook -> notebooks/
+python3 scripts/build_notebook_fundamentales.py   # the EDGAR notebook
 
 python3 tests/test_scoring.py            # engine correctness
 python3 tests/test_yahoo_adapter.py      # Yahoo -> payload conversion
@@ -80,7 +81,8 @@ python3 tests/test_notebook.py           # notebook drift + full execution
 python3 tests/test_diagnostics.py        # block overlap + view saturation
 python3 tests/test_correr_modelo.py      # the runner script, end to end
 python3 -m pytest tests/test_bundle.py tests/test_tenencias_yahoo.py \
-                  tests/test_edgar.py tests/test_bajar_fundamentales.py
+                  tests/test_edgar.py tests/test_bajar_fundamentales.py \
+                  tests/test_notebook_fundamentales.py
 node tests/verify_js_engine.js && python3 tests/compare_engines.py   # JS/Python parity
 ```
 
@@ -186,6 +188,14 @@ successive versions **coexist** as separate entries. Filtering `filed <= date`
 reconstructs what was knowable that day by construction rather than by a
 vendor's promise. It is free, needs no key, and is the primary source those
 vendors resell.
+
+In Colab, upload `notebooks/fundamentales_colab.ipynb` — a separate notebook
+because this is weekly work, not per-run: a company files four times a year, and
+folding it into the daily notebook would make every ranking wait on a download
+measured in minutes. It shares the main notebook's engine byte for byte, and a
+test asserts both tarballs have the same SHA256 so there is one model, not two.
+
+Locally:
 
 ```bash
 python3 scripts/bajar_fundamentales.py --contacto "Your Firm you@domain.com"

@@ -210,6 +210,33 @@ def executable_cells(nb: dict) -> list[str]:
     return out
 
 
+def run_cell(source: str, label: str, namespace: dict,
+             rendered: list[str]) -> None:
+    """
+    Run one cell the way a notebook does: the last expression is *displayed*.
+
+    Plain ``exec`` discards it, and this notebook's styled tables are exactly
+    that -- the last expression of their cell. So every ``.style.format(...)``
+    chain went completely unevaluated, and a style helper that needs an absent
+    dependency would ship green. That is not hypothetical: writing the
+    fundamentals notebook produced a ``background_gradient`` that requires
+    matplotlib, and nothing here would have caught it.
+    """
+    import ast
+
+    tree = ast.parse(source, filename=label)
+    ultimo = None
+    if tree.body and isinstance(tree.body[-1], ast.Expr):
+        ultimo = ast.Expression(tree.body.pop().value)
+
+    exec(compile(tree, label, "exec"), namespace)
+    if ultimo is None:
+        return
+    valor = eval(compile(ultimo, label, "eval"), namespace)
+    if hasattr(valor, "to_html"):
+        rendered.append(valor.to_html())
+
+
 def test_cells_execute() -> None:
     nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     cells = executable_cells(nb)
@@ -236,6 +263,7 @@ def test_cells_execute() -> None:
     check("parameter cell exposes the knobs the test needs to patch", patched == 1)
 
     namespace: dict = {"__name__": "__main__"}
+    rendered: list[str] = []
     cwd = os.getcwd()
     workdir = tempfile.mkdtemp(prefix="nb-exec-")
     failures: list[tuple[int, str]] = []
@@ -246,7 +274,7 @@ def test_cells_execute() -> None:
             warnings.simplefilter("ignore")
             for i, source in enumerate(cells):
                 try:
-                    exec(compile(source, f"<cell {i}>", "exec"), namespace)
+                    run_cell(source, f"<cell {i}>", namespace, rendered)
                 except Exception as exc:  # noqa: BLE001 - reporting, not handling
                     failures.append((i, f"{type(exc).__name__}: {exc}"))
     finally:
@@ -261,6 +289,11 @@ def test_cells_execute() -> None:
         return
 
     check("engine unpacked and checksum verified", "ENGINE_SHA256" in namespace)
+    # Styled tables are the last expression of their cell, so plain exec threw
+    # them away and their whole formatting chain went unevaluated.
+    check("every styled table actually rendered to HTML",
+          len(rendered) >= 4 and all("<table" in h for h in rendered),
+          f"{len(rendered)} rendered")
     check("no stale FACTOR_MODEL is bound before the profile is applied",
           "FACTOR_MODEL" not in namespace,
           "a name bound at setup would still hold the 7-block model")
@@ -527,8 +560,21 @@ def test_cells_execute() -> None:
     check("the transparency cell ran and pulled fund composition",
           len(namespace.get("_tenencias", {})) > 0,
           "no fund composition reached the look-through")
+    # Asserted against the directory the notebook itself chose, not against a
+    # guess. The engine cell extracts to /content, which *creates* /content, so
+    # DIR_TENENCIAS resolves to the Colab path from the second run onward in the
+    # same container -- and hardcoding the workdir made this pass once and fail
+    # forever after.
+    # Resolved against the workdir because the cell picks a *relative* path
+    # outside Colab and these assertions run after chdir back. And read from
+    # the namespace rather than hardcoded, because the engine cell extracts to
+    # /content, which creates it -- so from the second run onward in the same
+    # container the notebook legitimately picks the Colab path instead.
+    dir_ten = namespace["DIR_TENENCIAS"]
+    if not dir_ten.is_absolute():
+        dir_ten = Path(workdir) / dir_ten
     check("composition landed in the notebook's own tenencias directory",
-          (Path(workdir) / "tenencias").is_dir())
+          dir_ten.is_dir(), str(dir_ten))
 
     exposure, coverage, notes = __import__(
         "screener.lookthrough", fromlist=["effective_exposure"]
