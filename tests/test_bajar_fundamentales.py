@@ -312,7 +312,7 @@ def test_un_cik_a_mano_desbloquea_el_nombre_de_punta_a_punta(tmp_path,
         encoding="utf-8")
     assert correr(tmp_path, "AVB") == 0
     assert (tmp_path / "AVB.csv").exists()
-    assert not (tmp_path / "_fallos.csv").exists()
+    assert pd.read_csv(tmp_path / "_fallos.csv").empty
 
 
 def test_queda_registrado_que_nombre_tiene_la_sec_para_cada_cik(tmp_path,
@@ -375,9 +375,43 @@ def test_el_formulario_no_pisa_lo_que_ya_escribiste(tmp_path, edgar_falso):
     assert "915912" in (tmp_path / "_ciks_manuales.csv").read_text()
 
 
+def test_una_corrida_limpia_no_deja_los_fallos_de_la_anterior(tmp_path,
+                                                              edgar_falso,
+                                                              capsys):
+    # Pasó de verdad: la corrida que resolvió los ocho nombres dejó el
+    # _fallos.csv viejo en disco, con el diagnóstico anterior, al lado de un
+    # _cobertura.csv al 100%. Dos archivos contradiciéndose y ninguna forma de
+    # saber cuál era el de hoy.
+    correr(tmp_path, "NOEXISTE")
+    assert pd.read_csv(tmp_path / "_fallos.csv").shape[0] == 1
+
+    (tmp_path / "_ciks_manuales.csv").write_text(
+        "ticker,cik,por_que\nNOEXISTE,320193,resuelto a mano\n",
+        encoding="utf-8")
+    capsys.readouterr()
+    correr(tmp_path, "NOEXISTE")
+
+    fallos = pd.read_csv(tmp_path / "_fallos.csv")
+    assert fallos.empty, "el fallo de ayer no puede sobrevivir al arreglo"
+    assert list(fallos.columns) == ["ticker", "motivo", "detalle"]
+    assert "no falló ninguno" in capsys.readouterr().out
+
+
+def test_sin_intentar_nada_no_se_toca_el_archivo_de_fallos(tmp_path,
+                                                           edgar_falso):
+    # Una corrida que se salta todo no sabe nada de nadie: borrar el archivo
+    # ahí sería tirar el diagnóstico sin haberlo repetido.
+    correr(tmp_path, "NOEXISTE")
+    correr(tmp_path, "AAPL")
+    (tmp_path / "AAPL.csv").touch()
+    antes = (tmp_path / "_fallos.csv").read_text()
+    correr(tmp_path, "AAPL")
+    assert (tmp_path / "_fallos.csv").read_text() == antes
+
+
 def test_sin_fallos_no_se_escribe_el_archivo(tmp_path, edgar_falso):
     correr(tmp_path, "AAPL")
-    assert not (tmp_path / "_fallos.csv").exists()
+    assert pd.read_csv(tmp_path / "_fallos.csv").empty
 
 
 def test_un_almacen_vacio_no_revienta_el_reporte(tmp_path, edgar_falso, capsys):

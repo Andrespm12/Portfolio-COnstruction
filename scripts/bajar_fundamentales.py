@@ -34,7 +34,7 @@ Qué escribe
     datos/fundamentales/_cobertura.csv qué porcentaje del universo tiene qué
     datos/fundamentales/_etiquetas.csv qué etiqueta XBRL ganó en cada emisor
     datos/fundamentales/_emisores.csv  qué nombre tiene la SEC para cada CIK
-    datos/fundamentales/_fallos.csv    qué nombre falló y por qué
+    datos/fundamentales/_fallos.csv    qué falló en LA ÚLTIMA corrida
 
 Y uno que escribes tú, no el guion:
 
@@ -231,12 +231,19 @@ def main(argv: list[str] | None = None) -> int:
             for e in a_mano:
                 print(f"  {e['ticker']:6s} {e['cik']}  {e['entidad']}")
 
-    if motivos:
-        with (destino / "_fallos.csv").open("w", newline="",
-                                            encoding="utf-8") as fh:
+    # _fallos.csv describe la ÚLTIMA corrida, así que si esta no tuvo fallos hay
+    # que borrarlo. Dejarlo puesto es peor que no escribirlo nunca: la corrida
+    # que arregló los ocho nombres los dejó ahí, con el diagnóstico viejo, junto
+    # a una cobertura del 100%. Dos archivos que se contradicen y ninguna forma
+    # de saber cuál es el de hoy.
+    fallos_csv = destino / "_fallos.csv"
+    if ok or sin_cik or fallaron:            # la corrida intentó algo
+        with fallos_csv.open("w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=["ticker", "motivo", "detalle"])
             w.writeheader()
             w.writerows(motivos)
+        if not motivos:
+            print("  _fallos.csv queda vacío: no falló ninguno.")
 
     if ok and not args.forzar and not nuevos:
         escribir_manifiesto(destino)

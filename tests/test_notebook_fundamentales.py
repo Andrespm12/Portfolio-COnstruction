@@ -303,6 +303,15 @@ def test_el_cuaderno_deja_ver_que_nombre_tiene_la_sec_para_ese_cik(corrida):
     assert emisores.loc["AVB", "entidad"] == "EMISOR 915912"
 
 
+def test_el_cuaderno_reescribe_los_fallos_en_vez_de_dejar_los_viejos():
+    # El cuaderno lleva su propia copia del lazo de descarga, así que la
+    # corrección del guion no llega sola. Si esto falla, la copia se separó.
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    celda = next(c for c in executable_cells(nb) if "_fallos.csv" in c)
+    assert "if ok or sin_cik or fallaron:" in celda, \
+        "escribir _fallos.csv solo cuando hay fallos deja el diagnóstico viejo"
+
+
 def test_el_cuaderno_manda_a_edgar_en_vez_de_concluir(corrida):
     import pandas as pd
 
