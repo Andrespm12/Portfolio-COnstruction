@@ -391,3 +391,45 @@ def test_los_ratios_llegan_al_score_y_mueven_el_bloque():
     assert "earnings_yield" not in etf.raw_metrics
     assert etf.block_coverage.get("valuation_carry", 0.0) > 0, \
         "el ETF conserva su bloque con las métricas de mercado"
+
+
+# ------------------------------------------------- la hoja de cobertura
+def test_la_cobertura_no_declara_100_por_ciento_sin_mirar():
+    # El verde falso que llegó al comité: la hoja Cobertura de una corrida real
+    # declaró 100% en las cinco métricas de EDGAR, incluidos los ETF, que no
+    # tienen estados financieros. Se calculaba tratando "no está en la lista de
+    # snapshot" como "sale de precios, luego está siempre".
+    from screener.yahoo_adapter import coverage_report
+
+    tickers = [f"T{i:03d}" for i in range(35)]
+    md = payload(*tickers, "SPY")
+    fx.adjuntar(md, marco(*[emisor(t) for t in tickers]), HOY)
+
+    cob = coverage_report(md).set_index("metric")
+    ey = cob.loc["Earnings yield (EPS/price)"]
+    assert ey["coverage"] == pytest.approx(35 / 36), \
+        "el ETF no tiene fundamentales y no puede contar como cubierto"
+    assert "EDGAR" in ey["source"], ey["source"]
+    assert cob.loc["12M-1M total return", "coverage"] == 1.0
+
+
+def test_sin_almacen_la_cobertura_lo_dice_en_vez_de_mentir():
+    from screener.yahoo_adapter import coverage_report
+
+    cob = coverage_report(payload("A", "B", "C")).set_index("metric")
+    fila = cob.loc["Free cash flow yield"]
+    assert fila["coverage"] == 0.0
+    assert "UNAVAILABLE" in fila["source"]
+
+
+def test_toda_metrica_declara_de_donde_sale():
+    # La defensa estructural: una métrica nueva sin fuente declarada volvería a
+    # contarse como "sale de precios, luego está siempre".
+    import screener.config as config
+
+    fuentes = {m.source for b in config.FACTOR_MODEL for m in b.metrics}
+    assert fuentes <= {"price", "snapshot", "edgar"}, fuentes
+    edgar = {m.key for b in config.FACTOR_MODEL for m in b.metrics
+             if m.source == "edgar"}
+    assert edgar == set(fx.RATIOS_PUNTUADOS), \
+        "lo que puntúa desde EDGAR y lo que se declara como EDGAR se separaron"

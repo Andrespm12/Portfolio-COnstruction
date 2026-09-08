@@ -121,6 +121,19 @@ class Metric:
     weight: float
     peer_relative: bool = False
     description: str = ""
+    #: Where the number comes from: ``price`` (derived from the return series,
+    #: so present whenever the name has history), ``snapshot`` (a quoted field
+    #: that may be absent) or ``edgar`` (a fundamental, absent for every ETF and
+    #: for any issuer missing an input).
+    #:
+    #: Declararlo aquí y no inferirlo en el adaptador es el punto entero. La
+    #: cobertura se calculaba tratando "no está en la lista de snapshot" como
+    #: "sale de precios, luego está siempre", y al llegar los fundamentales esa
+    #: suposición dejó de ser cierta sin que nada fallara: la hoja Cobertura de
+    #: una corrida real declaró 100% en las cinco métricas de EDGAR, incluidos
+    #: los ETF, que no tienen estados financieros. Un verde falso en la hoja que
+    #: se lee justamente para decidir si creerle a la corrida.
+    source: str = "price"
 
 
 @dataclass(frozen=True)
@@ -156,7 +169,7 @@ FACTOR_MODEL: tuple[Block, ...] = (
                    description="Intermediate-horizon trend confirmation."),
             Metric("mom_3m", "3M total return", 1, 0.15,
                    description="Near-term trend; catches regime inflections earlier."),
-            Metric("pct_from_52w_high", "Proximity to 52w high", 1, 0.15,
+            Metric("pct_from_52w_high", "Proximity to 52w high", 1, 0.15, source="snapshot",
                    description="Distance below the 52-week high. Names near highs keep making highs."),
             Metric("above_40w_ma", "Price vs 40W moving average", 1, 0.10,
                    description="Percentage above/below the 40-week (200-day) moving average."),
@@ -237,7 +250,7 @@ FACTOR_MODEL: tuple[Block, ...] = (
             "value, so 'liquid enough' is defined relative to real position sizes."
         ),
         metrics=(
-            Metric("adv_usd_log", "90D avg daily $ volume (log)", 1, 0.50,
+            Metric("adv_usd_log", "90D avg daily $ volume (log)", 1, 0.50, source="snapshot",
                    description="Log of average daily traded value. Primary capacity measure."),
             Metric("days_to_liquidate", "Days to liquidate target position", -1, 0.35,
                    description="At max participation rate, days needed to exit a full position."),
@@ -265,23 +278,23 @@ FACTOR_MODEL: tuple[Block, ...] = (
             "screener.fundamentales.multiplos_legibles, and never scored."
         ),
         metrics=(
-            Metric("earnings_yield", "Earnings yield (EPS/price)", 1, 0.18,
+            Metric("earnings_yield", "Earnings yield (EPS/price)", 1, 0.18, source="edgar",
                    description="Inverse P/E. Negative when the company loses money, which is where it belongs."),
-            Metric("fcf_yield", "Free cash flow yield", 1, 0.18,
+            Metric("fcf_yield", "Free cash flow yield", 1, 0.18, source="edgar",
                    description="Operating cash flow minus capex, over market cap. Harder to dress up than accounting earnings."),
-            Metric("ebitda_ev", "EBITDA / enterprise value", 1, 0.12,
+            Metric("ebitda_ev", "EBITDA / enterprise value", 1, 0.12, source="edgar",
                    description="Inverse EV/EBITDA. Comparable across capital structures. Absent for banks, which report no operating income."),
-            Metric("sales_yield", "Sales / market cap", 1, 0.08,
+            Metric("sales_yield", "Sales / market cap", 1, 0.08, source="edgar",
                    description="Inverse P/S. Survives a loss year, which is when the other yields stop ordering."),
-            Metric("book_yield", "Book equity / market cap", 1, 0.06,
+            Metric("book_yield", "Book equity / market cap", 1, 0.06, source="edgar",
                    description="Inverse P/B. Negative equity gives a negative yield -- the correct reading."),
-            Metric("dividend_yield", "Dividend yield", 1, 0.14,
+            Metric("dividend_yield", "Dividend yield", 1, 0.14, source="snapshot",
                    description="Cash carry. The one valuation-side metric an ETF also has."),
-            Metric("iv_hv_spread", "IV minus realized vol", -1, 0.10,
+            Metric("iv_hv_spread", "IV minus realized vol", -1, 0.10, source="snapshot",
                    description="Options rich vs realized. High spread = expensive hedges, crowded name."),
-            Metric("iv_percentile", "IV percentile (52w)", -1, 0.06,
+            Metric("iv_percentile", "IV percentile (52w)", -1, 0.06, source="snapshot",
                    description="Where implied vol sits in its own 1-year range."),
-            Metric("range_position", "52-week range position", -1, 0.08,
+            Metric("range_position", "52-week range position", -1, 0.08, source="snapshot",
                    description="Position within the 52w high-low band. Mean-reversion counterweight to momentum."),
         ),
     ),

@@ -400,16 +400,28 @@ def coverage_report(market_data: dict) -> pd.DataFrame:
         "adv_usd_log": ("avg-90d-usd-volume", "volume"),
     }
 
+    def _tiene_fundamental(inst: dict, clave: str) -> bool:
+        nodo = (inst.get("fundamentals") or {}).get("metricas") or {}
+        return nodo.get(clave) is not None
+
     rows = []
     for block in FACTOR_MODEL:
         for metric in block.metrics:
-            path = snapshot_backed.get(metric.key)
-            if path is None:
-                available = n  # derived from price history, always present
-                note = "computed from price history"
-            else:
-                available = sum(1 for i in instruments if _has(i, path))
+            if metric.source == "edgar":
+                available = sum(1 for i in instruments
+                                if _tiene_fundamental(i, metric.key))
+                note = ("from SEC EDGAR" if available
+                        else "UNAVAILABLE -- sin almacén de fundamentales")
+            elif metric.source == "snapshot":
+                path = snapshot_backed.get(metric.key)
+                available = (sum(1 for i in instruments if _has(i, path))
+                             if path else 0)
                 note = "from snapshot" if available else "UNAVAILABLE from Yahoo"
+            else:
+                # Sale de la serie de retornos, así que está siempre que el
+                # nombre tenga historia — y sin historia no llegó hasta aquí.
+                available = n
+                note = "computed from price history"
             rows.append({
                 "block": block.label,
                 "metric": metric.label,

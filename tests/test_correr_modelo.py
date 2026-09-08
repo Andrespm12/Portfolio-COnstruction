@@ -131,8 +131,26 @@ def test_every_stage_runs() -> None:
           "Ancla (politica) por clase de activo" in out)
 
 
+def _hojas_del_notebook() -> list[str]:
+    """Las hojas que escribe el cuaderno, leídas de su propia celda de export."""
+    import re
+
+    nb = json.loads((Path(__file__).resolve().parents[1] / "notebooks"
+                     / "screener_colab.ipynb").read_text(encoding="utf-8"))
+    celda = next("".join(c["source"]) for c in nb["cells"]
+                 if c["cell_type"] == "code" and "ExcelWriter" in "".join(
+                     c["source"]))
+    return re.findall(r"sheet_name='([^']+)'", celda)
+
+
 def test_workbook_matches_the_notebook_shape() -> None:
-    """Same eleven sheets the notebook writes, in the same order."""
+    """
+    Las mismas hojas que escribe el cuaderno, en el mismo orden.
+
+    La lista se lee del cuaderno, no se escribe aquí. Con una lista a mano los
+    dos se separaron sin que nada fallara: el guion aprendió a escribir la hoja
+    Fundamentales y el cuaderno no, y una corrida real llegó sin ella.
+    """
     from openpyxl import load_workbook
 
     _, tmp = run_script()
@@ -140,11 +158,11 @@ def test_workbook_matches_the_notebook_shape() -> None:
     check("the workbook was written", book.exists())
 
     wb = load_workbook(book)
-    expected = ["Ranking", "Bloques", "Perfiles", "Views BL",
-                "Cartera", "Sectores", "Riesgo", "Cesta", "Universo",
-                "Cobertura", "Parametros"]
-    check("eleven sheets, matching the notebook", wb.sheetnames == expected,
-          str(wb.sheetnames))
+    # Sin almacén de EDGAR la hoja Fundamentales no se escribe en ninguno de
+    # los dos, así que se compara sobre las que ambos producen siempre.
+    esperadas = [h for h in _hojas_del_notebook() if h != "Fundamentales"]
+    check("sheets match the notebook, in order", wb.sheetnames == esperadas,
+          f"script={wb.sheetnames} notebook={esperadas}")
     check("the Cartera sheet is never blank -- positions or a stated reason",
           wb["Cartera"].max_row > 1)
     check("the Ranking sheet has one row per scored name",

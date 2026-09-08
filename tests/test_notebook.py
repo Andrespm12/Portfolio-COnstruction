@@ -529,11 +529,19 @@ def test_cells_execute() -> None:
 
     import openpyxl
     wb = openpyxl.load_workbook(workbook)
-    check("workbook has the eleven documented sheets",
+    check("workbook has the documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
                                  "Cartera", "Sectores", "Riesgo", "Cesta",
-                                 "Universo", "Cobertura", "Parametros"},
+                                 "Universo", "Cobertura", "Fundamentales",
+                                 "Parametros"},
           f"got {wb.sheetnames}")
+    # La hoja que faltaba: sin ella los ratios no se pueden auditar contra el
+    # 10-K que los produjo, y una corrida real llegó al comité sin ella.
+    encabezados = [c.value for c in wb["Fundamentales"][1]]
+    check("the fundamentals sheet dates every ratio",
+          {"periodo", "filed"} <= set(encabezados), str(encabezados))
+    check("and carries the scored yields",
+          "earnings_yield" in encabezados, str(encabezados))
 
     # The sector ceiling is a constraint now, so it has to reach the reader of
     # the workbook. A limit enforced in memory and reported only to a console
