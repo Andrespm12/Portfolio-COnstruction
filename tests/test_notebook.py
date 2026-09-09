@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import warnings
@@ -92,6 +93,37 @@ def test_every_module_travels_in_the_notebook() -> None:
     en_disco = {p.name for p in (ROOT / "screener").glob("*.py")}
     check("every screener module is embedded", en_disco <= embarcados,
           f"missing: {sorted(en_disco - embarcados)}")
+
+
+def test_el_almacen_por_defecto_es_alcanzable_cuando_se_usa() -> None:
+    """
+    Si el almacén apunta a Drive, Drive tiene que montarse ANTES de mirarlo.
+
+    Esto salió a producción roto: la ruta por defecto es de Drive, el montaje
+    ocurría en la celda de exportación — nueve secciones después — y para
+    cuando la celda de fundamentales miraba, la ruta no existía. Dos corridas
+    salieron con el bloque fundamental en cero sin que nada fallara.
+    """
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    celdas = [("".join(c["source"])) for c in nb["cells"]
+              if c["cell_type"] == "code"]
+    i_fund = next(i for i, c in enumerate(celdas)
+                  if "ALMACEN_FUNDAMENTALES" in c)
+    fuente = celdas[i_fund]
+
+    por_defecto = re.search(r'ALMACEN_FUNDAMENTALES = "([^"]*)"', fuente)
+    check("the fundamentals cell declares a default store", bool(por_defecto))
+    if por_defecto and por_defecto.group(1).startswith("/content/drive"):
+        check("the cell mounts Drive itself before looking at the path",
+              "drive.mount" in fuente,
+              "el montaje que hay en la celda de exportación llega tarde")
+        check("and a failed mount degrades instead of killing the run",
+              "except" in fuente and "No se pudo montar Drive" in fuente)
+
+    montajes = [i for i, c in enumerate(celdas) if "drive.mount" in c]
+    check("no mount happens only after the fundamentals cell",
+          not montajes or min(montajes) <= i_fund,
+          f"mounts at cells {montajes}, fundamentals at {i_fund}")
 
 
 def test_embedded_engine_is_current() -> None:

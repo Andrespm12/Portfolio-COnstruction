@@ -317,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     # antes y el bloque de valuación se queda con los proxies de mercado. Lo que
     # no puede pasar es que corra con fundamentales sin decirlo.
     fund_meta = {}
+    estado_fund = "desactivado" if not args.fundamentales else "sin almacén"
     if args.fundamentales:
         titulo("2b · FUNDAMENTALES (SEC EDGAR, point-in-time)")
 
@@ -344,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             # No se puede bajar sin identificarse: la SEC bloquea por IP a quien
             # no lo hace. Decirlo aquí es la diferencia entre un bloque vacío
             # que se entiende y uno que parece un bug.
+            estado_fund = "no se bajó: falta --contacto-sec"
             print("Sin --contacto-sec no se puede bajar de EDGAR: la SEC exige "
                   "un User-Agent con correo real y bloquea por IP a quien no se "
                   "identifica.\nSe usará lo que ya esté en el almacén.")
@@ -356,6 +358,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             adjuntar(market_data, hechos, args.fecha_fundamentales)
             fund_meta = market_data.get("fundamentals_meta", {})
+            estado_fund = (f"{fund_meta.get('con_ratios', 0)} nombres con "
+                           f"ratios, al "
+                           f"{args.fecha_fundamentales or 'último dato conocido'}")
             print(f"{fund_meta.get('con_ratios', 0)} de {len(tickers)} nombres "
                   f"con ratios, al "
                   f"{args.fecha_fundamentales or 'último dato conocido'}. "
