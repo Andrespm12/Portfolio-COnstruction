@@ -232,6 +232,70 @@ def test_la_auditoria_sectorial_puede_fallar():
     assert not audit_sectors(pesos, mapa, 0.45)
 
 
+def test_el_caso_defensivo_que_el_tope_del_libro_dejaba_pasar():
+    # La razón del cambio. Con el tope tomado sobre el libro, el mandato
+    # Defensivo (20% en acciones, tope 15% del libro) permitía tres cuartas
+    # partes del sleeve en un solo sector: el tope no restringía nada
+    # precisamente en el mandato que menos concentración debería tolerar.
+    mapa = {"Technology": {"AAPL": 1.0, "MSFT": 1.0, "NVDA": 1.0}}
+    clases = {"AAPL": "Equity", "MSFT": "Equity", "NVDA": "Equity",
+              "JNJ": "Equity", "AGG": "ETF_RentaFija"}
+    # 15% del libro en tecnología sobre un sleeve de renta variable del 20%.
+    pesos = pd.Series({"AAPL": 0.05, "MSFT": 0.05, "NVDA": 0.05,
+                       "JNJ": 0.05, "AGG": 0.80})
+
+    assert not audit_sectors(pesos, mapa, 0.15), \
+        "el tope viejo, sobre el libro, dejaba pasar esto"
+    fallos = audit_sectors(pesos, mapa, 0.30, clases)
+    assert fallos, "el tope nuevo, sobre el sleeve, tiene que atajarlo"
+    assert "75.0% del sleeve" in fallos[0], fallos[0]
+    assert "15.00% del libro" in fallos[0], fallos[0]
+
+
+def test_el_mismo_peso_de_libro_pasa_o_falla_segun_el_sleeve():
+    mapa = {"Technology": {"AAPL": 1.0}}
+    pesos = pd.Series({"AAPL": 0.20, "OTRA": 0.20, "AGG": 0.60})
+
+    poco_rv = {"AAPL": "Equity", "OTRA": "ETF_RentaFija", "AGG": "ETF_RentaFija"}
+    mucho_rv = {"AAPL": "Equity", "OTRA": "Equity", "AGG": "ETF_RentaFija"}
+
+    # 20% del libro es todo el sleeve en el primero y la mitad en el segundo.
+    assert audit_sectors(pesos, mapa, 0.60, poco_rv)
+    assert not audit_sectors(pesos, mapa, 0.60, mucho_rv)
+
+
+def test_sin_clases_se_compara_contra_el_libro_y_lo_dice():
+    # Compatibilidad: sin denominador no se puede tomar la fracción del sleeve.
+    mapa = {"Technology": {"AAPL": 1.0}}
+    fallos = audit_sectors(pd.Series({"AAPL": 0.50}), mapa, 0.25)
+    assert fallos and "sobre el libro" in fallos[0]
+
+
+def test_la_exposicion_rv_cuenta_acciones_y_etfs_de_renta_variable():
+    from screener.optimizer import exposicion_rv
+
+    clases = {"AAPL": "Equity", "SPY": "ETF_RentaVariable",
+              "AGG": "ETF_RentaFija", "BIL": "Efectivo_MM"}
+    pesos = pd.Series({"AAPL": 0.2, "SPY": 0.3, "AGG": 0.4, "BIL": 0.1})
+    assert exposicion_rv(pesos, clases) == pytest.approx(0.5)
+
+
+def test_la_restriccion_relativa_ata_en_el_optimizador():
+    # Con el tope al 40% del sleeve, el sector no puede pasar de 40% de la
+    # renta variable resuelta, sea cual sea el tamaño del sleeve.
+    acciones = {t: "Technology" for t in ("AAPL", "MSFT", "NVDA", "AMD", "MU")}
+    acciones.update({"JNJ": "Health Care", "XOM": "Energy",
+                     "JPM": "Financial Services"})
+    atado = _problema(acciones, 0.40)
+    assert atado.feasible
+
+    rv = sum(w for t, w in atado.weights.items()
+             if t not in ("AGG", "BIL") and w > 0)
+    tech = atado.sector_exposure.get("Technology", 0.0)
+    assert rv > 0.05, "sin sleeve la prueba no mide nada"
+    assert tech / rv <= 0.40 + 1e-5, f"{tech:.3f} de {rv:.3f}"
+
+
 def test_sin_tope_no_hay_incumplimiento_que_reportar():
     mapa = {"Technology": {"AAPL": 1.0}}
     assert audit_sectors(pd.Series({"AAPL": 0.9}), mapa, None) == []

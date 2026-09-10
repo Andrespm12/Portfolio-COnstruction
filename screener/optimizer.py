@@ -55,7 +55,8 @@ from .cci_regulation import (
     CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, EXPOSICIONES_NUCLEO,
     GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES, RISK_TARGETS,
     SECTOR_CAPS, bands_for, clase_a_grupo, classify_for_bands,
-    risk_aversion_for, unbanded_classes,
+    drawdown_tolerado_for, retorno_esperado_for, risk_aversion_for,
+    tracking_error_objetivo_for, unbanded_classes,
 )
 
 #: Risk aversion of the **market**, for the equilibrium ``pi = delta * Sigma * w``.
@@ -915,6 +916,18 @@ class Allocation:
     def feasible(self) -> bool:
         return self.status in {"optimal", "optimal_inaccurate"}
 
+    @property
+    def equity_exposure(self) -> float:
+        """
+        Peso del libro en renta variable — el denominador del tope sectorial.
+
+        El tope se mide sobre el sleeve y no sobre el libro, así que cualquier
+        reporte que ponga un porcentaje del libro al lado del tope está
+        invitando a comparar dos números que no se comparan.
+        """
+        return float(sum(float(self.by_class.get(c, 0.0) or 0.0)
+                         for c in EQUITY_CLASSES))
+
 
 def relative_view_pairs(views: Sequence[Mapping[str, Any]],
                         universe: Iterable[str] | None = None,
@@ -977,16 +990,51 @@ def sector_exposures(weights: pd.Series | Mapping[str, float],
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
+def exposicion_rv(weights: pd.Series | Mapping[str, float],
+                  classes: Mapping[str, str]) -> float:
+    """Peso del libro en renta variable — el denominador del tope sectorial."""
+    held = dict(weights.items()) if hasattr(weights, "items") else dict(weights)
+    return float(sum(float(w or 0.0) for t, w in held.items()
+                     if classes.get(t) in EQUITY_CLASSES))
+
+
 def audit_sectors(weights: pd.Series | Mapping[str, float],
                   sector_weights: Mapping[str, Mapping[str, float]],
                   cap: float | None,
+                  classes: Mapping[str, str] | None = None,
                   tolerance: float = 1e-4) -> list[str]:
-    """Sector concentrations above ``cap``. Empty when ``cap`` is None."""
+    """
+    Concentraciones por encima del tope. Vacío cuando ``cap`` es ``None``.
+
+    El tope es **fracción del sleeve de renta variable**, no del libro. Medido
+    sobre el libro entero quedaba más flojo cuanto más conservador el mandato —
+    en Defensivo permitía tres cuartas partes del sleeve en un solo sector — que
+    es justo al revés de lo que se busca.
+
+    Sin ``classes`` no hay denominador y se compara contra el libro, que es el
+    comportamiento anterior. Se dice en el texto del incumplimiento para que
+    nadie lea un porcentaje sin saber sobre qué está tomado.
+    """
     if cap is None:
         return []
-    return [f"Sector {sector}: {value:.2%} excede el tope de {cap:.0%}"
-            for sector, value in sector_exposures(weights, sector_weights).items()
-            if value > cap + tolerance]
+
+    rv = exposicion_rv(weights, classes) if classes else 0.0
+    exposiciones = sector_exposures(weights, sector_weights)
+    if rv <= WEIGHT_EPS:
+        return [f"Sector {sector}: {valor:.2%} del libro excede el tope de "
+                f"{cap:.0%} (sin exposición a renta variable medible, tomado "
+                "sobre el libro)"
+                for sector, valor in exposiciones.items()
+                if valor > cap + tolerance]
+
+    fuera = []
+    for sector, valor in exposiciones.items():
+        cuota = valor / rv
+        if cuota > cap + tolerance:
+            fuera.append(
+                f"Sector {sector}: {cuota:.1%} del sleeve de renta variable "
+                f"({valor:.2%} del libro) excede el tope de {cap:.0%}")
+    return fuera
 
 
 def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
@@ -1150,8 +1198,9 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             )
         else:
             notes.append(
-                f"Tope sectorial {sector_cap:.0%} (mirando a través de los "
-                f"fondos) sobre {len(sectors)} sector(es) y {len(cubierto)} de "
+                f"Tope sectorial {sector_cap:.0%} del sleeve de renta "
+                f"variable (mirando a través de los fondos) sobre "
+                f"{len(sectors)} sector(es) y {len(cubierto)} de "
                 f"{len(tickers)} instrumentos. Número de la mesa, no del "
                 "Procedimiento: pendiente de confirmar con el Comité."
             )
@@ -1229,10 +1278,17 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         posicion = {t: i for i, t in enumerate(tickers)}
 
         if with_sectors and sectors and sector_cap is not None:
+            # tope * exposicion_rv - exposicion_sector >= 0. Sigue siendo lineal
+            # en w, así que el problema sigue siendo convexo: el tope relativo
+            # al sleeve no le cuesta nada al solver.
             for fila in sectors.values():
                 idx = [posicion[t] for t in fila]
                 shares = np.array([fila[t] for t in fila])
-                constraints.append(shares @ w[idx] <= sector_cap)
+                if equity_idx:
+                    constraints.append(
+                        shares @ w[idx] <= sector_cap * cp.sum(w[equity_idx]))
+                else:
+                    constraints.append(shares @ w[idx] <= sector_cap)
 
         # La pata larga de una view relativa no puede pesar menos que la corta.
         # No fuerza a tener la posición: 0 >= 0 se cumple.
@@ -1301,7 +1357,7 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         culpables: list[tuple[str, dict]] = []
         if sectors and sector_cap is not None:
             culpables.append((
-                f"El tope sectorial de {sector_cap:.0%} es lo que deja la "
+                f"El tope sectorial de {sector_cap:.0%} del sleeve es lo que deja la "
                 "cartera sin solución: sin él sí resuelve. La cesta no tiene "
                 "suficientes industrias distintas para llenar el libro bajo ese "
                 "techo — amplía la cesta o sube el tope, pero decídelo, no lo "
@@ -1440,7 +1496,8 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     # an audit that only repeats what the solver was told cannot catch a bad
     # sector map, a solver that returned "optimal_inaccurate", or a constraint
     # that never got built.
-    allocation.breaches += audit_sectors(allocation.weights, sectors, sector_cap)
+    allocation.breaches += audit_sectors(allocation.weights, sectors,
+                                         sector_cap, classes)
     allocation.breaches += view_coherence_breaches(allocation.weights, pairs)
 
     # El piso de volatilidad no se puede imponer -- es convexo al revés -- así
@@ -1572,6 +1629,26 @@ def drawdown_metrics(weights: pd.Series | Mapping[str, float],
     return out
 
 
+def tracking_error(weights: pd.Series, anchor: pd.Series,
+                   covariance: pd.DataFrame) -> float:
+    """
+    Volatilidad anual de la desviación contra el ancla.
+
+    Es lo que ``RISK_AVERSION_BY_STRATEGY`` de verdad presupuesta. El objetivo
+    del optimizador penaliza ``(w - w_ancla)' Sigma (w - w_ancla)``, no el
+    riesgo total, así que lambda no es aversión al riesgo en el sentido clásico
+    sino un presupuesto de error de seguimiento. Medirlo es lo que permite
+    calibrarlo: se fija el objetivo, se corre, se ajusta lambda.
+    """
+    import numpy as _np
+
+    idx = list(covariance.index)
+    activo = _np.asarray([float(weights.get(t, 0.0)) - float(anchor.get(t, 0.0))
+                          for t in idx], dtype=float)
+    var = float(activo @ covariance.values @ activo)
+    return float(_np.sqrt(max(var, 0.0)))
+
+
 def risk_profile_table(covariance: pd.DataFrame,
                        asset_types: Mapping[str, str],
                        caps: Mapping[str, float] | None,
@@ -1616,14 +1693,26 @@ def risk_profile_table(covariance: pd.DataFrame,
                          anchor=ancla, prior=pi)
 
         piso, techo = RISK_TARGETS.get(estrategia, (float("nan"),) * 2)
+        te = tracking_error(alloc.weights, ancla, cov_post) \
+            if alloc.feasible else float("nan")
+        te_obj = tracking_error_objetivo_for(estrategia) or (float("nan"),) * 2
         fila = {
             "estrategia": estrategia,
             "lambda": lam,
             "estado": alloc.status,
             "retorno_esperado": alloc.expected_return if alloc.feasible else float("nan"),
+            # El estratégico de la política, que NO es el de arriba: aquel sale
+            # del posterior y está condicionado a las views y al lambda de esta
+            # corrida. Van juntos para poder compararlos, en columnas distintas
+            # para no confundirlos.
+            "retorno_politica": retorno_esperado_for(estrategia),
             "volatilidad": alloc.volatility if alloc.feasible else float("nan"),
             "vol_min_objetivo": piso,
             "vol_max_objetivo": techo,
+            "tracking_error": te,
+            "te_min_objetivo": te_obj[0],
+            "te_max_objetivo": te_obj[1],
+            "dd_tolerado": drawdown_tolerado_for(estrategia),
             "posiciones": int((alloc.weights > WEIGHT_EPS).sum()),
             "incumplimientos": " | ".join(alloc.breaches),
             "riesgo_vs_mandato": " | ".join(alloc.risk_findings) or "dentro del rango",

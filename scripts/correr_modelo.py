@@ -637,12 +637,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if cartera.sector_exposure:
         tope = SECTOR_CAPS.get(args.estrategia)
+        # El tope es fracción del SLEEVE de renta variable, no del libro.
+        # Imprimir el porcentaje del libro al lado del tope invita a comparar
+        # dos números que no se comparan entre sí.
+        rv = cartera.equity_exposure
         etiqueta = ("sin tope" if args.sin_tope_sectorial or tope is None
-                    else f"tope {tope:.0%}")
+                    else f"tope {tope:.0%} del sleeve de RV "
+                         f"({rv:.0%} del libro)")
         print(f"\nPor sector, mirando a través de los fondos ({etiqueta})")
         for sector, peso in cartera.sector_exposure.items():
             if peso > 0.0001:
-                print(f"  {peso:7.2%}  {sector}")
+                cuota = (peso / rv) if rv > 1e-9 else float("nan")
+                print(f"  {cuota:7.1%} del sleeve   {peso:7.2%} del libro   "
+                      f"{sector}")
 
     if cartera.risk_findings:
         print("\nRIESGO vs. MANDATO (expectativa de la mesa, no del Procedimiento):")
@@ -687,13 +694,20 @@ def main(argv: list[str] | None = None) -> int:
     # viajar en el libro que lee el comité, con el techo al lado y no en una
     # línea de consola que nadie guarda.
     _tope_sec = None if args.sin_tope_sectorial else SECTOR_CAPS.get(args.estrategia)
+    _rv_libro = cartera.equity_exposure
+    _nan = float("nan")
     sectores_df = pd.DataFrame(
-        [{"sector": s, "exposicion": v,
-          "tope": _tope_sec if _tope_sec is not None else float("nan"),
-          "holgura": (_tope_sec - v) if _tope_sec is not None else float("nan")}
+        [{"sector": s,
+          "exposicion_libro": v,
+          "exposicion_sleeve": (v / _rv_libro) if _rv_libro > 1e-9 else _nan,
+          "tope_sleeve": _tope_sec if _tope_sec is not None else _nan,
+          "holgura_sleeve": ((_tope_sec - v / _rv_libro)
+                             if _tope_sec is not None and _rv_libro > 1e-9
+                             else _nan)}
          for s, v in cartera.sector_exposure.items()]
-        or [{"sector": "sin desglose sectorial", "exposicion": float("nan"),
-             "tope": float("nan"), "holgura": float("nan")}])
+        or [{"sector": "sin desglose sectorial", "exposicion_libro": _nan,
+             "exposicion_sleeve": _nan, "tope_sleeve": _nan,
+             "holgura_sleeve": _nan}])
     if cartera_df.empty:
         # Una hoja vacía no dice nada. El motivo viaja con el resultado.
         cartera_df = pd.DataFrame({
