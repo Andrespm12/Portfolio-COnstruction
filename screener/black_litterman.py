@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -601,12 +601,29 @@ def public_view(view: Mapping[str, Any]) -> dict:
     return {k: v for k, v in view.items() if not k.startswith("_")}
 
 
+#: Horizonte de las views, en meses.
+#:
+#: Las señales del screener (momentum 12-1, Sharpe y alfa de un año) son de
+#: 3 a 12 meses. ``Q = IC·z·σ`` las convierte en un retorno anual, y una view
+#: que nadie refresca sigue inclinando la cartera con la misma fuerza años
+#: después de que su señal se apagó. El archivo de propuestas lleva la fecha
+#: hasta la que vale, y :func:`aplicar_vigencia` hace decaer la convicción
+#: hacia el equilibrio a medida que se acerca.
+HORIZONTE_VIEWS_MESES = 12
+
+
 def views_payload(views: Sequence[dict], *, strategy: str,
                   profile: RiskProfile, meta: Mapping[str, Any],
                   params: ViewParams = DEFAULT_PARAMS) -> dict:
     """Wrap views with the provenance a model-risk review will ask for."""
+    ahora = datetime.now(timezone.utc)
     return {
-        "generado": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generado": ahora.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "horizonte_meses": HORIZONTE_VIEWS_MESES,
+        "vigente_hasta": (ahora.date() + _meses(HORIZONTE_VIEWS_MESES)).isoformat(),
+        "nota_vigencia": ("Señales de 3-12 meses. La convicción decae linealmente "
+                          "hasta cero en vigente_hasta (aplicar_vigencia); "
+                          "pasada esa fecha las views no deben usarse."),
         "estrategia": strategy,
         "perfil_screener": profile.key,
         "origen": "screener standalone (sin datos de cuenta)",
@@ -624,6 +641,52 @@ def views_payload(views: Sequence[dict], *, strategy: str,
         },
         "views": [public_view(v) for v in views],
     }
+
+
+def _meses(n: int) -> timedelta:
+    """``n`` meses de 30,4375 días: precisión de sobra para una vigencia."""
+    return timedelta(days=round(n * 30.4375))
+
+
+def aplicar_vigencia(payload: Mapping[str, Any], hoy: date | None = None,
+                     params: ViewParams = DEFAULT_PARAMS
+                     ) -> tuple[list[dict], list[str]]:
+    """
+    Las views de un archivo de propuestas con la convicción decaída por edad.
+
+    La convicción se multiplica por ``1 − edad / horizonte``: entera el día que
+    se generó, cero al vencer. Una view que cae bajo ``params.min_conviction``
+    se descarta, igual que :func:`build_views` no emite una así -- dejarla
+    pasaría por el piso de convicción de :func:`screener.optimizer.posterior`,
+    que la trataría como una view viva.
+
+    Un archivo sin fecha o sin horizonte se devuelve intacto y se dice.
+    """
+    views = [dict(v) for v in payload.get("views", [])]
+    generado = payload.get("generado")
+    horizonte = payload.get("horizonte_meses")
+    if not generado or not horizonte:
+        return views, ["Propuestas sin fecha u horizonte: no se puede aplicar "
+                       "vigencia; las views se usan tal cual."]
+    inicio = datetime.strptime(str(generado)[:10], "%Y-%m-%d").date()
+    hoy = hoy or date.today()
+    edad = (hoy - inicio).days
+    total = _meses(int(horizonte)).days
+    factor = max(0.0, 1.0 - edad / total) if total > 0 else 0.0
+    vivas, notas = [], []
+    for v in views:
+        conv = float(v.get("conviccion", 0.0)) * factor
+        if conv < params.min_conviction:
+            continue
+        vivas.append({**v, "conviccion": round(conv, 4)})
+    caidas = len(views) - len(vivas)
+    if factor < 1.0:
+        notas.append(
+            f"Propuestas de hace {edad} días con horizonte de {horizonte} meses: "
+            f"convicción al {factor:.0%}"
+            + (f", {caidas} view(s) bajo el mínimo de {params.min_conviction:.2f} "
+               "descartada(s)" if caidas else "") + ".")
+    return vivas, notas
 
 
 #: Subfolder of CCI's Drive tree that receives screener output.

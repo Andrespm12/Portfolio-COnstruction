@@ -1035,6 +1035,8 @@ class Allocation:
     #: núcleo de satélite.
     satellite: frozenset[str] = frozenset()
     satellite_cap: float | None = None
+    #: ``½·Σ|w − w_actual|`` contra la cartera actual, o ``None`` sin ella.
+    turnover: float | None = None
 
     @property
     def feasible(self) -> bool:
@@ -1090,17 +1092,31 @@ def relative_view_pairs(views: Sequence[Mapping[str, Any]],
 
 def view_coherence_breaches(weights: pd.Series | Mapping[str, float],
                             pairs: Sequence[tuple[str, str]],
-                            tolerance: float = 1e-6) -> list[str]:
-    """Views relativas que la cartera contradice: pesa más la pata perdedora."""
+                            tolerance: float = 1e-6,
+                            anchor: pd.Series | Mapping[str, float] | None = None,
+                            ) -> list[str]:
+    """
+    Views relativas que la cartera contradice: pesa más la pata perdedora.
+
+    Con ``anchor`` la comparación es en peso **activo** (contra el ancla), que
+    es como la mide el optimizador bajo núcleo–satélite. Ver ``optimize``.
+    """
     held = dict(weights.items()) if hasattr(weights, "items") else dict(weights)
+    base = ({} if anchor is None else
+            dict(anchor.items()) if hasattr(anchor, "items") else dict(anchor))
     fuera = []
     for largo, corto in pairs:
         w_l = float(held.get(largo, 0.0) or 0.0)
         w_s = float(held.get(corto, 0.0) or 0.0)
-        if w_s > w_l + tolerance:
+        a_l = float(base.get(largo, 0.0) or 0.0)
+        a_s = float(base.get(corto, 0.0) or 0.0)
+        if (w_s - a_s) > (w_l - a_l) + tolerance:
+            contra = (f" (contra el ancla: {w_s - a_s:+.2%} y {w_l - a_l:+.2%})"
+                      if anchor is not None else "")
             fuera.append(
                 f"View {largo} sobre {corto}: la cartera lleva {w_s:.2%} de "
-                f"{corto} y {w_l:.2%} de {largo}, al revés de lo que dice la view"
+                f"{corto} y {w_l:.2%} de {largo}{contra}, al revés de lo que "
+                "dice la view"
             )
     return fuera
 
@@ -1180,7 +1196,9 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              anchor: pd.Series | None = None,
              prior: pd.Series | None = None,
              satellite: Iterable[str] | None = None,
-             satellite_cap: float | None | str = "auto") -> Allocation:
+             satellite_cap: float | None | str = "auto",
+             current: Mapping[str, float] | None = None,
+             turnover_cap: float | None = None) -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
@@ -1244,6 +1262,13 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     :data:`~screener.cci_regulation.SATELITE_MAX`. Without it nothing stops a
     run of strong single-name views from crowding out the Modelo de Asignación
     the core is there to hold.
+
+    ``current`` is the book as it stands, ``{ticker: weight}``, supplied by the
+    caller (never read from an account). With it the allocation reports its
+    turnover, ``½·Σ|w − w_current|``, counting anything held outside the
+    basket as sold. ``turnover_cap`` then bounds that turnover: without it
+    every rerun is free to replace the whole book, which for a long-term
+    portfolio is cost and tax with no edge behind it.
     """
     import cvxpy as cp
 
@@ -1369,6 +1394,10 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
     # --- Core / satellite ------------------------------------------------
     satelite = sorted({str(t) for t in (satellite or ())} & set(tickers))
+    # Coherencia con las views en peso activo solo bajo núcleo–satélite: sin él
+    # el comportamiento no cambia para nadie que no lo pida.
+    a_coherencia = (w_ancla if (w_ancla is not None and satellite is not None)
+                    else None)
     if satellite_cap == "auto":
         satellite_cap = satelite_max_for(strategy) if satellite is not None else None
     if satellite is not None:
@@ -1384,6 +1413,29 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                 f"{len(satelite)} candidato(s). El resto es el núcleo del Modelo "
                 "de Asignación. Tope derivado del presupuesto de tracking error: "
                 "pendiente del Comité."
+            )
+
+    # --- Current book and turnover ---------------------------------------
+    w_actual = None
+    fuera_actual = 0.0
+    if current is not None:
+        actual = {str(t).upper(): float(v) for t, v in dict(current).items()
+                  if v is not None and float(v) > 0}
+        en_cesta = {t.upper() for t in tickers}
+        w_actual = np.asarray([actual.get(t.upper(), 0.0) for t in tickers])
+        fuera = {t: v for t, v in actual.items() if t not in en_cesta}
+        fuera_actual = float(sum(fuera.values()))
+        if fuera:
+            notes.append(
+                f"{len(fuera)} posición(es) de la cartera actual fuera de la "
+                f"cesta ({', '.join(sorted(fuera)[:8])}"
+                f"{' ...' if len(fuera) > 8 else ''}), {fuera_actual:.1%} del "
+                "libro: se cuentan como vendidas enteras."
+            )
+        if turnover_cap is not None:
+            notes.append(
+                f"Rotación máxima {turnover_cap:.0%} del libro contra la cartera "
+                "actual."
             )
 
     # --- Risk budget -----------------------------------------------------
@@ -1407,7 +1459,7 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
     def solve(banned: frozenset[str], with_sectors: bool = True,
               with_views: bool = True, with_vol: bool = True,
-              with_satellite: bool = True,
+              with_satellite: bool = True, with_turnover: bool = True,
               mode: str = "utility") -> tuple[np.ndarray | None, str]:
         """Solve the mandate's problem with ``banned`` names forced to zero."""
         w = cp.Variable(len(tickers))
@@ -1459,14 +1511,32 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
         # La pata larga de una view relativa no puede pesar menos que la corta.
         # No fuerza a tener la posición: 0 >= 0 se cumple.
+        #
+        # Bajo núcleo–satélite se mide en peso ACTIVO contra el ancla. En peso
+        # absoluto, un par "NVDA sobre QQQ" -- REFERENCIAS empareja así contra
+        # QQQ, XLF y XLV -- obligaba a QQQ, que es núcleo, a pesar menos que
+        # NVDA, que está topada por el satélite: la view vaciaba el núcleo. Lo
+        # que la view prohíbe es inclinarse hacia la pata corta más que hacia
+        # la larga, y eso se mide contra el neutral.
         if with_views:
             for largo, corto in pairs:
-                constraints.append(w[posicion[largo]] >= w[posicion[corto]])
+                i_l, i_s = posicion[largo], posicion[corto]
+                if a_coherencia is not None:
+                    constraints.append(w[i_l] - a_coherencia[i_l]
+                                       >= w[i_s] - a_coherencia[i_s])
+                else:
+                    constraints.append(w[i_l] >= w[i_s])
 
         # El satélite, junto, no pasa de su techo. Lineal: no cuesta nada.
         if with_satellite and satelite and satellite_cap is not None:
             constraints.append(
                 cp.sum(w[[posicion[t] for t in satelite]]) <= float(satellite_cap))
+
+        # Rotación contra la cartera actual. La norma 1 es convexa; lo que se
+        # tiene fuera de la cesta se vende entero y consume tope igual.
+        if with_turnover and w_actual is not None and turnover_cap is not None:
+            constraints.append(
+                0.5 * (cp.norm1(w - w_actual) + fuera_actual) <= float(turnover_cap))
 
         # El techo solo restringe la segunda pasada, la que gasta el
         # presupuesto de riesgo. En la primera no va: un techo que la cesta no
@@ -1558,6 +1628,13 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                 "no alcanza a cubrir lo que el mandato exige — falta algún "
                 "vehículo núcleo de renta fija, efectivo o renta variable.",
                 {"with_satellite": False}))
+        if w_actual is not None and turnover_cap is not None:
+            culpables.append((
+                f"El tope de rotación ({turnover_cap:.0%}) es lo que deja la "
+                "cartera sin solución: sin él sí resuelve. Desde la cartera "
+                "actual no se llega a una que cumpla el mandato operando tan "
+                "poco — sube el tope para este rebalanceo.",
+                {"with_turnover": False}))
 
         for mensaje, kwargs in culpables:
             if solve(frozenset(), **kwargs)[0] is not None:
@@ -1688,6 +1765,9 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         satellite=frozenset(satelite),
         satellite_cap=satellite_cap,
     )
+    if w_actual is not None:
+        allocation.turnover = float(
+            0.5 * (np.abs(weights.values - w_actual).sum() + fuera_actual))
     allocation.breaches = audit_bands(allocation, classes)
     # Checked after the fact even though the solver was given the same ceiling:
     # an audit that only repeats what the solver was told cannot catch a bad
@@ -1695,7 +1775,10 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     # that never got built.
     allocation.breaches += audit_sectors(allocation.weights, sectors,
                                          sector_cap, classes)
-    allocation.breaches += view_coherence_breaches(allocation.weights, pairs)
+    allocation.breaches += view_coherence_breaches(
+        allocation.weights, pairs,
+        anchor=(None if a_coherencia is None
+                else pd.Series(a_coherencia, index=tickers)))
     if satellite_cap is not None and (
             allocation.satellite_exposure > float(satellite_cap) + 1e-4):
         allocation.breaches.append(
@@ -1794,6 +1877,38 @@ def audit_bands(allocation: Allocation,
             breaches.append(f"{clase}: {exposure:.2%} bajo la banda mínima {low:.2%}")
 
     return breaches
+
+
+def leer_cartera_actual(path: Any) -> tuple[pd.Series, list[str]]:
+    """
+    La cartera actual desde un CSV ``ticker,peso`` que sube el usuario.
+
+    No lee ninguna cuenta: el screener es independiente del portafolio por
+    diseño. Acepta pesos en fracción o en porcentaje (si suman más de 1.5 se
+    leen como porcentaje) y los normaliza a 1 si no suman exacto, diciéndolo.
+    """
+    from pathlib import Path as _Path
+
+    tabla = pd.read_csv(_Path(path))
+    columnas = {c.lower().strip(): c for c in tabla.columns}
+    if "ticker" not in columnas or "peso" not in columnas:
+        raise ValueError(
+            f"{path}: se esperan las columnas 'ticker' y 'peso'; hay "
+            f"{list(tabla.columns)}.")
+    pesos = (pd.to_numeric(tabla[columnas["peso"]], errors="coerce")
+             .set_axis(tabla[columnas["ticker"]].astype(str).str.strip().str.upper())
+             .dropna())
+    pesos = pesos[pesos > 0].groupby(level=0).sum()
+    notas: list[str] = []
+    total = float(pesos.sum())
+    if total > 1.5:
+        pesos = pesos / 100.0
+        total = float(pesos.sum())
+        notas.append("Pesos leídos como porcentaje.")
+    if total > 0 and abs(total - 1.0) > 0.005:
+        notas.append(f"Los pesos sumaban {total:.1%}; se normalizaron a 100%.")
+        pesos = pesos / total
+    return pesos, notas
 
 
 def drawdown_metrics(weights: pd.Series | Mapping[str, float],

@@ -36,6 +36,8 @@ import screener.yahoo_adapter as _ya  # noqa: E402
 from screener.black_litterman import DRIVE_PROPOSALS_DIR  # noqa: E402
 from screener.tuning import reset_all  # noqa: E402
 from screener.yahoo_adapter import build_market_data  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 from test_yahoo_adapter import make_yf_frame  # noqa: E402
 
 PASSED = 0
@@ -85,9 +87,20 @@ def run_script(*argv: str) -> tuple[str, Path]:
     def fake_caps(tickers, **kw):
         return {t: 1e10 + 1e9 * i for i, t in enumerate(tickers)}
 
+    def fake_history(tickers, start, end):
+        idx = pd.bdate_range(start, end)
+        rng = np.random.default_rng(3)
+        return pd.DataFrame({t: 100.0 * np.cumprod(1.0 + rng.normal(0.0002, 0.006,
+                                                                   len(idx)))
+                             for t in tickers}, index=idx)
+
+    real_rf = _ya.fetch_risk_free
+    real_history = _ya.fetch_history
     _ya.fetch_market_data = fake_fetch
     _ya.fetch_market_caps = fake_caps
     _ya.default_universe = lambda groups, benchmark="SPY": list(TICKERS)
+    _ya.fetch_risk_free = lambda fallback, **kw: (fallback, "manual (prueba)")
+    _ya.fetch_history = fake_history
     # The script imports these names into its own frame at call time, so the
     # module-level patch above is what it will actually see.
     buffer = io.StringIO()
@@ -98,6 +111,8 @@ def run_script(*argv: str) -> tuple[str, Path]:
         _ya.fetch_market_data = real_fetch
         _ya.fetch_market_caps = real_caps
         _ya.default_universe = real_universe
+        _ya.fetch_risk_free = real_rf
+        _ya.fetch_history = real_history
         reset_all()
 
     assert code == 0, f"script returned {code}"
@@ -391,9 +406,13 @@ def test_proposals_land_in_the_right_folder() -> None:
           "nota" in payload["calibracion"])
 
     _, tmp2 = run_script("--sin-json")
-    check("--sin-json suppresses the proposals file",
-          not list(tmp2.rglob("*.json")),
-          str(list(tmp2.rglob("*.json"))))
+    # La carpeta de la corrida guarda sus propios JSON (parámetros, views) para
+    # reproducirla; eso es un registro, no un archivo de propuestas para el BL.
+    propuestas = [p for p in tmp2.rglob("*.json") if "corridas" not in p.parts]
+    check("--sin-json suppresses the proposals file", not propuestas,
+          str(propuestas))
+    check("the run snapshot is still saved for reproduction",
+          len(list(tmp2.glob("corridas/*/market_data.json.gz"))) == 1)
 
 
 def test_flags_actually_reach_the_model() -> None:

@@ -361,7 +361,8 @@
 <ul>
   <li><b>[v2] Calidad absoluta.</b> Para ser Sobreponderar hay que tener momentum de 12 meses positivo y Sharpe sobre cero. Es el único punto del modelo donde un nombre se mide contra algo que no son sus pares, y es lo que hace que en un mercado plano o cayendo no salga una tanda de recomendaciones de compra. Ver la sección 6.</li>
   <li><b>Cuchillo cayendo.</b> Si el precio está por debajo de su media de largo plazo <i>y</i> el momentum de 12 meses es negativo, no puede ser Sobreponderar por barato que se vea.</li>
-  <li><b>Amplificador.</b> Caída histórica profunda combinada con beta alta baja la recomendación a Neutral.</li>
+  <li><b>[v3] Beta máxima.</b> Una beta de un año por encima de la del perfil (0.85 / 1.00 / 1.30 / 1.80) baja la recomendación a Neutral. Antes solo disparaba si además la caída del año pasaba su límite, así que INTC con beta 3.33 seguía en Sobreponderar en Agresivo; el review lo encontró y ahora es un freno propio.</li>
+  <li><b>[v3] Drawdown máximo.</b> Una caída de un año más profunda que la del perfil (−20% / −30% / −45% / −60%) baja la recomendación a Neutral, con independencia de la beta.</li>
   <li><b>Capacidad.</b> Si no se puede liquidar la posición en el plazo definido, no es una idea accionable.</li>
   <li><b>Techo de volatilidad.</b> Por encima de cierto nivel no se permite Sobreponderar. Hay dos razones: las estadísticas estimadas con 52 observaciones semanales dejan de ser confiables, y el dimensionamiento por volatilidad inversa reduce la posición a algo tan chico que llamarla "alta convicción" no significa nada.</li>
   <li><b>Redundancia.</b> Dos instrumentos que se mueven casi idénticos son la misma apuesta con distinto envoltorio. Solo el mejor puntuado conserva el Sobreponderar. Sin esto, el sistema recomendaría IWM y VTWO al mismo tiempo, que son el mismo índice.</li>

@@ -212,3 +212,24 @@ def test_la_renta_fija_de_la_cesta_se_elige_por_liquidez():
                              include_core=False)
     soberanos = [t for t in cesta if t in {"TLT", "TIP", "MBB", "SHY", "IEF", "GOVT"}]
     assert set(soberanos) == {"GOVT", "IEF", "SHY"}, soberanos
+
+
+def test_un_par_contra_el_nucleo_no_vacia_el_nucleo(mercado):
+    # REFERENCIAS empareja acciones contra QQQ, XLF y XLV, y find_peer puede
+    # elegir SPY. Con la coherencia en peso absoluto, "AAA sobre SPY" obligaba
+    # a SPY -- núcleo, ~25% del libro -- a pesar menos que AAA, que el satélite
+    # topa en 17,5%: la view se comía el núcleo. En peso activo la view solo
+    # prohíbe inclinarse hacia SPY más que hacia AAA.
+    par = [{"tipo": "relativo", "activo_long": "AAA", "activo_short": "SPY",
+            "Q": 0.03, "conviccion": 0.6}]
+    _ret, cov, tipos, caps = mercado
+    nucleo, satelite, _ = split_core_satellite(tipos, NUCLEO_RV)
+    ancla, _ = policy_weights(tipos, "Moderado", caps=caps, core=nucleo)
+    alloc = _resolver(mercado, "Moderado", par)
+    assert alloc.feasible, alloc.breaches
+    assert alloc.weights["SPY"] > SATELITE_MAX["Moderado"], (
+        f"SPY quedó en {alloc.weights['SPY']:.1%}: la view vació el núcleo")
+    activo_largo = alloc.weights["AAA"] - ancla["AAA"]
+    activo_corto = alloc.weights["SPY"] - ancla["SPY"]
+    assert activo_largo >= activo_corto - 1e-6
+    assert not any("al revés" in b for b in alloc.breaches)

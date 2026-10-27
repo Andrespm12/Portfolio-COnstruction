@@ -152,8 +152,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Lista separada por coma. Implica --universo lista.")
     p.add_argument("--benchmark", default=BENCHMARK)
     p.add_argument("--periodo", default=PERIODO, choices=("1y", "2y", "5y"))
-    p.add_argument("--rf", type=float, default=TASA_LIBRE_RIESGO,
-                   help="Tasa libre de riesgo anual.")
+    p.add_argument("--rf", type=float, default=None,
+                   help="Tasa libre de riesgo anual. Sin esto se baja la letra "
+                        "del Tesoro a 13 semanas (^IRX) con su fecha, y si "
+                        f"falla se usa {TASA_LIBRE_RIESGO * 100:.2f}%%.")
+    p.add_argument("--cartera-actual", default="", dest="cartera_actual",
+                   help="CSV ticker,peso con la cartera de hoy, que subes tú. "
+                        "No se lee ninguna cuenta. Con él se reporta la rotación.")
+    p.add_argument("--rotacion-maxima", type=float, default=0.0,
+                   dest="rotacion_maxima",
+                   help="Fracción máxima del libro a operar contra la cartera "
+                        "actual (0.15 = 15%%). 0 = sin tope.")
+    p.add_argument("--sin-guardar-corrida", dest="guardar_corrida",
+                   action="store_false", default=True,
+                   help="No guardar la carpeta con datos y parámetros que "
+                        "permite reproducir la corrida.")
     p.add_argument("--posicion-usd", type=float, default=TAMANO_POSICION_USD,
                    help="Posición asumida para el cálculo de días de liquidación.")
     p.add_argument("--ic", type=float, default=IC_SUPUESTO,
@@ -246,9 +259,15 @@ def main(argv: list[str] | None = None) -> int:
         ALLOW_LEVERAGE, RISK_AVERSION, core_vehicles, gross_budget,
         allocation_table, drawdown_metrics, implied_equilibrium, market_weights,
         optimize, policy_weights, posterior, risk_profile_table, select_basket,
-        split_core_satellite,
+        split_core_satellite, leer_cartera_actual,
         shrunk_covariance,
     )
+    from screener.comite import pendientes
+    from screener.corrida import guardar_corrida, huella_motor
+    from screener.estres import (FIN_DESCARGA, INICIO_DESCARGA, beta_del_sleeve,
+                                 escenarios_descritos, pesos_modelo, proxies,
+                                 retornos_escenarios, tabla_estres)
+    from screener.sensibilidad import tabla_sensibilidad
     from screener.descarga import sincronizar
     from screener.yahoo_adapter import classify
     from screener.edgar import detalle_sin_cik, leer_hechos
@@ -261,8 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     from screener.tuning import reset_all
     from screener.yahoo_adapter import (
         con_nucleo, coverage_report, daily_returns, default_universe,
-        fetch_market_caps,
-        fetch_market_data,
+        fetch_history, fetch_market_caps, fetch_market_data, fetch_risk_free,
     )
 
     salida = Path(args.salida).expanduser().resolve()
@@ -310,6 +328,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---------------------------------------------------------------- 2. datos
     titulo("2 · DESCARGA")
+    # Una tasa tecleada sin fecha no se puede auditar. Si la pasaste a mano
+    # se respeta y se anota así; si no, se baja con su fecha.
+    if args.rf is None:
+        args.rf, rf_fuente = fetch_risk_free(TASA_LIBRE_RIESGO)
+    else:
+        rf_fuente = f"manual {args.rf:.2%} (--rf), sin fecha de mercado"
+    print(f"Tasa libre de riesgo {args.rf:.2%}  ({rf_fuente})")
     t0 = time.time()
     market_data, frame_diario = fetch_market_data(
         tickers,
@@ -654,13 +679,25 @@ def main(argv: list[str] | None = None) -> int:
     for n in notas_meta + notas_sec:
         print(f"  {n}")
 
+    # La cartera actual la sube el usuario; nunca se lee de una cuenta.
+    cartera_actual = None
+    if args.cartera_actual:
+        cartera_actual, notas_actual = leer_cartera_actual(args.cartera_actual)
+        for n in notas_actual:
+            print(f"  {n}")
+    tope_rotacion = ((args.rotacion_maxima or None)
+                     if cartera_actual is not None else None)
+
+    kwargs_cartera = dict(
+        min_position=args.posicion_minima or None,
+        sector_weights=mapa_sectores,
+        sector_cap=(None if args.sin_tope_sectorial else "auto"),
+        enforce_view_coherence=args.coherencia_views,
+        satellite=satelite_cesta, current=cartera_actual,
+        turnover_cap=tope_rotacion)
     cartera = optimize(er_posterior, cov_posterior, tipos_todos, args.estrategia,
-                       min_position=args.posicion_minima or None,
-                       sector_weights=mapa_sectores,
-                       sector_cap=(None if args.sin_tope_sectorial else "auto"),
-                       views=views,
-                       enforce_view_coherence=args.coherencia_views,
-                       anchor=pesos_ancla, prior=pi, satellite=satelite_cesta)
+                       views=views, anchor=pesos_ancla, prior=pi,
+                       **kwargs_cartera)
 
     print(f"\n{args.estrategia}  |  estado: {cartera.status}")
     print(f"Exposición bruta   {cartera.gross_exposure:.1%}")
@@ -670,6 +707,8 @@ def main(argv: list[str] | None = None) -> int:
     if cartera.satellite_cap is not None:
         print(f"Satélite           {cartera.satellite_exposure:.1%} "
               f"(techo {cartera.satellite_cap:.1%})")
+    if cartera.turnover is not None:
+        print(f"Rotación vs actual {cartera.turnover:.1%} del libro")
 
     print("\nPor clase de activo")
     for clase, peso in cartera.by_class.items():
@@ -734,6 +773,60 @@ def main(argv: list[str] | None = None) -> int:
         print("\n  Riesgo y retorno crecen con el perfil, como debe ser.")
     for _, fila in riesgo_df[riesgo_df["motivo"] != ""].iterrows():
         print(f"  SIN SOLUCIÓN {fila['estrategia']}: {fila['motivo']}")
+
+    # ------------------------------------------------------- 8d. estrés histórico
+    titulo("8d · ESTRÉS HISTÓRICO")
+    print("Pesos de hoy, por clase, en 2008, marzo 2020 y 2022. Un orden de")
+    print("magnitud con proxies índice, no un backtest.\n")
+    beta_rv, nota_beta = beta_del_sleeve(cartera.weights, clases, retornos)
+    print(f"  {nota_beta}")
+    estres_df = pd.DataFrame()
+    try:
+        ret_esc, notas_esc = retornos_escenarios(
+            fetch_history(proxies(), INICIO_DESCARGA, FIN_DESCARGA))
+    except Exception as exc:  # noqa: BLE001 - se reporta y la corrida sigue
+        ret_esc, notas_esc = None, [f"No se pudo bajar la historia de los "
+                                    f"proxies ({type(exc).__name__}: {exc})."]
+    for n in notas_esc:
+        print(f"  {n}")
+    if ret_esc is not None:
+        carteras_estres = {}
+        if cartera.feasible:
+            carteras_estres[f"Cartera {args.estrategia}"] = (
+                args.estrategia, cartera.by_class.to_dict(), beta_rv)
+        for e in REGULACIONES:
+            carteras_estres[f"Modelo {e}"] = (e, pesos_modelo(e), 1.0)
+        estres_df, notas_estres = tabla_estres(carteras_estres, ret_esc)
+        for linea in escenarios_descritos():
+            print(f"  {linea}")
+        print()
+        columnas = [c for c in estres_df.columns
+                    if c not in ("estrategia", "beta_rv", "excede_tolerancia")]
+        print(estres_df[columnas].to_string(
+            index=False, formatters={c: "{:.1%}".format for c in columnas
+                                     if c != "cartera"}))
+        for n in notas_estres:
+            print(f"  AVISO: {n}")
+
+    # ------------------------------------------------------- 8e. sensibilidad
+    titulo("8e · SENSIBILIDAD A LOS PARÁMETROS SIN CALIBRAR")
+    sensibilidad_df = pd.DataFrame()
+    if cartera.feasible and views:
+        sensibilidad_df, notas_sens = tabla_sensibilidad(
+            pi, covarianza, views, tipos_todos, args.estrategia, base=cartera,
+            anchor=pesos_ancla, **kwargs_cartera)
+        print(sensibilidad_df.to_string(
+            index=False,
+            formatters={"retorno_esperado": "{:.2%}".format,
+                        "volatilidad": "{:.2%}".format,
+                        "satelite": "{:.1%}".format,
+                        "rotacion_vs_base": "{:.1%}".format}))
+        for n in notas_sens:
+            print(f"  AVISO: {n}")
+        if not notas_sens:
+            print("\n  Ninguna variante rota más de 10% del libro.")
+    else:
+        print("Sin cartera o sin views: no hay nada que sensibilizar.")
 
     # La concentración sectorial pasó de dato a restricción, así que tiene que
     # viajar en el libro que lee el comité, con el techo al lado y no en una
@@ -809,7 +902,7 @@ def main(argv: list[str] | None = None) -> int:
     archivo_views = salida / DRIVE_PROPOSALS_DIR / default_views_filename(args.estrategia)
 
     parametros = pd.DataFrame([
-        ("Generado (UTC)", pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M")),
+        ("Generado (UTC)", pd.Timestamp.now("UTC").strftime("%Y-%m-%d %H:%M")),
         ("Perfil", perfil.label),
         ("Perfil — resumen", perfil.summary),
         ("Estrategia CCI destino", args.estrategia),
@@ -818,6 +911,13 @@ def main(argv: list[str] | None = None) -> int:
         ("Benchmark", args.benchmark),
         ("Historia", args.periodo),
         ("Tasa libre de riesgo", f"{args.rf:.2%}"),
+        ("Fuente de la tasa libre de riesgo", rf_fuente),
+        ("Motor (SHA-256 del paquete embebido)", huella_motor()),
+        ("Cartera actual", args.cartera_actual or "no se usó"),
+        ("Rotación contra la cartera actual",
+         f"{cartera.turnover:.2%}" if cartera.turnover is not None
+         else "no aplica"),
+        ("Tope de rotación", f"{tope_rotacion:.0%}" if tope_rotacion else "sin tope"),
         ("Posición asumida (liquidez)", f"${args.posicion_usd:,.0f}"),
         ("Fuente de datos", market_data["data_source"]),
         ("Portafolio", "ninguno — screen independiente"),
@@ -920,6 +1020,12 @@ def main(argv: list[str] | None = None) -> int:
                           **nodo.get("metricas", {})})
         fundamentales_df = pd.DataFrame(filas)
 
+    # Todo lo que el Procedimiento no dice, en una hoja.
+    pendientes_df = pd.DataFrame(pendientes())
+
+    def o_vacio(df, motivo):
+        return df if not df.empty else pd.DataFrame({"nota": [motivo]})
+
     with pd.ExcelWriter(archivo_excel, engine="openpyxl") as xl:
         tabla.to_excel(xl, sheet_name="Ranking", index=False)
         mapa.to_excel(xl, sheet_name="Bloques")
@@ -928,12 +1034,17 @@ def main(argv: list[str] | None = None) -> int:
         cartera_df.to_excel(xl, sheet_name="Cartera", index=False)
         sectores_df.to_excel(xl, sheet_name="Sectores", index=False)
         riesgo_df.to_excel(xl, sheet_name="Riesgo", index=False)
+        o_vacio(estres_df, "sin datos de estrés").to_excel(
+            xl, sheet_name="Estres", index=False)
+        o_vacio(sensibilidad_df, "sin cartera o sin views").to_excel(
+            xl, sheet_name="Sensibilidad", index=False)
         cesta_df.to_excel(xl, sheet_name="Cesta", index=False)
         universo_df.to_excel(xl, sheet_name="Universo", index=False)
         cov.to_excel(xl, sheet_name="Cobertura", index=False)
         if not fundamentales_df.empty:
             fundamentales_df.to_excel(xl, sheet_name="Fundamentales",
                                       index=False)
+        pendientes_df.to_excel(xl, sheet_name="Pendientes_Comite", index=False)
         parametros.to_excel(xl, sheet_name="Parametros", index=False)
 
         for hoja in xl.book.worksheets:
@@ -949,6 +1060,15 @@ def main(argv: list[str] | None = None) -> int:
         write_views(views, archivo_views, strategy=args.estrategia,
                     profile=perfil_cci, meta=meta, params=params)
         print(f"{archivo_views}  —  {len(views)} propuestas")
+
+    # Reproducibilidad: el dato exacto, el motor y los parámetros.
+    if args.guardar_corrida:
+        carpeta = guardar_corrida(
+            salida / "corridas", market_data=market_data, parametros=parametros,
+            views=views, cartera=cartera.weights, retornos=retornos,
+            tablas={"riesgo": riesgo_df, "estres": estres_df,
+                    "sensibilidad": sensibilidad_df})
+        print(f"Corrida guardada para reproducirla: {carpeta}")
 
     return 0
 

@@ -20,9 +20,8 @@ from __future__ import annotations
 import base64
 import gzip
 import hashlib
-import io
 import json
-import tarfile
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,22 +47,13 @@ MODULES = modules()
 
 def build_payload() -> tuple[str, str]:
     """Return ``(base64_tarball, sha256)`` of the screener package."""
-    buffer = io.BytesIO()
-    # mtime=0 and sorted members keep the archive byte-identical across runs,
-    # so a rebuild with no source change produces no diff.
-    with tarfile.open(fileobj=buffer, mode="w") as tar:
-        for name in MODULES:
-            path = ROOT / "screener" / name
-            data = path.read_bytes()
-            info = tarfile.TarInfo(f"screener/{name}")
-            info.size = len(data)
-            info.mtime = 0
-            info.mode = 0o644
-            info.uid = info.gid = 0
-            info.uname = info.gname = ""
-            tar.addfile(info, io.BytesIO(data))
+    # El empaquetado vive en el motor (screener.corrida) para que el script de
+    # línea de comandos calcule la misma huella y la registre en su corrida.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from screener.corrida import empaquetar_motor
 
-    raw = buffer.getvalue()
+    raw = empaquetar_motor(ROOT / "screener")
     packed = gzip.compress(raw, compresslevel=9, mtime=0)
     return base64.b64encode(packed).decode("ascii"), hashlib.sha256(raw).hexdigest()
 
@@ -229,6 +219,11 @@ def build_cells() -> list[dict]:
         'BENCHMARK = "SPY"  # @param {type:"string"}\n',
         'PERIODO = "2y"  # @param ["1y", "2y", "5y"]\n',
         "TASA_LIBRE_RIESGO = 0.0425  # @param {type:\"number\"}\n",
+        "RF_DE_MERCADO = True  # @param {type:\"boolean\"}\n",
+        "# @markdown Bajar la letra del Tesoro a 13 semanas (`^IRX`) y anotar su "
+        "fecha. Si falla, se usa la tasa de arriba y la hoja de Parámetros lo "
+        "dice. Una tasa tecleada sin fecha no se puede auditar.\n",
+        "_rf_fuente = f'manual {TASA_LIBRE_RIESGO:.2%}, sin fecha de mercado'\n",
         "\n",
         "# @markdown ### Perfil de riesgo\n",
         'PERFIL = "Moderado"  # @param ["Conservador Defensivo", "Conservador", "Moderado", "Agresivo"]\n',
@@ -300,7 +295,11 @@ def build_cells() -> list[dict]:
     cells.append(md("## 3 · Bajar datos\n"))
     cells.append(code(
         "import time\n",
-        "from screener.yahoo_adapter import fetch_market_data\n",
+        "from screener.yahoo_adapter import fetch_market_data, fetch_risk_free\n",
+        "\n",
+        "if RF_DE_MERCADO:\n",
+        "    TASA_LIBRE_RIESGO, _rf_fuente = fetch_risk_free(TASA_LIBRE_RIESGO)\n",
+        "print(f'Tasa libre de riesgo {TASA_LIBRE_RIESGO:.2%}  ({_rf_fuente})')\n",
         "\n",
         "_t0 = time.time()\n",
         "market_data, frame_diario = fetch_market_data(\n",
@@ -379,6 +378,9 @@ def build_cells() -> list[dict]:
         "# @markdown Tope por corrida, del mas viejo al mas nuevo, para que un\n",
         "# @markdown vencimiento masivo no vuelva la corrida una descarga de GB.\n",
         'FECHA_FUNDAMENTALES = ""  # @param {type:"date"}\n',
+        "EXIGIR_FUNDAMENTALES = True  # @param {type:\"boolean\"}\n",
+        "# @markdown Detener la corrida si el bloque fundamental no carga. Sin\n",
+        "# @markdown esto una corrida sin fundamentales se ve como una normal.\n",
         "# @markdown Reconstruir lo que se sabia ese dia. Vacio = todo lo\n",
         "# @markdown conocido hoy, que es lo que quiere una corrida normal.\n",
         "\n",
@@ -453,6 +455,14 @@ def build_cells() -> list[dict]:
         "    print(f'  Estado: {_estado_fund}')\n",
         "    if _ruta and not _ruta.is_dir():\n",
         "        print(f'  (no existe {_ruta})')\n",
+        "    # El review: 'hoy una corrida sin fundamentales se ve como una\n",
+        "    # normal'. Con el almacen configurado y vacio, se detiene aqui.\n",
+        "    if EXIGIR_FUNDAMENTALES and ALMACEN_FUNDAMENTALES:\n",
+        "        raise RuntimeError(\n",
+        "            f'CORRIDA DETENIDA: el bloque fundamental no cargo '\n",
+        "            f'({_estado_fund}). La valuacion correria solo con proxies de '\n",
+        "            f'mercado. Arregla el almacen o pon EXIGIR_FUNDAMENTALES = '\n",
+        "            f'False para correr sin fundamentales a sabiendas.')\n",
         "else:\n",
         "    fx.adjuntar(market_data, _hechos, FECHA_FUNDAMENTALES or None)\n",
         "    fund_meta = market_data.get('fundamentals_meta', {})\n",
@@ -1074,6 +1084,13 @@ def build_cells() -> list[dict]:
         "# @markdown Cartera neutral de la que parten las views.\n",
         'ANCLA = "politica"  # @param ["politica", "mercado"]\n',
         "\n",
+        "# @markdown Cartera actual (opcional): ruta a un CSV `ticker,peso` que "
+        "subes tú. No se lee ninguna cuenta.\n",
+        'CARTERA_ACTUAL = ""  # @param {type:"string"}\n',
+        "ROTACION_MAXIMA = 0.0  # @param {type:\"number\"}\n",
+        "# @markdown Fracción máxima del libro a operar contra la cartera actual "
+        "(0.15 = 15%). 0 = sin tope. Solo aplica con cartera actual.\n",
+        "\n",
         "# @markdown Posición mínima ejecutable, como fracción del libro.\n",
         "POSICION_MINIMA = 0.01  # @param {type:\"number\"}\n",
         "# @markdown El optimizador no sabe qué vale la pena operar: si le "
@@ -1088,7 +1105,8 @@ def build_cells() -> list[dict]:
         "                               optimize, policy_weights, posterior,\n",
         "                               risk_profile_table, shrunk_covariance,\n",
         "                               allocation_table, select_basket,\n",
-        "                               gross_budget, split_core_satellite)\n",
+        "                               gross_budget, split_core_satellite,\n",
+        "                               leer_cartera_actual)\n",
         "from screener.cci_regulation import REGULACIONES\n",
         "from screener.cci_regulation import classify_for_bands\n",
         "from screener.yahoo_adapter import daily_returns, fetch_market_caps\n",
@@ -1193,12 +1211,21 @@ def build_cells() -> list[dict]:
         "# y que vehiculo gano cada exposicion nucleo, no solo el resultado.\n",
         "_sin_sector = sorted(t for t, v in _cob_sec.items() if not v)\n",
         "\n",
+        "# La cartera actual la sube el usuario; nunca se lee de una cuenta.\n",
+        "cartera_actual = None\n",
+        "if CARTERA_ACTUAL:\n",
+        "    cartera_actual, _notas_actual = leer_cartera_actual(CARTERA_ACTUAL)\n",
+        "    for _n in _notas_actual:\n",
+        "        print(f'  {_n}')\n",
+        "_tope_rotacion = (ROTACION_MAXIMA or None) if cartera_actual is not None else None\n",
+        "\n",
         "cartera = optimize(er_posterior, cov_posterior, tipos, ESTRATEGIA_CCI,\n",
         "                   min_position=POSICION_MINIMA or None,\n",
         "                   sector_weights=mapa_sectores,\n",
         "                   views=views,\n",
         "                   anchor=pesos_ancla, prior=pi,\n",
-        "                   satellite=satelite_cesta)\n",
+        "                   satellite=satelite_cesta,\n",
+        "                   current=cartera_actual, turnover_cap=_tope_rotacion)\n",
         "\n",
         "print(f'{ESTRATEGIA_CCI}  |  estado: {cartera.status}')\n",
         "print(f'Exposicion bruta   {cartera.gross_exposure:.1%}')\n",
@@ -1208,6 +1235,8 @@ def build_cells() -> list[dict]:
         "if cartera.satellite_cap is not None:\n",
         "    print(f'Satelite           {cartera.satellite_exposure:.1%} '\n",
         "          f'(techo {cartera.satellite_cap:.1%})')\n",
+        "if cartera.turnover is not None:\n",
+        "    print(f'Rotacion vs actual {cartera.turnover:.1%} del libro')\n",
         "\n",
         "print('\\nPor clase de activo')\n",
         "for _clase, _peso in cartera.by_class.items():\n",
@@ -1333,6 +1362,104 @@ def build_cells() -> list[dict]:
         "    .format({c: '{:.2%}' for c in _pct if c in riesgo_df})\n",
         "    .hide(axis='index')\n",
         "    .set_caption('Riesgo y retorno esperados por mandato'))\n",
+    ))
+
+    # ---------------------------------------------------------------- estrés
+    cells.append(md(
+        "## 11d · Estrés histórico\n",
+        "\n",
+        "`caida_1a_95` supone normalidad, y la normalidad es lo que falla en un "
+        "mercado malo. Esto aplica los pesos de hoy, **por clase de activo**, a "
+        "tres ventanas reales: 2008, marzo de 2020 y 2022 — el año en que "
+        "acciones y bonos cayeron juntos, que es el escenario que más daña a un "
+        "perfil conservador y el que una covarianza de dos años no ve.\n",
+        "\n",
+        "Cada clase se representa con un ETF índice que existía en las tres "
+        "ventanas (SPY, IEF, AGG, LQD, HYG, BIL, GLD). La renta variable entra "
+        "con la beta del sleeve contra SPY, para que un satélite de beta alta "
+        "caiga más que el índice. Es un orden de magnitud, no un backtest: "
+        "pesos de hoy sobre ventanas pasadas, sin rebalancear. Las filas "
+        "`Modelo` son el Modelo de Asignación de cada mandato, sin views.\n",
+    ))
+    cells.append(code(
+        "from screener.estres import (FIN_DESCARGA, INICIO_DESCARGA,\n",
+        "                             beta_del_sleeve, escenarios_descritos,\n",
+        "                             pesos_modelo, proxies, retornos_escenarios,\n",
+        "                             tabla_estres)\n",
+        "from screener.yahoo_adapter import fetch_history\n",
+        "\n",
+        "_beta_rv, _nota_beta = beta_del_sleeve(cartera.weights, clases, retornos)\n",
+        "print(_nota_beta)\n",
+        "try:\n",
+        "    _precios_estres = fetch_history(proxies(), INICIO_DESCARGA, FIN_DESCARGA)\n",
+        "    _ret_esc, _notas_esc = retornos_escenarios(_precios_estres)\n",
+        "except Exception as _exc:\n",
+        "    _ret_esc = None\n",
+        "    _notas_esc = [f'No se pudo bajar la historia de los proxies '\n",
+        "                  f'({type(_exc).__name__}: {_exc}).']\n",
+        "for _n in _notas_esc:\n",
+        "    print(f'  {_n}')\n",
+        "\n",
+        "estres_df = pd.DataFrame()\n",
+        "if _ret_esc is not None:\n",
+        "    _carteras_estres = {}\n",
+        "    if cartera.feasible:\n",
+        "        _carteras_estres[f'Cartera {ESTRATEGIA_CCI}'] = (\n",
+        "            ESTRATEGIA_CCI, cartera.by_class.to_dict(), _beta_rv)\n",
+        "    for _e in REGULACIONES:\n",
+        "        _carteras_estres[f'Modelo {_e}'] = (_e, pesos_modelo(_e), 1.0)\n",
+        "    estres_df, _notas_estres = tabla_estres(_carteras_estres, _ret_esc)\n",
+        "    print()\n",
+        "    for _l in escenarios_descritos():\n",
+        "        print(_l)\n",
+        "    for _n in _notas_estres:\n",
+        "        print(f'AVISO: {_n}')\n",
+        "\n",
+        "_cols_estres = [c for c in estres_df.columns\n",
+        "                if c not in ('cartera', 'estrategia', 'beta_rv',\n",
+        "                             'excede_tolerancia')]\n",
+        "(estres_df.style\n",
+        "    .format({c: '{:.1%}' for c in _cols_estres} | {'beta_rv': '{:.2f}'})\n",
+        "    .hide(axis='index')\n",
+        "    .set_caption('Retorno en cada ventana de estrés')\n",
+        " if not estres_df.empty else None)\n",
+    ))
+
+    # ---------------------------------------------------------- sensibilidad
+    cells.append(md(
+        "## 11e · Sensibilidad a los parámetros sin calibrar\n",
+        "\n",
+        "El IC (0,08), τ y el λ de cada mandato no están estimados contra "
+        "datos. Esta tabla resuelve la misma cartera moviendo uno a la vez — "
+        "IC ±50%, τ a la mitad y al doble, λ a la mitad y al doble — y mide la "
+        "**rotación** contra la cartera de la corrida: la fracción del libro "
+        "que habría que operar para pasar de una a otra. Si una rotación pasa "
+        "de 10%, la asignación la decide el parámetro más que las views, y el "
+        "Comité tiene que verlo.\n",
+    ))
+    cells.append(code(
+        "from screener.sensibilidad import tabla_sensibilidad\n",
+        "\n",
+        "sensibilidad_df, _notas_sens = pd.DataFrame(), []\n",
+        "if cartera.feasible and views:\n",
+        "    sensibilidad_df, _notas_sens = tabla_sensibilidad(\n",
+        "        pi, covarianza, views, tipos, ESTRATEGIA_CCI, base=cartera,\n",
+        "        anchor=pesos_ancla, min_position=POSICION_MINIMA or None,\n",
+        "        sector_weights=mapa_sectores, satellite=satelite_cesta,\n",
+        "        current=cartera_actual, turnover_cap=_tope_rotacion)\n",
+        "    for _n in _notas_sens:\n",
+        "        print(f'AVISO: {_n}')\n",
+        "    if not _notas_sens:\n",
+        "        print('Ninguna variante rota más de 10% del libro: la cartera no '\n",
+        "              'depende de un parámetro sin calibrar.')\n",
+        "else:\n",
+        "    print('Sin cartera o sin views: no hay nada que sensibilizar.')\n",
+        "\n",
+        "(sensibilidad_df.style\n",
+        "    .format({'retorno_esperado': '{:.2%}', 'volatilidad': '{:.2%}',\n",
+        "             'satelite': '{:.1%}', 'rotacion_vs_base': '{:.1%}'})\n",
+        "    .hide(axis='index')\n",
+        " if not sensibilidad_df.empty else None)\n",
     ))
 
     # --------------------------------------------------------- transparencia
@@ -1499,7 +1626,7 @@ def build_cells() -> list[dict]:
         "ARCHIVO_VIEWS = default_views_filename(ESTRATEGIA_CCI)\n",
         "\n",
         "parametros = pd.DataFrame([\n",
-        "    ('Generado (UTC)', pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M')),\n",
+        "    ('Generado (UTC)', pd.Timestamp.now('UTC').strftime('%Y-%m-%d %H:%M')),\n",
         "    ('Perfil', perfil.label),\n",
         "    ('Perfil — resumen', perfil.summary),\n",
         "    ('Estrategia CCI destino', ESTRATEGIA_CCI),\n",
@@ -1508,6 +1635,14 @@ def build_cells() -> list[dict]:
         "    ('Benchmark', BENCHMARK),\n",
         "    ('Historia', PERIODO),\n",
         "    ('Tasa libre de riesgo', f'{TASA_LIBRE_RIESGO:.2%}'),\n",
+        "    ('Fuente de la tasa libre de riesgo', _rf_fuente),\n",
+        "    ('Motor (SHA-256 del paquete embebido)', ENGINE_SHA256),\n",
+        "    ('Cartera actual', CARTERA_ACTUAL or 'no se usó'),\n",
+        "    ('Rotación contra la cartera actual',\n",
+        "     f'{cartera.turnover:.2%}' if cartera.turnover is not None\n",
+        "     else 'no aplica'),\n",
+        "    ('Tope de rotación',\n",
+        "     f'{_tope_rotacion:.0%}' if _tope_rotacion else 'sin tope'),\n",
         "    ('Posición asumida (liquidez)', f'${TAMANO_POSICION_USD:,.0f}'),\n",
         "    ('Fuente de datos', market_data['data_source']),\n",
         "    ('Portafolio', 'ninguno — screen independiente'),\n",
@@ -1608,6 +1743,14 @@ def build_cells() -> list[dict]:
         "        for _i in market_data.get('instruments', [])\n",
         "        if _i.get('fundamentals')])\n",
         "\n",
+        "# Todo lo que el Procedimiento no dice, en una hoja: el review encontro\n",
+        "# esos numeros marcados 'de la mesa' cada uno en su celda.\n",
+        "from screener.comite import pendientes\n",
+        "pendientes_df = pd.DataFrame(pendientes())\n",
+        "\n",
+        "def _o_vacio(df, motivo):\n",
+        "    return df if not df.empty else pd.DataFrame({'nota': [motivo]})\n",
+        "\n",
         "with pd.ExcelWriter(ARCHIVO_EXCEL, engine='openpyxl') as _xl:\n",
         "    tabla.to_excel(_xl, sheet_name='Ranking', index=False)\n",
         "    mapa.to_excel(_xl, sheet_name='Bloques')\n",
@@ -1616,12 +1759,17 @@ def build_cells() -> list[dict]:
         "    cartera_df.to_excel(_xl, sheet_name='Cartera', index=False)\n",
         "    sectores_df.to_excel(_xl, sheet_name='Sectores', index=False)\n",
         "    riesgo_df.to_excel(_xl, sheet_name='Riesgo', index=False)\n",
+        "    _o_vacio(estres_df, 'sin datos de estres').to_excel(\n",
+        "        _xl, sheet_name='Estres', index=False)\n",
+        "    _o_vacio(sensibilidad_df, 'sin cartera o sin views').to_excel(\n",
+        "        _xl, sheet_name='Sensibilidad', index=False)\n",
         "    cesta_df.to_excel(_xl, sheet_name='Cesta', index=False)\n",
         "    universo.to_excel(_xl, sheet_name='Universo', index=False)\n",
         "    _cov.to_excel(_xl, sheet_name='Cobertura', index=False)\n",
         "    if not fundamentales_df.empty:\n",
         "        fundamentales_df.to_excel(_xl, sheet_name='Fundamentales',\n",
         "                                  index=False)\n",
+        "    pendientes_df.to_excel(_xl, sheet_name='Pendientes_Comite', index=False)\n",
         "    parametros.to_excel(_xl, sheet_name='Parametros', index=False)\n",
         "\n",
         "    for _hoja in _xl.book.worksheets:\n",
@@ -1632,6 +1780,16 @@ def build_cells() -> list[dict]:
         "\n",
         "print(f'{ARCHIVO_EXCEL}  —  {len(scored)} nombres, '\n",
         "      f'{len(pd.ExcelFile(ARCHIVO_EXCEL).sheet_names)} hojas')\n",
+        "\n",
+        "# Reproducibilidad: el dato exacto, el motor y los parametros de esta\n",
+        "# corrida. Sin esto una propuesta no se puede rastrear a lo que la produjo.\n",
+        "from screener.corrida import guardar_corrida\n",
+        "_carpeta_corrida = guardar_corrida(\n",
+        "    'corridas', market_data=market_data, parametros=parametros,\n",
+        "    views=views, cartera=cartera.weights, retornos=retornos,\n",
+        "    tablas={'riesgo': riesgo_df, 'estres': estres_df,\n",
+        "            'sensibilidad': sensibilidad_df})\n",
+        "print(f'Corrida guardada para reproducirla: {_carpeta_corrida}')\n",
         "\n",
         "if EXPORTAR_JSON_PARA_BL:\n",
         "    write_views(views, ARCHIVO_VIEWS, strategy=ESTRATEGIA_CCI,\n",
@@ -1647,6 +1805,11 @@ def build_cells() -> list[dict]:
         "    write_views(views, _destino, strategy=ESTRATEGIA_CCI,\n",
         "                profile=_perfil_cci, meta=meta, params=_params)\n",
         "    print(f'Guardado en Drive: {_destino}')\n",
+        "    import shutil\n",
+        "    _corridas_drive = Path('/content/drive/MyDrive/CCI_BlackLitterman/corridas')\n",
+        "    _corridas_drive.mkdir(parents=True, exist_ok=True)\n",
+        "    shutil.copytree(_carpeta_corrida, _corridas_drive / _carpeta_corrida.name)\n",
+        "    print(f'Corrida en Drive: {_corridas_drive / _carpeta_corrida.name}')\n",
         "\n",
         "try:\n",
         "    from google.colab import files\n",

@@ -126,6 +126,45 @@ def test_el_almacen_por_defecto_es_alcanzable_cuando_se_usa() -> None:
           f"mounts at cells {montajes}, fundamentals at {i_fund}")
 
 
+def test_sin_fundamentales_la_corrida_se_detiene() -> None:
+    """
+    El review: "hoy una corrida sin fundamentales se ve como una normal".
+
+    Con el almacén configurado pero vacío, la celda tiene que detenerse con un
+    motivo, no seguir con el bloque de valuación corriendo sobre proxies de
+    mercado. Apagar EXIGIR_FUNDAMENTALES es la forma de hacerlo a sabiendas.
+    """
+    import pandas as pd
+
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    fuente = next("".join(c["source"]) for c in nb["cells"]
+                  if c["cell_type"] == "code"
+                  and "ALMACEN_FUNDAMENTALES =" in "".join(c["source"]))
+    vacio = Path(tempfile.mkdtemp(prefix="nb-sin-fund-"))
+    fuente = re.sub(r'ALMACEN_FUNDAMENTALES = "[^"]*"',
+                    f'ALMACEN_FUNDAMENTALES = "{vacio}"', fuente)
+    # Sin red: nada de bajar, solo mirar lo que hay (nada).
+    fuente = fuente.replace("DESCARGAR_FUNDAMENTALES = True",
+                            "DESCARGAR_FUNDAMENTALES = False")
+
+    def correr(exigir: bool) -> str | None:
+        ns = {"pd": pd, "escala": lambda *a, **k: "", "TICKERS": ["AAPL"],
+              "market_data": {"instruments": []}}
+        codigo = fuente.replace("EXIGIR_FUNDAMENTALES = True",
+                                f"EXIGIR_FUNDAMENTALES = {exigir}")
+        try:
+            exec(compile(codigo, "<fundamentales>", "exec"), ns)
+        except RuntimeError as exc:
+            return str(exc)
+        return None
+
+    detenida = correr(True)
+    check("an empty store stops the run", detenida is not None
+          and "CORRIDA DETENIDA" in detenida, str(detenida))
+    check("and the switch lets it run without them on purpose",
+          correr(False) is None)
+
+
 def test_embedded_engine_is_current() -> None:
     """The embedded tarball must contain byte-identical module sources."""
     import base64
@@ -264,6 +303,20 @@ def _no_network(tickers, **kw):
     raise AssertionError(f'fetch_metadata reached the network for {tickers}')
 
 _ya.fetch_metadata = _no_network
+
+# La celda de estres baja la historia de los proxies de 2007 a 2022. Aqui es
+# sintetica: lo que se prueba es el camino, no el numero de 2008.
+def _historia_falsa(tickers, start, end):
+    import pandas as _pd
+    _idx = _pd.bdate_range(start, end)
+    _rng = _np.random.default_rng(5)
+    _vol = {'SPY': 0.012, 'HYG': 0.006, 'GLD': 0.010}
+    return _pd.DataFrame(
+        {t: 100.0 * _np.cumprod(1.0 + _rng.normal(0.0002, _vol.get(t, 0.004),
+                                                  len(_idx)))
+         for t in tickers}, index=_idx)
+
+_ya.fetch_history = _historia_falsa
 print(f'{len(market_data["instruments"])} instrumentos (fixture offline)')
 """
 
@@ -598,10 +651,35 @@ def test_cells_execute() -> None:
     wb = openpyxl.load_workbook(workbook)
     check("workbook has the documented sheets",
           set(wb.sheetnames) == {"Ranking", "Bloques", "Perfiles", "Views BL",
-                                 "Cartera", "Sectores", "Riesgo", "Cesta",
-                                 "Universo", "Cobertura", "Fundamentales",
-                                 "Parametros"},
+                                 "Cartera", "Sectores", "Riesgo", "Estres",
+                                 "Sensibilidad", "Cesta", "Universo",
+                                 "Cobertura", "Fundamentales",
+                                 "Pendientes_Comite", "Parametros"},
           f"got {wb.sheetnames}")
+
+    # --- lo que pidió el review de largo plazo ---------------------------
+    estres = [r for r in wb["Estres"].iter_rows(min_row=1, values_only=True)]
+    check("the stress sheet covers the three windows",
+          estres and {"Crisis 2008", "COVID 2020", "Inflación 2022"}
+          <= set(estres[0]), str(estres[:1]))
+    check("the stress sheet stresses the run's book and every Modelo",
+          len(estres) - 1 == 1 + len(namespace["REGULACIONES"]),
+          str([r[0] for r in estres]))
+    sens = [r for r in wb["Sensibilidad"].iter_rows(min_row=2, values_only=True)]
+    check("sensitivity moves IC, tau and lambda one at a time",
+          {r[0] for r in sens} == {"base", "IC", "τ", "λ"}, str(sens[:3]))
+    pend = [r for r in wb["Pendientes_Comite"].iter_rows(min_row=2, values_only=True)]
+    check("the Comité's open items are one sheet, not scattered notes",
+          len(pend) > 20 and any("SATELITE_MAX" in str(r[1]) for r in pend))
+    params_rev = {r[0]: r[1] for r in
+                  wb["Parametros"].iter_rows(min_row=2, values_only=True)}
+    check("the risk-free rate carries its source",
+          "Fuente de la tasa libre de riesgo" in params_rev)
+    check("the engine version is recorded",
+          len(str(params_rev.get("Motor (SHA-256 del paquete embebido)", ""))) == 64)
+    corridas = list((Path(workdir) / "corridas").glob("*/market_data.json.gz"))
+    check("the run saved its exact data snapshot for reproduction",
+          len(corridas) == 1, str(corridas))
     # La hoja que faltaba: sin ella los ratios no se pueden auditar contra el
     # 10-K que los produjo, y una corrida real llegó al comité sin ella.
     encabezados = [c.value for c in wb["Fundamentales"][1]]

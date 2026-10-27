@@ -618,6 +618,58 @@ def default_universe(include: Iterable[str] = ("SP500", "NDX", "DJIA", "ETF"),
     return sorted(t.replace(".", "-") for t in out)
 
 
+#: Letra del Tesoro a 13 semanas en Yahoo: rendimiento de descuento, en %.
+TICKER_TASA_CORTA = "^IRX"
+
+
+def _cierres(frame: pd.DataFrame) -> pd.DataFrame:
+    """Cierres de un ``yf.download``, con o sin columnas MultiIndex."""
+    if isinstance(frame.columns, pd.MultiIndex):
+        nivel = "Close" if "Close" in frame.columns.get_level_values(0) else "Adj Close"
+        return frame.xs(nivel, axis=1, level=0)
+    return frame[["Close"]] if "Close" in frame.columns else frame
+
+
+def fetch_risk_free(fallback: float, *, ticker: str = TICKER_TASA_CORTA,
+                    download=None) -> tuple[float, str]:
+    """
+    Tasa libre de riesgo de mercado con su fecha, o la manual si no se puede.
+
+    Devuelve ``(tasa, fuente)``. El review encontró el 4,9% tecleado sin fecha
+    en una celda: un Sharpe calculado contra una tasa vieja está mal por
+    exactamente lo que la tasa se movió, y la hoja de Parámetros no decía de
+    cuándo era. Ahora la fuente viaja con el número, y si la descarga falla la
+    corrida sigue con la manual y lo dice en vez de detenerse.
+    """
+    try:
+        if download is None:
+            import yfinance as yf
+
+            def download():
+                return yf.download(ticker, period="1mo", interval="1d",
+                                   progress=False, auto_adjust=False)
+        cierres = _cierres(download())
+        serie = pd.to_numeric(cierres.iloc[:, 0], errors="coerce").dropna()
+        valor = float(serie.iloc[-1]) / 100.0
+        if not 0.0 <= valor < 0.25:
+            raise ValueError(f"valor fuera de rango: {valor:.4f}")
+        fecha = pd.Timestamp(serie.index[-1]).date().isoformat()
+        return valor, f"{ticker} (letra del Tesoro a 13 semanas), cierre del {fecha}"
+    except Exception as exc:  # noqa: BLE001 - se reporta y se sigue con la manual
+        return float(fallback), (f"manual {float(fallback):.2%}, sin fecha de "
+                                 f"mercado: no se pudo bajar {ticker} "
+                                 f"({type(exc).__name__})")
+
+
+def fetch_history(tickers: Sequence[str], start: str, end: str) -> pd.DataFrame:
+    """Cierres ajustados diarios entre ``start`` y ``end``, un ticker por columna."""
+    import yfinance as yf
+
+    frame = yf.download(list(tickers), start=start, end=end, interval="1d",
+                        auto_adjust=True, progress=False)
+    return _cierres(frame).astype("float64")
+
+
 def con_nucleo(tickers: Iterable[str]) -> tuple[list[str], list[str]]:
     """
     El universo elegido más los vehículos núcleo que el mandato necesita.
