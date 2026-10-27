@@ -618,6 +618,23 @@ def default_universe(include: Iterable[str] = ("SP500", "NDX", "DJIA", "ETF"),
     return sorted(t.replace(".", "-") for t in out)
 
 
+def con_nucleo(tickers: Iterable[str]) -> tuple[list[str], list[str]]:
+    """
+    El universo elegido más los vehículos núcleo que el mandato necesita.
+
+    Devuelve ``(tickers, agregados)``. Lo que se agrega es renta fija, efectivo
+    y los ETFs núcleo de renta variable (:data:`~screener.cci_regulation.
+    UNIVERSO_NUCLEO`): sin ellos un universo "Solo acciones" deja todos los
+    mandatos sin solución, porque ninguno puede tener 100% en renta variable.
+    """
+    from .cci_regulation import UNIVERSO_NUCLEO
+
+    base = [t.upper() for t in tickers]
+    presentes = set(base)
+    agregados = [t for t in UNIVERSO_NUCLEO if t not in presentes]
+    return sorted(presentes | set(agregados)), agregados
+
+
 def fetch_market_data(tickers: Sequence[str] | None = None, *,
                       benchmark: str = BENCHMARK_TICKER,
                       risk_free_rate: float = RISK_FREE_RATE,

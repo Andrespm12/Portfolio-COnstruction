@@ -106,6 +106,7 @@ PARES_AUTOMATICOS = True
 # --- Cartera --------------------------------------------------------------
 TOP_N_CARTERA = 25             # menos nombres = covarianza mejor estimada
 ANCLA = "politica"             # politica | mercado  (ver el documento maestro)
+NUCLEO_SATELITE = True         # el ancla vive en ETFs índice; las views, en el satélite
 POSICION_MINIMA = 0.01         # posición mínima ejecutable; 0 la desactiva
 
 # --- Salida ---------------------------------------------------------------
@@ -178,6 +179,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    default=True,
                    help="No forzar las exposiciones núcleo en la cesta; "
                         "vuelve al comportamiento de solo top-N por puntaje.")
+    p.add_argument("--sin-satelite", dest="nucleo_satelite", action="store_false",
+                   default=NUCLEO_SATELITE,
+                   help="No separar núcleo de satélite: el ancla reparte la "
+                        "renta variable por capitalización entre todo lo que "
+                        "haya en la cesta, acciones incluidas, y nada topa lo "
+                        "que las views pueden mover.")
     p.add_argument("--sin-tope-sectorial", action="store_true",
                    help="Medir la concentración sectorial pero no restringirla.")
     p.add_argument("--sin-coherencia-views", dest="coherencia_views",
@@ -239,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         ALLOW_LEVERAGE, RISK_AVERSION, core_vehicles, gross_budget,
         allocation_table, drawdown_metrics, implied_equilibrium, market_weights,
         optimize, policy_weights, posterior, risk_profile_table, select_basket,
+        split_core_satellite,
         shrunk_covariance,
     )
     from screener.descarga import sincronizar
@@ -252,7 +260,8 @@ def main(argv: list[str] | None = None) -> int:
     from screener.seleccion import tabla as tabla_seleccion
     from screener.tuning import reset_all
     from screener.yahoo_adapter import (
-        coverage_report, daily_returns, default_universe, fetch_market_caps,
+        con_nucleo, coverage_report, daily_returns, default_universe,
+        fetch_market_caps,
         fetch_market_data,
     )
 
@@ -274,6 +283,17 @@ def main(argv: list[str] | None = None) -> int:
                   "       en tu lista pasaría el filtro de producto. Considera --con-nombres.")
     else:
         tickers = default_universe(_GRUPOS[args.universo], benchmark=args.benchmark)
+
+    # Renta fija, efectivo y los ETFs núcleo entran siempre. El universo dice
+    # dónde buscar ideas; no puede quitarle al mandato las clases que exige su
+    # política. Con "acciones" la cesta quedaba 100% renta variable y ningún
+    # mandato tenía solución.
+    tickers, agregados_nucleo = con_nucleo(tickers)
+    if agregados_nucleo:
+        print(f"Núcleo agregado al universo: {len(agregados_nucleo)} vehículo(s) "
+              f"de renta fija, efectivo y renta variable indexada "
+              f"({', '.join(agregados_nucleo[:8])}"
+              f"{' ...' if len(agregados_nucleo) > 8 else ''}).")
 
     print(f"{len(tickers)} tickers  |  benchmark {args.benchmark}  |  "
           f"{args.periodo} de historia diaria")
@@ -518,9 +538,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {n}")
     if notas_cesta:
         print()
+    # Con núcleo–satélite una view solo puede nacer en el satélite: una señal
+    # de momentum de 6-12 meses sobre un ETF de bonos o sobre SPY movería el
+    # núcleo estratégico. La contraparte de un par sí puede ser núcleo.
+    sujetos = None
+    if args.nucleo_satelite:
+        _, sujetos, _ = split_core_satellite(
+            {r.ticker: r.asset_type for r in scored})
     views = build_views(scored, market_data, strategy=args.estrategia,
                         reference_map=REFERENCIAS,
-                        pair_pool=cartera_tickers, params=params)
+                        pair_pool=cartera_tickers, params=params,
+                        subjects=sujetos)
     cesta = build_basket(scored, strategy=args.estrategia, reference_map=REFERENCIAS)
 
     print(f"{len(views)} views para {args.estrategia} "
@@ -575,9 +603,19 @@ def main(argv: list[str] | None = None) -> int:
     # optimizador devuelve el ancla" siga siendo cierto.
     presupuesto = gross_budget(args.estrategia)
 
+    # Núcleo y satélite. El núcleo es el Modelo de Asignación en ETFs índice y
+    # renta fija; el satélite (acciones, ETFs no núcleo, materias primas) es lo
+    # único que las views mueven, y tiene techo por mandato.
+    nucleo_cesta = satelite_cesta = None
+    if args.nucleo_satelite and args.ancla == "politica":
+        nucleo_cesta, satelite_cesta, notas_ns = split_core_satellite(tipos_cesta)
+        for n in notas_ns:
+            print(f"  {n}")
+
     if args.ancla == "politica":
         pesos_ancla, notas_ancla = policy_weights(
-            tipos_cesta, args.estrategia, caps=capitalizaciones, total=presupuesto)
+            tipos_cesta, args.estrategia, caps=capitalizaciones, total=presupuesto,
+            core=nucleo_cesta)
         for n in notas_ancla:
             print(f"  {n}")
     else:
@@ -622,13 +660,16 @@ def main(argv: list[str] | None = None) -> int:
                        sector_cap=(None if args.sin_tope_sectorial else "auto"),
                        views=views,
                        enforce_view_coherence=args.coherencia_views,
-                       anchor=pesos_ancla, prior=pi)
+                       anchor=pesos_ancla, prior=pi, satellite=satelite_cesta)
 
     print(f"\n{args.estrategia}  |  estado: {cartera.status}")
     print(f"Exposición bruta   {cartera.gross_exposure:.1%}")
     print(f"Retorno esperado   {cartera.expected_return:+.2%} anual")
     print(f"Volatilidad        {cartera.volatility:.1%} anual")
     print(f"Posiciones         {int((cartera.weights > 0).sum())}")
+    if cartera.satellite_cap is not None:
+        print(f"Satélite           {cartera.satellite_exposure:.1%} "
+              f"(techo {cartera.satellite_cap:.1%})")
 
     print("\nPor clase de activo")
     for clase, peso in cartera.by_class.items():
@@ -675,20 +716,24 @@ def main(argv: list[str] | None = None) -> int:
     riesgo_df, notas_riesgo = risk_profile_table(
         covarianza, tipos_cesta, capitalizaciones, views, returns=retornos,
         sector_weights=(None if args.sin_tope_sectorial else mapa_sectores),
-        min_position=args.posicion_minima or None)
-    print(riesgo_df[["estrategia", "lambda", "retorno_esperado", "volatilidad",
-                     "vol_min_objetivo", "vol_max_objetivo", "max_drawdown",
-                     "caida_1a_95", "posiciones"]].to_string(
+        min_position=args.posicion_minima or None, core=nucleo_cesta)
+    print(riesgo_df[["estrategia", "estado", "lambda", "retorno_esperado",
+                     "volatilidad", "vol_min_objetivo", "vol_max_objetivo",
+                     "max_drawdown", "caida_1a_95", "satelite", "satelite_max",
+                     "posiciones"]].to_string(
         index=False,
         formatters={c: "{:.2%}".format for c in
                     ("retorno_esperado", "volatilidad", "vol_min_objetivo",
-                     "vol_max_objetivo", "max_drawdown", "caida_1a_95")}))
+                     "vol_max_objetivo", "max_drawdown", "caida_1a_95",
+                     "satelite", "satelite_max")}))
     if notas_riesgo:
         print()
         for n in notas_riesgo:
             print(f"  AVISO: {n}")
     else:
         print("\n  Riesgo y retorno crecen con el perfil, como debe ser.")
+    for _, fila in riesgo_df[riesgo_df["motivo"] != ""].iterrows():
+        print(f"  SIN SOLUCIÓN {fila['estrategia']}: {fila['motivo']}")
 
     # La concentración sectorial pasó de dato a restricción, así que tiene que
     # viajar en el libro que lee el comité, con el techo al lado y no en una
@@ -792,6 +837,18 @@ def main(argv: list[str] | None = None) -> int:
         ("Posición mínima",
          f"{args.posicion_minima:.2%}" if args.posicion_minima else "sin mínimo"),
         ("Núcleo indexado forzado en la cesta", "sí" if args.nucleo else "no"),
+        ("Núcleo agregado al universo",
+         ", ".join(agregados_nucleo) or "ya estaba completo"),
+        ("Núcleo–satélite", "sí" if satelite_cesta is not None else "no"),
+        ("Techo del satélite",
+         f"{cartera.satellite_cap:.1%}" if cartera.satellite_cap is not None
+         else "sin techo"),
+        ("Satélite en la cartera",
+         f"{cartera.satellite_exposure:.2%}" if satelite_cesta is not None
+         else "no aplica"),
+        ("Nota sobre el satélite",
+         "techo = TE máximo del mandato / 20% de volatilidad activa; número de "
+         "la mesa, pendiente del Comité"),
         ("Núcleo — vehículo por exposición",
          " | ".join(f"{e}: {t}" for e, t in
                     core_vehicles(scored)[0].items()) or "ninguno disponible"),

@@ -181,6 +181,22 @@ if ('Volume', 'DBC') in _frame.columns:
     # the list, so a hardcoded volume silently drifts out of that window the
     # moment a ticker is added ahead of it, which is exactly what happened.
     _frame[('Volume', 'DBC')] = 25_000_000.0 / float(_frame[('Close', 'DBC')].mean())
+# Three tech names and GLD with a clean uptrend, so the screener ranks them on
+# top and their views go long. Under the core-satellite split the anchor holds
+# only index funds and bonds; a single name reaches the book only through a
+# view. Without a deliberate winner the satellite would come out empty and the
+# checks below -- the sector ceiling binding on Technology, a name held both
+# directly and inside a fund, GLD as the fund with no composition -- would all
+# depend on which random walk each ticker drew, which is how they broke when
+# the always-on core added thirty tickers ahead of them in the list.
+import numpy as _np
+# GLD's trend is milder: enough for a long view, not enough to take the whole
+# satellite and leave Technology under its ceiling.
+for _t, _fin in (('AAPL', 4.0), ('MSFT', 4.0), ('NVDA', 4.0), ('GLD', 1.6)):
+    _tendencia = _np.geomspace(1.0, _fin, len(_frame))
+    for _campo in ('Close', 'Adj Close', 'High', 'Low'):
+        if (_campo, _t) in _frame.columns:
+            _frame[(_campo, _t)] = _frame[(_campo, _t)] * _tendencia
 # Sectors for the single names. Without them the sector ceiling has nothing to
 # bind on for the equity sleeve, and the test would pass on a constraint that
 # never constrained anything. Four of the five are Technology on purpose: that
@@ -205,9 +221,13 @@ _ya.fetch_market_caps = lambda tickers, **kw: {
 # Same for the transparency cell, which downloads ETF composition. The stub
 # writes the same shape of file the real downloader writes -- partial holdings
 # plus the _RESTO row -- so the look-through path runs for real offline. GLD
-# gets no file: a fund the source does not cover has to come out declared as
-# opaque, not silently dropped.
+# and the bond and cash funds get no file, which is what Yahoo does with them
+# in practice (their holdings are bond issues, not equity issuers): a fund the
+# source does not cover has to come out declared as opaque, not silently
+# dropped. The always-on core guarantees some of those are in the book.
 import screener.tenencias_yahoo as _ty
+from screener.cci_regulation import ASSET_CLASS as _AC, CLASES_DEFENSIVAS as _CD
+SIN_COMPOSICION = {'GLD'} | {_t for _t, _c in _AC.items() if _c in _CD}
 
 def _fake_download(tickers, destino, **kw):
     from pathlib import Path as _P
@@ -216,7 +236,7 @@ def _fake_download(tickers, destino, **kw):
     destino.mkdir(parents=True, exist_ok=True)
     ok, failed = [], []
     for tk in tickers:
-        if tk == 'GLD':
+        if tk in SIN_COMPOSICION:
             failed.append(tk)
             continue
         rows = _ty.filas_con_resto(dict(holdings))
@@ -416,6 +436,21 @@ def test_cells_execute() -> None:
                 f'ALMACEN_FUNDAMENTALES = "{almacen}"')
             fund_patched += 1
     check("the fundamentals cell exposes the store path", fund_patched == 1)
+
+    # La composición de los ETFs va a /content/tenencias si /content existe, y
+    # la suite misma lo crea. Desde la segunda corrida en el mismo contenedor
+    # el notebook reutilizaba archivos que escribió una versión anterior del
+    # fixture, y las pruebas de transparencia medían eso. Aquí va al directorio
+    # de la corrida, que es nuevo cada vez.
+    ten_patched = 0
+    for i, source in enumerate(cells):
+        if "DIR_TENENCIAS = (Path('/content')" in source:
+            cells[i] = source.replace(
+                "DIR_TENENCIAS = (Path('/content') if Path('/content').is_dir()\n"
+                "                 else Path('.')) / 'tenencias'",
+                "DIR_TENENCIAS = Path('.') / 'tenencias'")
+            ten_patched += cells[i] != source
+    check("the holdings cell exposes its directory", ten_patched == 1)
 
     namespace: dict = {"__name__": "__main__"}
     rendered: list[str] = []
@@ -698,8 +733,10 @@ def test_cells_execute() -> None:
     check("no sector exceeds the ceiling",
           all(v <= sector_cap + 1e-6 for v in cuotas.values()),
           str({k: f"{v:.1%}" for k, v in cuotas.items() if v > sector_cap}))
+    # A una décima de punto del techo: es lo que el solver entrega cuando la
+    # restricción está activa.
     check("the ceiling actually binds on this fixture",
-          any(v > sector_cap - 1e-6 for v in cuotas.values()),
+          any(v > sector_cap - 1e-3 for v in cuotas.values()),
           f"el mayor sector llega a {max(cuotas.values(), default=0):.1%} del "
           f"sleeve contra un tope de {sector_cap:.0%}: no prueba nada")
 
@@ -726,9 +763,16 @@ def test_cells_execute() -> None:
     check("the risk table reports an expected drawdown, not only volatility",
           "max_drawdown" in riesgo and riesgo["max_drawdown"].notna().any())
     viables = riesgo[riesgo["retorno_esperado"].notna()]
-    check("risk rises with the profile",
-          list(viables["volatilidad"]) == sorted(viables["volatilidad"]),
-          str(list(viables["volatilidad"])))
+    # Mismo contrato que el retorno esperado, abajo: sobre este fixture
+    # sintético los retornos no crecen con la volatilidad, y la segunda pasada
+    # (que maximiza retorno bajo el techo de tracking error) puede dejar a un
+    # mandato más volátil que el siguiente. Si pasa, la corrida tiene que
+    # decirlo. La ordenación estricta vive en test_riesgo_perfil.py.
+    vols = list(viables["volatilidad"])
+    check("risk either rises with the profile or is flagged",
+          vols == sorted(vols)
+          or any("riesgo NO crece" in n for n in namespace.get("_notas_riesgo", [])),
+          f"{vols} y ninguna nota lo reportó")
     # El contrato real no es que la escalera nunca se invierta — sobre un
     # fixture sintético de doce nombres, donde el proxy de renta fija es tan
     # volátil como las acciones, no puede sostenerse. El contrato es que si se
@@ -788,9 +832,11 @@ def test_cells_execute() -> None:
 
     check("look-through reports coverage below 100% rather than assuming it",
           0.0 < coverage < 1.0, f"coverage {coverage:.2f}")
+    opacos = [t for t in namespace["_pesos_cartera"]
+              if t in namespace["SIN_COMPOSICION"]]
     check("a fund with no composition is declared, not silently dropped",
-          any("GLD" in n for n in notes),
-          "GLD has no file in the fixture and must be named as a blind spot")
+          opacos and any(t in n for n in notes for t in opacos),
+          f"{opacos} have no file in the fixture and must be named as blind spots")
     check("the undetailed remainder is carried as _RESTO, not normalized away",
           exposure.get("_RESTO", 0.0) > 0.0,
           "without _RESTO the listed holdings inflate and the cap test lies")

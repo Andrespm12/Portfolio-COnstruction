@@ -188,18 +188,19 @@ def test_lo_no_cubierto_se_reporta_como_hueco():
 
 
 def test_un_tope_imposible_explica_por_que_no_hay_cartera():
-    # Dos sectores, tope del 10% cada uno: entre los dos no llegan al 100% que
-    # hay que invertir, así que no existe solución. Sin el tope sí la hay, y esa
-    # es exactamente la diferencia que el diagnóstico tiene que nombrar en vez
-    # de devolver un "infeasible" pelado.
-    tickers = ["AAPL", "MSFT", "NVDA", "TLT", "AGG", "BIL"]
-    tipos = {t: ("STOCK" if t in ("AAPL", "MSFT", "NVDA") else "ETF")
-             for t in tickers}
-    sectores = {"AAPL": "Technology", "MSFT": "Technology",
-                "NVDA": "Technology", "TLT": "Government",
-                "AGG": "Government", "BIL": "Government"}
+    # Toda la renta variable es Technology y el tope es 10% del sleeve, así que
+    # la única forma de cumplirlo es no tener renta variable. Lo único que no
+    # es renta variable es oro, con techo de 25% en Agresivo: no llega al 100%
+    # que hay que invertir. Sin el tope sí hay solución, y esa es exactamente
+    # la diferencia que el diagnóstico tiene que nombrar en vez de devolver un
+    # "infeasible" pelado.
+    # Sin el tope el libro se llena: hasta 70% en acciones (su banda), 80% de
+    # renta variable en total con XLK, y el resto en oro.
+    tickers = ["AAPL", "MSFT", "NVDA", "AVGO", "XLK", "GLD"]
+    tipos = {t: ("ETF" if t in ("XLK", "GLD") else "STOCK") for t in tickers}
+    sectores = {t: "Technology" for t in ("AAPL", "MSFT", "NVDA", "AVGO")}
     mu = pd.Series({t: 0.06 for t in tickers})
-    mapa, _, _ = sector_map(tickers, {}, sectores)
+    mapa, _, _ = sector_map(tickers, {"XLK": {"Technology": 1.0}}, sectores)
 
     libre = optimize(mu, covarianza(tickers), tipos, "Agresivo",
                      min_position=None, sector_weights=mapa, sector_cap=None)
@@ -209,6 +210,27 @@ def test_un_tope_imposible_explica_por_que_no_hay_cartera():
                      min_position=None, sector_weights=mapa, sector_cap=0.10)
     assert not alloc.feasible
     assert any("tope sectorial" in b for b in alloc.breaches), alloc.breaches
+
+
+def test_la_renta_fija_no_cuenta_para_el_tope_sectorial():
+    # El tope es fracción del sleeve de renta variable. Un ETF de bonos con un
+    # "sector" (Yahoo a veces lo trae; un corporativo tiene emisores por
+    # industria) sumaba al numerador sin estar en el denominador: con 70% en
+    # bonos "Government" y un tope de 10%, ningún libro cumplía. Antes de que
+    # la renta fija entrara siempre a la cesta eso casi no se veía.
+    tickers = ["AAPL", "JNJ", "XOM", "TLT", "AGG", "BIL"]
+    tipos = {t: ("STOCK" if t in ("AAPL", "JNJ", "XOM") else "ETF")
+             for t in tickers}
+    sectores = {"AAPL": "Technology", "JNJ": "Healthcare", "XOM": "Energy",
+                "TLT": "Government", "AGG": "Government", "BIL": "Government"}
+    mu = pd.Series({t: 0.06 for t in tickers})
+    mapa, _, _ = sector_map(tickers, {}, sectores)
+
+    alloc = optimize(mu, covarianza(tickers), tipos, "Conservador_Defensivo",
+                     min_position=None, sector_weights=mapa, sector_cap=0.40)
+    assert alloc.feasible, alloc.breaches
+    assert "Government" not in alloc.sector_exposure
+    assert alloc.by_class.drop(["Equity"], errors="ignore").sum() > 0.5
 
 
 def test_el_mapa_no_arrastra_nombres_fuera_del_problema():

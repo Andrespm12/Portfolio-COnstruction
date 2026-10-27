@@ -272,15 +272,33 @@ def apply_risk_gates(rows: list[ScoredInstrument]) -> list[ScoredInstrument]:
                 row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
                 gates.append("TREND: below 40W MA with negative 12M-1M momentum")
 
-        # Amplifier: deep drawdown history combined with high market beta.
-        mdd, beta = m.get("max_drawdown"), m.get("beta_1y")
-        if mdd is not None and beta is not None:
-            if -mdd <= GATES.max_drawdown_limit and beta > GATES.beta_limit:
-                row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
-                gates.append(
-                    f"RISK: {mdd:.0%} max drawdown with {beta:.2f} beta -- "
-                    "drawdown depth and market sensitivity compound"
-                )
+        # Beta and drawdown are two gates, not one. They used to be a single
+        # conjunction -- cap only when the name had *both* a drawdown past the
+        # limit *and* a beta above it -- while every label the Comité reads
+        # ("Beta máxima 1.80", "Drawdown que activa el gate") presents each as
+        # a ceiling on its own. Under the conjunction the Agresivo run kept INTC
+        # (beta 3.33), MU (2.80) and STX (2.65) at Overweight, because none of
+        # them had also fallen 60% within the year. A beta of 3.3 is the
+        # exposure a "Beta máxima" exists to stop whatever the drawdown was.
+        #
+        # Beta is withheld (None) when the regression on the benchmark is not
+        # significant, so this gate only reads betas the model believes.
+        beta = m.get("beta_1y")
+        if beta is not None and beta > GATES.beta_limit:
+            row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
+            gates.append(
+                f"BETA: {beta:.2f} sobre la beta máxima de {GATES.beta_limit:.2f} "
+                "del perfil"
+            )
+
+        # ``max_drawdown`` is stored as a positive depth; the limit is negative.
+        mdd = m.get("max_drawdown")
+        if mdd is not None and -mdd <= GATES.max_drawdown_limit:
+            row.recommendation = _cap(row.recommendation, MARKET_WEIGHT)
+            gates.append(
+                f"DRAWDOWN: {-mdd:.0%} en el año, más profundo que el límite de "
+                f"{GATES.max_drawdown_limit:.0%} del perfil"
+            )
 
         # Redundancy: already held AND highly correlated to the current book.
         corr, existing = m.get("corr_to_portfolio"), m.get("existing_overlap")

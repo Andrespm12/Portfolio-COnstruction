@@ -416,6 +416,40 @@ def tracking_error_objetivo_for(strategy: str) -> tuple[float, float] | None:
     return None if valor is None else (float(valor[0]), float(valor[1]))
 
 
+#: Volatilidad activa de un satélite de selección de acciones contra el núcleo
+#: que reemplaza. Una canasta concentrada de 10-25 nombres elegidos por
+#: momentum se separa de su índice en el orden de 15-25% anual; 20% es el
+#: punto medio y es el supuesto que convierte el presupuesto de tracking error
+#: en un tope de peso. Supuesto de la mesa, pendiente del Comité.
+VOL_ACTIVA_SATELITE = 0.20
+
+#: Peso máximo del satélite (todo lo que no es núcleo) por mandato.
+#:
+#: El review de la cartera de largo plazo lo pidió explícito: el screener es un
+#: motor táctico de 3-12 meses y sus views no deben poder desplazar la
+#: asignación estratégica. El núcleo es el Modelo de Asignación con ETFs
+#: indexados por clase; el satélite son las acciones individuales, los ETFs
+#: que no son vehículo núcleo y las materias primas, y es lo único que las
+#: views pueden mover.
+#:
+#: No se escoge: se deriva. Un satélite lleno, con ``VOL_ACTIVA_SATELITE`` de
+#: riesgo activo, no debe poder por sí solo agotar el techo de
+#: :data:`TRACKING_ERROR_OBJETIVO`. Así, 1,5% / 2,0% / 3,5% / 6,0% de TE
+#: máximo entre 20% dan 7,5% / 10% / 17,5% / 30% — dentro del rango que sugirió
+#: el review (≈0-10% Conservador Defensivo a ≈25-35% Agresivo). Si el Comité
+#: cambia el presupuesto de TE o el supuesto, el tope se mueve con ellos.
+SATELITE_MAX: dict[str, float] = {
+    estrategia: round(te_max / VOL_ACTIVA_SATELITE, 4)
+    for estrategia, (_te_min, te_max) in TRACKING_ERROR_OBJETIVO.items()
+}
+
+
+def satelite_max_for(strategy: str) -> float | None:
+    """Peso máximo del satélite del mandato, o ``None`` si no hay tope."""
+    valor = SATELITE_MAX.get(strategy)
+    return None if valor is None else float(valor)
+
+
 def riesgo_de_asignacion(pesos_por_clase: Mapping[str, float]
                          ) -> tuple[float, float]:
     """
@@ -529,6 +563,27 @@ ASSET_CLASS: dict[str, str] = {
     **{t: "Efectivo_MM" for t in _EFECTIVO},
     **{t: CLASE_COMMODITIES for t in _COMMODITIES},
 }
+
+#: Clases de renta fija y efectivo: las que el Modelo de Asignación pone fuera
+#: de renta variable. Las materias primas no están: el Modelo no las tiene, así
+#: que el oro es una apuesta y va en el satélite.
+CLASES_DEFENSIVAS: frozenset[str] = frozenset(
+    c for c in ASSET_CLASS.values() if c != CLASE_COMMODITIES)
+
+#: Vehículos que toda corrida descarga y puntúa, se elija el universo que se
+#: elija.
+#:
+#: Sale del review: con UNIVERSO = "Solo acciones" la cesta quedó 100% renta
+#: variable, el Agresivo topa la renta variable en 80% y hay que invertir el
+#: 100%, así que el solver devolvió infactible -- y los perfiles conservadores,
+#: con 60-80% en bonos y efectivo en el Modelo, fallan peor. El universo
+#: elegido describe dónde buscar ideas; no puede quitarle al mandato las clases
+#: que su política exige. Incluye los vehículos núcleo de renta variable por la
+#: misma razón: sin ETFs en el universo, el núcleo no tendría con qué llenarse.
+UNIVERSO_NUCLEO: tuple[str, ...] = tuple(sorted(
+    {t for t, c in ASSET_CLASS.items() if c in CLASES_DEFENSIVAS}
+    | {t for vehiculos in EXPOSICIONES_NUCLEO.values() for t in vehiculos}
+))
 
 
 def classify_for_bands(ticker: str, asset_type: str) -> str:

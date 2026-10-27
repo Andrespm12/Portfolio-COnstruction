@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -443,7 +444,17 @@ def test_el_almacen_se_puede_empaquetar(corrida):
 def test_el_notebook_no_lee_datos_de_cuenta():
     # Misma regla que el notebook principal: este trabajo es independiente de
     # cualquier cartera. Un fundamental no tiene por qué saber qué tienes.
-    texto = NOTEBOOK.read_text(encoding="utf-8").lower()
+    #
+    # Sin el motor embebido: es base64, y en base64 cualquier secuencia de
+    # cuatro letras aparece tarde o temprano. Una reconstrucción produjo
+    # "IbKR" dentro del paquete y la prueba falló sin que el notebook dijera
+    # nada de ninguna cuenta. El motor tiene sus propias pruebas.
+    base64 = re.compile(r'^\s*"[A-Za-z0-9+/=]{40,}"\s*$')
+    nb = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
+    texto = "\n".join(
+        linea for celda in nb["cells"]
+        for linea in "".join(celda["source"]).splitlines()
+        if not base64.match(linea)).lower()
     for prohibido in ("ibkr", "interactive brokers", "portfolio_ibkr",
                       "account_id", "flex_token"):
         assert prohibido not in texto, prohibido

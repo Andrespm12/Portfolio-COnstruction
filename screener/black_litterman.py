@@ -371,7 +371,8 @@ def build_views(scored: Sequence[ScoredInstrument],
                 strategy: str,
                 reference_map: Mapping[str, str] | None = None,
                 pair_pool: Iterable[str] | None = None,
-                params: ViewParams = DEFAULT_PARAMS) -> list[dict]:
+                params: ViewParams = DEFAULT_PARAMS,
+                subjects: Iterable[str] | None = None) -> list[dict]:
     """
     Translate a scored cross-section into Black-Litterman views.
 
@@ -393,6 +394,12 @@ def build_views(scored: Sequence[ScoredInstrument],
     deletes it, and the name burns one of the ``max_views`` slots on the way
     out. Left as None the whole cross-section is eligible, which is only safe
     when the caller intends to optimize over all of it.
+
+    ``subjects`` limits which names may *originate* a view; a peer can still be
+    anything in ``pair_pool``. Pass the satellite under a core–satellite split:
+    the screener's signals decay in months, and a view on a bond fund or a
+    broad index ETF would move the strategic core on a momentum reading -- the
+    exact thing the split exists to stop.
     """
     if strategy not in CCI_STRATEGIES:
         raise KeyError(
@@ -411,8 +418,12 @@ def build_views(scored: Sequence[ScoredInstrument],
         wanted = {t.upper() for t in pair_pool}
         pool = [r for r in scored if r.ticker in wanted]
 
+    allowed = None if subjects is None else {t.upper() for t in subjects}
+
     candidates: list[dict] = []
     for row in scored:
+        if allowed is not None and row.ticker.upper() not in allowed:
+            continue
         if not np.isfinite(row.composite_z) or abs(row.composite_z) < params.min_abs_z:
             continue
 

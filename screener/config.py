@@ -418,8 +418,10 @@ class RiskGates:
     #: Cannot be Overweight no matter how cheap or high-carry it looks.
     trend_gate_enabled: bool = True
 
-    #: High drawdown + high beta => caps at Market Weight. The combination
-    #: means the name will amplify exactly the risk the book already carries.
+    #: Two independent ceilings, each capping at Market Weight on its own: a
+    #: one-year drawdown deeper than ``max_drawdown_limit``, and a beta above
+    #: ``beta_limit``. (They were once a single gate that needed both, which
+    #: let a beta of 3.3 through whenever the drawdown stayed shallow.)
     max_drawdown_limit: float = -0.45
     beta_limit: float = 1.30
 

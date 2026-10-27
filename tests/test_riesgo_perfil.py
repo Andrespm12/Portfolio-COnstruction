@@ -274,6 +274,22 @@ def test_la_tabla_resuelve_los_cuatro_mandatos(mercado):
                 "caida_1a_95", "lambda"]) <= set(tabla.columns)
 
 
+def test_un_perfil_sin_solucion_no_tumba_la_tabla(mercado):
+    # La corrida del review: UNIVERSO = "Solo acciones" deja la cesta sin
+    # renta fija ni efectivo, ningún mandato resuelve, y la celda moría con
+    # KeyError: 'max_drawdown' en vez de decir por qué.
+    ret, cov, tipos, caps = mercado
+    solo_rv = ["AAA", "BBB", "CCC", "SPY"]
+    tabla, _ = risk_profile_table(cov.loc[solo_rv, solo_rv],
+                                  {t: tipos[t] for t in solo_rv}, caps, [],
+                                  returns=ret[solo_rv], min_position=None)
+    assert {"max_drawdown", "peor_12m", "caida_1a_95", "motivo"} <= set(tabla.columns)
+    fallidas = tabla[tabla["retorno_esperado"].isna()]
+    assert not fallidas.empty, "una cesta sin renta fija debería dejar mandatos sin solución"
+    assert fallidas["max_drawdown"].isna().all()
+    assert (fallidas["motivo"].str.len() > 0).all(), list(fallidas["motivo"])
+
+
 def test_la_tabla_usa_el_lambda_de_cada_mandato(mercado):
     ret, cov, tipos, caps = mercado
     tabla, _ = risk_profile_table(cov, tipos, caps, [], returns=ret,
@@ -341,3 +357,17 @@ def test_el_equilibrio_no_usa_el_lambda_del_cliente(mercado):
     retornos = list(tabla["retorno_esperado"])
     assert retornos == sorted(retornos), (
         f"el retorno esperado tiene que crecer con el perfil: {retornos}")
+
+
+def test_un_tipo_de_view_desconocido_es_un_error(mercado):
+    # "absoluta" se descartaba en silencio: la cartera cambiaba sin decirlo.
+    # Las dos concordancias valen; cualquier otra cosa tiene que fallar.
+    ret, cov, tipos, caps = mercado
+    ancla, _ = policy_weights(tipos, "Moderado", caps=caps)
+    pi = implied_equilibrium(ancla, cov, risk_aversion=RISK_AVERSION)
+    for tipo in ("absoluto", "absoluta"):
+        er, _ = posterior(pi, cov, [{"tipo": tipo, "activo": "AAA", "Q": 0.20,
+                                     "conviccion": 0.8}])
+        assert er["AAA"] > pi["AAA"] + 1e-4, tipo
+    with pytest.raises(ValueError, match="absolutoo"):
+        posterior(pi, cov, [{"tipo": "absolutoo", "activo": "AAA", "Q": 0.20}])

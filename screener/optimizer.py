@@ -52,11 +52,11 @@ import numpy as np
 import pandas as pd
 
 from .cci_regulation import (
-    CLASE_EQUITY, CLASE_ETF_RV, EXCLUSIONES_DURAS, EXPOSICIONES_NUCLEO,
-    GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES, RISK_TARGETS,
-    SECTOR_CAPS, bands_for, clase_a_grupo, classify_for_bands,
+    CLASE_EQUITY, CLASE_ETF_RV, CLASES_DEFENSIVAS, EXCLUSIONES_DURAS,
+    EXPOSICIONES_NUCLEO, GRUPOS_ASIGNACION, MODELO_ASIGNACION, REGULACIONES,
+    RISK_TARGETS, SECTOR_CAPS, bands_for, clase_a_grupo, classify_for_bands,
     drawdown_tolerado_for, retorno_esperado_for, risk_aversion_for,
-    tracking_error_objetivo_for, unbanded_classes,
+    satelite_max_for, tracking_error_objetivo_for, unbanded_classes,
 )
 
 #: Risk aversion of the **market**, for the equilibrium ``pi = delta * Sigma * w``.
@@ -327,7 +327,8 @@ def _model_targets(strategy: str, present: list[str],
 def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
                    caps: Mapping[str, float] | None = None,
                    targets: Mapping[str, float] | None = None,
-                   total: float = 1.0) -> tuple[pd.Series, list[str]]:
+                   total: float = 1.0,
+                   core: Iterable[str] | None = None) -> tuple[pd.Series, list[str]]:
     """
     The mandate's own neutral portfolio, for use as the Black-Litterman anchor.
 
@@ -396,11 +397,39 @@ def policy_weights(asset_types: Mapping[str, str], strategy: str, *,
     which a genuine SAA would not. Supplying ``targets`` removes the effect
     entirely, and is the reason the parameter exists.
 
+    Núcleo y satélite
+    -----------------
+    With ``core``, the anchor is built on those names alone and every other
+    name anchors at zero. Without it, the equity line splits by market value
+    across everything in the basket -- and single-stock market caps are in the
+    trillions while index-fund AUM is in the hundreds of billions, so the
+    "neutral" equity sleeve came out mostly single names. That is a strategic
+    allocation run by the screener's ranking, which is what the long-term
+    review objected to. With a core the neutral portfolio is the Modelo de
+    Asignación held in index vehicles, and single names reach the book only
+    through views, inside the satellite's ceiling.
+
     Returns the weights and a list of notes describing every substitution made.
     """
     tickers = list(asset_types)
     if not tickers:
         raise ValueError("No hay activos para anclar el equilibrio.")
+
+    if core is not None:
+        nucleo = {str(t) for t in core} & set(tickers)
+        if not nucleo:
+            raise ValueError("El núcleo no tiene ningún nombre de la cesta.")
+        pesos, notas = policy_weights(
+            {t: asset_types[t] for t in tickers if t in nucleo}, strategy,
+            caps=caps, targets=targets, total=total)
+        fuera = len(tickers) - len(nucleo)
+        if fuera:
+            notas.append(
+                f"Ancla construida sobre el núcleo ({len(nucleo)} vehículos); "
+                f"los {fuera} nombres del satélite anclan en 0 y solo entran "
+                "por sus views."
+            )
+        return pesos.reindex(tickers, fill_value=0.0), notas
 
     notes: list[str] = []
     classes = {t: classify_for_bands(t, asset_types[t]) for t in tickers}
@@ -639,6 +668,18 @@ def implied_equilibrium(weights: pd.Series, covariance: pd.DataFrame,
 # Bayesian posterior
 # --------------------------------------------------------------------------
 
+def _tipo_view(view: Mapping[str, Any]) -> str:
+    """``"absoluto"`` o ``"relativo"``; cualquier otro tipo es un error."""
+    tipo = view.get("tipo")
+    if tipo in ("absoluto", "absoluta"):
+        return "absoluto"
+    if tipo in ("relativo", "relativa"):
+        return "relativo"
+    raise ValueError(
+        f"View con tipo {tipo!r}: se acepta 'absoluto' o 'relativo'."
+    )
+
+
 def posterior(pi: pd.Series, covariance: pd.DataFrame,
               views: Sequence[Mapping[str, Any]],
               tau: float = TAU) -> tuple[pd.Series, pd.DataFrame]:
@@ -659,7 +700,13 @@ def posterior(pi: pd.Series, covariance: pd.DataFrame,
 
     usable = []
     for view in views:
-        legs = ([view.get("activo")] if view.get("tipo") == "absoluto"
+        # Un tipo mal escrito no es un ticker fuera del universo: descartarlo en
+        # silencio cambia la cartera sin decirlo. "absoluta" se leía como una
+        # view relativa sin patas y desaparecía, y un test de la suite corría
+        # así sin que nadie lo notara. Se aceptan las dos concordancias, como
+        # en relative_view_pairs, y cualquier otra cosa es un error.
+        tipo = _tipo_view(view)
+        legs = ([view.get("activo")] if tipo == "absoluto"
                 else [view.get("activo_long"), view.get("activo_short")])
         if all(leg in assets for leg in legs):
             usable.append(view)
@@ -673,7 +720,7 @@ def posterior(pi: pd.Series, covariance: pd.DataFrame,
 
     for i, view in enumerate(usable):
         Q[i] = float(view["Q"])
-        if view["tipo"] == "absoluto":
+        if _tipo_view(view) == "absoluto":
             P[i, assets.index(view["activo"])] = 1.0
         else:
             P[i, assets.index(view["activo_long"])] = 1.0
@@ -764,6 +811,15 @@ def _score_of(row: Any) -> float | None:
     return None if value != value else value      # descarta NaN
 
 
+def _adv_of(row: Any) -> float | None:
+    """Volumen diario en USD del diagnóstico, o ``None``."""
+    try:
+        value = float((getattr(row, "diagnostics", None) or {}).get("adv_usd"))
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) and value > 0 else None
+
+
 def _fmt_score(row: Any) -> str:
     score = _score_of(row)
     return "sin score" if score is None else f"{score:.0f}"
@@ -773,6 +829,56 @@ def _rank_of(row: Any) -> float:
     """Sort key that prefers a higher score; missing scores sort last."""
     score = _score_of(row)
     return float("inf") if score is None else -score
+
+
+def split_core_satellite(asset_types: Mapping[str, str],
+                         core_equity: Iterable[str] | None = None
+                         ) -> tuple[set[str], set[str], list[str]]:
+    """
+    Separa la cesta en núcleo y satélite. Devuelve ``(núcleo, satélite, notas)``.
+
+    *Núcleo*: toda la renta fija y el efectivo, más los ETFs índice de renta
+    variable de :data:`~screener.cci_regulation.EXPOSICIONES_NUCLEO` (todos
+    los candidatos por defecto, o los que se pasen en ``core_equity``). Es el
+    Modelo de Asignación implementado con índices, y se queda quieto por años.
+    SPY e IVV son la misma exposición: el que no ganó su línea no se vuelve
+    una apuesta del satélite por eso.
+
+    *Satélite*: las acciones individuales, los ETFs de renta variable que no
+    son vehículo núcleo (sectoriales, país, factor) y las materias primas, que
+    el Modelo no tiene. Es lo que el screener y las views mueven.
+
+    Sin ningún vehículo núcleo de renta variable en la cesta no se separa: un
+    núcleo sin renta variable dejaría la línea de acciones del Modelo sin con
+    qué llenarse y el satélite no podría cubrirla bajo su techo. Se reporta.
+    """
+    if core_equity is None:
+        core_equity = [t for vehiculos in EXPOSICIONES_NUCLEO.values()
+                       for t in vehiculos]
+    nucleo_rv = {str(t).upper() for t in core_equity}
+    nucleo: set[str] = set()
+    satelite: set[str] = set()
+    for ticker, tipo in asset_types.items():
+        clase = classify_for_bands(ticker, tipo)
+        if clase in CLASES_DEFENSIVAS or ticker.upper() in nucleo_rv:
+            nucleo.add(ticker)
+        else:
+            satelite.add(ticker)
+
+    notas: list[str] = []
+    rv_en_nucleo = [t for t in nucleo
+                    if classify_for_bands(t, asset_types[t]) in EQUITY_CLASSES]
+    if satelite and not rv_en_nucleo:
+        notas.append(
+            "La cesta no tiene ningún vehículo núcleo de renta variable "
+            f"({', '.join(sorted(nucleo_rv)) or 'ninguno elegido'}), así que no "
+            "se separa núcleo de satélite: toda la renta variable queda en el "
+            "núcleo, como antes. Agrega SPY u otro ETF amplio al universo."
+        )
+        nucleo |= {t for t in satelite
+                   if classify_for_bands(t, asset_types[t]) in EQUITY_CLASSES}
+        satelite -= nucleo
+    return nucleo, satelite, notas
 
 
 def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
@@ -800,6 +906,10 @@ def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
     three and the run read as "the model rejected broad index exposure". It had
     never been offered any. A momentum ranking decides what runs *well*; it must
     not also decide what is *available*, or the core is a momentum artifact.
+
+    Rule 3 fills fixed income and cash by traded volume rather than by score:
+    those classes are the strategic core, chosen for cost and tracking, and a
+    momentum composite says nothing about either.
 
     Rule 3 exists for a different failure. Under Moderado total equity caps at
     60% while the book must be roughly fully invested, so an all-equity basket
@@ -833,9 +943,19 @@ def select_basket(scored: Sequence[Any], strategy: str, top_n: int = 25,
         clase = classify_for_bands(row.ticker, getattr(row, "asset_type", "ETF"))
         by_class.setdefault(clase, []).append(row.ticker)
 
+    adv = {r.ticker: _adv_of(r) for r in ranked}
     for clase, members in by_class.items():
         if clase not in bands_for(strategy):
             continue
+        if clase in CLASES_DEFENSIVAS:
+            # Renta fija y efectivo se eligen por liquidez, no por el score.
+            # El score es momentum, Sharpe y volatilidad contra todo el
+            # universo, y en un bono eso premia la duración del último año,
+            # no el vehículo. Estos son núcleo y se quedan años: lo que
+            # importa es costo y seguimiento, y el volumen negociado es el
+            # mejor sustituto disponible (los fondos más grandes tienen el
+            # spread más estrecho y casi siempre la comisión más baja).
+            members = sorted(members, key=lambda t: -(adv.get(t) or 0.0))
         present = sum(1 for t in members if t in chosen)
         for ticker in members:
             if present >= min_per_class:
@@ -911,6 +1031,10 @@ class Allocation:
     #: expectation rather than a limit. Mixing them would make a compliance
     #: signal fire on a number the Committee has not even approved yet.
     risk_findings: list[str] = field(default_factory=list)
+    #: Nombres del satélite y su techo, vacíos cuando la corrida no separa
+    #: núcleo de satélite.
+    satellite: frozenset[str] = frozenset()
+    satellite_cap: float | None = None
 
     @property
     def feasible(self) -> bool:
@@ -927,6 +1051,11 @@ class Allocation:
         """
         return float(sum(float(self.by_class.get(c, 0.0) or 0.0)
                          for c in EQUITY_CLASSES))
+
+    @property
+    def satellite_exposure(self) -> float:
+        """Peso del libro fuera del núcleo: lo que las views pueden mover."""
+        return float(sum(float(self.weights.get(t, 0.0)) for t in self.satellite))
 
 
 def relative_view_pairs(views: Sequence[Mapping[str, Any]],
@@ -1049,7 +1178,9 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
              enforce_view_coherence: bool = True,
              risk_budget: tuple[float, float] | None | str = "auto",
              anchor: pd.Series | None = None,
-             prior: pd.Series | None = None) -> Allocation:
+             prior: pd.Series | None = None,
+             satellite: Iterable[str] | None = None,
+             satellite_cap: float | None | str = "auto") -> Allocation:
     """
     Maximize ``w'mu - (lambda/2) w'Sigma w`` under CCI's Investment Procedure.
 
@@ -1106,6 +1237,13 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
     ``min_position`` drops holdings too small to be worth executing; see
     :data:`MIN_POSITION`. Pass ``None`` to keep whatever the solver produces.
+
+    ``satellite`` names the instruments outside the strategic core (see
+    :func:`split_core_satellite`). Their combined weight is capped at
+    ``satellite_cap``, which defaults to the mandate's
+    :data:`~screener.cci_regulation.SATELITE_MAX`. Without it nothing stops a
+    run of strong single-name views from crowding out the Modelo de Asignación
+    the core is there to hold.
     """
     import cvxpy as cp
 
@@ -1172,10 +1310,17 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     if sector_cap == "auto":
         sector_cap = SECTOR_CAPS.get(strategy)
     sectors: dict[str, dict[str, float]] = {}
+    # Solo renta variable. El tope es fracción del sleeve de renta variable, así
+    # que el numerador tiene que salir del mismo sleeve: un ETF de bonos con un
+    # desglose "sectorial" (Yahoo a veces lo trae, y un corporativo sí tiene
+    # emisores por industria) sumaba al numerador sin estar en el denominador,
+    # y con la renta fija siempre en la cesta eso bastaba para dejar sin
+    # solución a un mandato conservador.
     if sector_weights:
         for sector, members in sector_weights.items():
             fila = {t: float(s) for t, s in members.items()
-                    if t in set(tickers) and float(s) > 0}
+                    if t in set(tickers) and float(s) > 0
+                    and classes[t] in EQUITY_CLASSES}
             if fila:
                 sectors[sector] = fila
 
@@ -1222,7 +1367,28 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             + "; ".join(f"{a}>={b}" for a, b in pairs)
         )
 
+    # --- Core / satellite ------------------------------------------------
+    satelite = sorted({str(t) for t in (satellite or ())} & set(tickers))
+    if satellite_cap == "auto":
+        satellite_cap = satelite_max_for(strategy) if satellite is not None else None
+    if satellite is not None:
+        if satellite_cap is None:
+            notes.append(
+                f"Satélite de {len(satelite)} nombre(s) identificado pero SIN "
+                f"tope: SATELITE_MAX[{strategy!r}] no existe."
+            )
+        else:
+            notes.append(
+                f"Satélite (acciones, ETFs fuera del núcleo y materias primas) "
+                f"topado en {satellite_cap:.1%} del libro para {strategy}, sobre "
+                f"{len(satelite)} candidato(s). El resto es el núcleo del Modelo "
+                "de Asignación. Tope derivado del presupuesto de tracking error: "
+                "pendiente del Comité."
+            )
+
     # --- Risk budget -----------------------------------------------------
+    te_obj = tracking_error_objetivo_for(strategy)
+    te_techo = te_obj[1] if te_obj else None
     if risk_budget == "auto":
         risk_budget = RISK_TARGETS.get(strategy)
     piso_vol, techo_vol = risk_budget if risk_budget else (None, None)
@@ -1241,6 +1407,7 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
 
     def solve(banned: frozenset[str], with_sectors: bool = True,
               with_views: bool = True, with_vol: bool = True,
+              with_satellite: bool = True,
               mode: str = "utility") -> tuple[np.ndarray | None, str]:
         """Solve the mandate's problem with ``banned`` names forced to zero."""
         w = cp.Variable(len(tickers))
@@ -1296,6 +1463,11 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
             for largo, corto in pairs:
                 constraints.append(w[posicion[largo]] >= w[posicion[corto]])
 
+        # El satélite, junto, no pasa de su techo. Lineal: no cuesta nada.
+        if with_satellite and satelite and satellite_cap is not None:
+            constraints.append(
+                cp.sum(w[[posicion[t] for t in satelite]]) <= float(satellite_cap))
+
         # El techo solo restringe la segunda pasada, la que gasta el
         # presupuesto de riesgo. En la primera no va: un techo que la cesta no
         # puede cumplir devolvería cero cartera, y ademas rompe la propiedad de
@@ -1303,6 +1475,16 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         if with_vol and mode == "max_return" and techo_vol is not None:
             constraints.append(
                 cp.quad_form(w, cp.psd_wrap(sigma)) <= float(techo_vol) ** 2)
+
+        # La segunda pasada maximiza retorno, y sin esto lo hacía en cualquier
+        # parte del libro: con el satélite topado, igual podía reescribir el
+        # núcleo a una esquina (una corrida de prueba salió con 48% en un solo
+        # ETF de pequeña capitalización). Gastar el presupuesto de riesgo no
+        # puede costar la asignación estratégica, así que esa pasada respeta
+        # el techo de tracking error del mandato contra el ancla.
+        if mode == "max_return" and w_ancla is not None and te_techo is not None:
+            constraints.append(
+                cp.quad_form(w - w_ancla, cp.psd_wrap(sigma)) <= float(te_techo) ** 2)
 
         if mode == "utility" and w_ancla is not None:
             # Riesgo ACTIVO contra el ancla, no riesgo total.
@@ -1369,6 +1551,13 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                 "pata larga no puede alcanzar a su corta bajo las bandas — "
                 "revisa esa view antes de apagar la restricción.",
                 {"with_views": False}))
+        if satelite and satellite_cap is not None:
+            culpables.append((
+                f"El techo del satélite ({satellite_cap:.1%}) es lo que deja la "
+                "cartera sin solución: sin él sí resuelve. El núcleo de la cesta "
+                "no alcanza a cubrir lo que el mandato exige — falta algún "
+                "vehículo núcleo de renta fija, efectivo o renta variable.",
+                {"with_satellite": False}))
 
         for mensaje, kwargs in culpables:
             if solve(frozenset(), **kwargs)[0] is not None:
@@ -1385,7 +1574,9 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         return Allocation(pd.Series(0.0, index=tickers), strategy,
                           status or "infeasible", 0.0, 0.0, 0.0,
                           pd.Series(dtype=float),
-                          breaches=reasons, notes=notes)
+                          breaches=reasons, notes=notes,
+                          satellite=frozenset(satelite),
+                          satellite_cap=satellite_cap)
 
     # --- Minimum position size ------------------------------------------
     #
@@ -1468,7 +1659,11 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
                     f"{annual_vol(solution):.2%} de volatilidad, por debajo del "
                     f"piso de {piso_vol:.1%} de {strategy}. Se resolvió otra vez "
                     f"maximizando retorno contra el techo de "
-                    f"{float(techo_vol):.1%}, y quedó en {annual_vol(alterna):.2%}. "
+                    f"{float(techo_vol):.1%}"
+                    + (f" y el tracking error máximo de {float(te_techo):.1%} "
+                       "contra el ancla"
+                       if w_ancla is not None and te_techo is not None else "")
+                    + f", y quedó en {annual_vol(alterna):.2%}. "
                     "El presupuesto de riesgo del mandato es parte del objetivo, "
                     "no solo un límite."
                 )
@@ -1490,6 +1685,8 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
         volatility=float(np.sqrt(max(variance, 0.0))),
         by_class=by_class,
         notes=notes,
+        satellite=frozenset(satelite),
+        satellite_cap=satellite_cap,
     )
     allocation.breaches = audit_bands(allocation, classes)
     # Checked after the fact even though the solver was given the same ceiling:
@@ -1499,6 +1696,12 @@ def optimize(expected_returns: pd.Series, covariance: pd.DataFrame,
     allocation.breaches += audit_sectors(allocation.weights, sectors,
                                          sector_cap, classes)
     allocation.breaches += view_coherence_breaches(allocation.weights, pairs)
+    if satellite_cap is not None and (
+            allocation.satellite_exposure > float(satellite_cap) + 1e-4):
+        allocation.breaches.append(
+            f"Satélite en {allocation.satellite_exposure:.2%}, sobre su techo de "
+            f"{float(satellite_cap):.1%}."
+        )
 
     # El piso de volatilidad no se puede imponer -- es convexo al revés -- así
     # que aquí es donde se detecta. Una cartera por debajo del piso de su
@@ -1657,6 +1860,7 @@ def risk_profile_table(covariance: pd.DataFrame,
                        sector_weights: Mapping[str, Mapping[str, float]] | None = None,
                        strategies: Sequence[str] = tuple(REGULACIONES),
                        min_position: float | None = MIN_POSITION,
+                       core: Iterable[str] | None = None,
                        ) -> tuple[pd.DataFrame, list[str]]:
     """
     Retorno y riesgo esperados de los cuatro mandatos, resueltos de verdad.
@@ -1675,7 +1879,7 @@ def risk_profile_table(covariance: pd.DataFrame,
     for estrategia in strategies:
         presupuesto = gross_budget(estrategia)
         ancla, _ = policy_weights(asset_types, estrategia, caps=caps,
-                                  total=presupuesto)
+                                  total=presupuesto, core=core)
         # El equilibrio usa el lambda del MERCADO, no el del cliente. Son dos
         # cosas distintas y confundirlas rompe la comparación: pi = delta*Sigma*w
         # describe qué retornos hacen del portafolio de mercado un óptimo para
@@ -1687,10 +1891,12 @@ def risk_profile_table(covariance: pd.DataFrame,
         pi = implied_equilibrium(ancla, covariance, risk_aversion=RISK_AVERSION)
         er, cov_post = posterior(pi, covariance, views)
         lam = risk_aversion_for(estrategia, RISK_AVERSION)
+        satelite = (None if core is None else
+                    [t for t in covariance.columns if t not in set(core)])
         alloc = optimize(er, cov_post, asset_types, estrategia,
                          min_position=min_position,
                          sector_weights=sector_weights, views=views,
-                         anchor=ancla, prior=pi)
+                         anchor=ancla, prior=pi, satellite=satelite)
 
         piso, techo = RISK_TARGETS.get(estrategia, (float("nan"),) * 2)
         te = tracking_error(alloc.weights, ancla, cov_post) \
@@ -1713,9 +1919,22 @@ def risk_profile_table(covariance: pd.DataFrame,
             "te_min_objetivo": te_obj[0],
             "te_max_objetivo": te_obj[1],
             "dd_tolerado": drawdown_tolerado_for(estrategia),
+            "satelite": alloc.satellite_exposure if alloc.feasible else float("nan"),
+            "satelite_max": (float("nan") if alloc.satellite_cap is None
+                             else alloc.satellite_cap),
             "posiciones": int((alloc.weights > WEIGHT_EPS).sum()),
             "incumplimientos": " | ".join(alloc.breaches),
             "riesgo_vs_mandato": " | ".join(alloc.risk_findings) or "dentro del rango",
+            # Las columnas existen siempre, con NaN si no hay cartera. Antes
+            # salían de drawdown_metrics, que devuelve {} sin pesos, y un
+            # perfil infactible tumbaba la celda con KeyError: max_drawdown
+            # justo cuando más hacía falta ver por qué.
+            "max_drawdown": float("nan"),
+            "peor_12m": float("nan"),
+            "caida_1a_95": float("nan"),
+            # Una cartera sin solución trae su diagnóstico en ``breaches``.
+            "motivo": "" if alloc.feasible else (
+                " | ".join(alloc.breaches[:2]) or alloc.status),
         }
         fila.update(drawdown_metrics(alloc.weights, returns))
         # Pérdida anual que solo se supera 1 año de cada 20, bajo normalidad.

@@ -249,6 +249,50 @@ def test_gates_only_downgrade():
           f"{row.recommendation}: {row.gates_triggered}")
 
 
+def test_beta_and_drawdown_gates_fire_independently():
+    """
+    "Beta máxima" is a ceiling on beta, not on beta-and-drawdown together.
+
+    Regression for the Agresivo run in the review: INTC at beta 3.33 stayed
+    Overweight under a 1.80 limit because the old gate also required a 60%
+    drawdown. Each condition now caps on its own, and a name inside both limits
+    is left alone.
+    """
+    from screener import tuning
+    from screener.profiles import AGRESIVO, apply_profile
+    from screener.scoring import apply_risk_gates
+
+    def gated(beta, mdd):
+        m = {"beta_1y": beta, "max_drawdown": mdd, "mom_12_1": 0.30,
+             "sharpe_1y": 1.5, "above_40w_ma": 0.10, "volatility_1y": 0.40}
+        row = ScoredInstrument("X", "X", "STOCK", ["SP500"], "Test", m)
+        row.composite_z = 2.0
+        row.recommendation = row.pre_gate_recommendation = OVERWEIGHT
+        apply_risk_gates([row])
+        return row.recommendation, [g.split(":")[0] for g in row.gates_triggered]
+
+    apply_profile(AGRESIVO)
+    try:
+        rec, fired = gated(beta=3.33, mdd=0.35)
+        assert rec == MARKET_WEIGHT and fired == ["BETA"], (rec, fired)
+
+        rec, fired = gated(beta=0.90, mdd=0.65)
+        assert rec == MARKET_WEIGHT and fired == ["DRAWDOWN"], (rec, fired)
+
+        rec, fired = gated(beta=2.10, mdd=0.70)
+        assert rec == MARKET_WEIGHT and fired == ["BETA", "DRAWDOWN"], (rec, fired)
+
+        rec, fired = gated(beta=1.20, mdd=0.40)
+        assert rec == OVERWEIGHT and fired == [], (rec, fired)
+
+        # A withheld beta (regression not significant) cannot trip the gate.
+        rec, fired = gated(beta=None, mdd=0.40)
+        assert rec == OVERWEIGHT and fired == [], (rec, fired)
+    finally:
+        tuning.reset_all()
+    print("PASS beta and drawdown gates each cap on their own")
+
+
 def test_missing_data_renormalizes_not_zeros():
     """
     A name missing an entire block must not be scored as if that block were
@@ -681,8 +725,11 @@ def test_quality_floor_does_not_touch_a_healthy_universe():
 
     def overweights(**gate_changes):
         tuning.reset_all()
-        if gate_changes:
-            tuning.override("GATES", **gate_changes)
+        # The fixture's best names are its highest-beta ones (beta rises with
+        # alpha by construction), so the beta ceiling would cap them on both
+        # sides of the comparison and leave nothing for the floor to touch.
+        # This test is about the floor; the beta gate has its own.
+        tuning.override("GATES", beta_limit=float("inf"), **gate_changes)
         try:
             scored = run_scoring_pipeline(_cross_section(0.0))
             return [r.ticker for r in scored if r.recommendation == OVERWEIGHT]
